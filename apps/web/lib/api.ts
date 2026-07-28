@@ -15,6 +15,10 @@ export type AIConfig = {
   embedding_model: string | null;
   timeout_seconds: number;
   prompt_version: string;
+  embedding_provider: 'disabled' | 'openai' | 'ollama';
+  embedding_base_url: string | null;
+  has_embedding_api_key: boolean;
+  embedding_timeout_seconds: number;
   updated_at: string | null;
 };
 
@@ -34,6 +38,11 @@ export type AIConfigPayload = {
   api_key?: string;
   timeout_seconds?: number;
   embedding_model?: string | null;
+  embedding_provider?: 'disabled' | 'openai' | 'ollama';
+  embedding_base_url?: string | null;
+  embedding_api_key_action?: 'keep' | 'replace' | 'clear';
+  embedding_api_key?: string;
+  embedding_timeout_seconds?: number;
 };
 
 export type AITestResult = {
@@ -54,6 +63,17 @@ export async function fetchAIModels(): Promise<AIModelsResponse> {
   });
   if (!response.ok) {
     throw new Error(await extractErrorMessage(response, '获取模型列表失败'));
+  }
+  return parseJson<AIModelsResponse>(response);
+}
+
+export async function fetchEmbeddingModels(): Promise<AIModelsResponse> {
+  const response = await fetch('/api/settings/ai/embedding/models', {
+    cache: 'no-store',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '获取 Embedding 模型列表失败'));
   }
   return parseJson<AIModelsResponse>(response);
 }

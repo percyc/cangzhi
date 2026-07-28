@@ -140,6 +140,17 @@ class AIConfigUpdate(BaseModel):
     api_key: str | None = Field(default=None, max_length=512)
     timeout_seconds: int | None = Field(default=None, ge=1, le=600)
     embedding_model: str | None = Field(default=None, max_length=255)
+    # --- Independent embedding channel (ADR-015 phase 1) ---------------
+    # The embedding side carries its own provider, base URL, API key
+    # and timeout. Older clients that do not send these fields leave
+    # the previously-saved values alone. The new fields mirror the
+    # chat-side surface intentionally so the front-end can re-use the
+    # same input widgets.
+    embedding_provider: str | None = Field(default=None, max_length=16)
+    embedding_base_url: str | None = Field(default=None, max_length=512)
+    embedding_api_key_action: str = Field(default="keep", max_length=16)
+    embedding_api_key: str | None = Field(default=None, max_length=512)
+    embedding_timeout_seconds: int | None = Field(default=None, ge=1, le=600)
 
     @field_validator("provider")
     @classmethod
@@ -167,6 +178,31 @@ class AIConfigUpdate(BaseModel):
             return None
         if len(cleaned) > 200:
             raise ValueError("Embedding 模型名称不能超过 200 个字符")
+        return cleaned
+
+    @field_validator("embedding_provider")
+    @classmethod
+    def _embedding_provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if cleaned not in _PROVIDER_VALUES:
+            raise ValueError("不支持的 Embedding 模型来源")
+        return cleaned
+
+    @field_validator("embedding_base_url")
+    @classmethod
+    def _embedding_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_url(value)
+
+    @field_validator("embedding_api_key_action")
+    @classmethod
+    def _embedding_api_key_action(cls, value: str) -> str:
+        cleaned = (value or "keep").strip().lower()
+        if cleaned not in {"keep", "replace", "clear"}:
+            raise ValueError("不支持的 Embedding 密钥操作")
         return cleaned
 
 
@@ -360,6 +396,93 @@ async def update_settings(
         row.ollama_base_url = payload.ollama.base_url
         row.ollama_model = payload.ollama.model or None
     row.updated_by = admin.id
+
+    # --- Independent embedding channel (ADR-015 phase 1) ---------------
+    # The new fields are independent of the chat path. We only touch
+    # what the client actually sent so a partial update never wipes
+    # the rest of the configuration.
+    if "embedding_provider" in payload.model_fields_set:
+        embedding_provider = payload.embedding_provider or "disabled"
+        if embedding_provider == "openai":
+            url = payload.embedding_base_url
+            if not url:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "embedding_openai_missing",
+                        "message": "请填写 Embedding 服务的 OpenAI 兼容地址",
+                    },
+                )
+            row.embedding_provider = "openai"
+            row.embedding_base_url = url
+        elif embedding_provider == "ollama":
+            url = payload.embedding_base_url
+            if not url:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "embedding_ollama_missing",
+                        "message": "请填写 Embedding 服务的 Ollama 地址",
+                    },
+                )
+            row.embedding_provider = "ollama"
+            row.embedding_base_url = url
+        else:
+            # "disabled": turn the embedding channel off but keep the
+            # last-known model name so the user does not lose work.
+            row.embedding_provider = "disabled"
+            # The base URL is kept around for UX (the page pre-fills
+            # the last working address when the user re-enables) but
+            # the API key is wiped because the cipher is no longer
+            # protected by a matching provider.
+            action = payload.embedding_api_key_action
+            if action == "replace":
+                if not payload.embedding_api_key:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "embedding_api_key_required",
+                            "message": "请输入要保存的 Embedding 密钥",
+                        },
+                    )
+                row.embedding_api_key_cipher = encrypt_secret(
+                    payload.embedding_api_key
+                )
+                row.has_embedding_api_key = True
+            elif action == "clear":
+                row.embedding_api_key_cipher = None
+                row.has_embedding_api_key = False
+    elif "embedding_base_url" in payload.model_fields_set:
+        # Allow the front-end to update the URL without flipping the
+        # provider flag when the user is just changing the host.
+        if payload.embedding_base_url:
+            row.embedding_base_url = payload.embedding_base_url
+    if "embedding_timeout_seconds" in payload.model_fields_set and (
+        payload.embedding_timeout_seconds is not None
+    ):
+        row.embedding_timeout_seconds = payload.embedding_timeout_seconds
+    if (
+        "embedding_api_key_action" in payload.model_fields_set
+        and row.embedding_provider == "openai"
+    ):
+        action = payload.embedding_api_key_action
+        if action == "replace":
+            if not payload.embedding_api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "embedding_api_key_required",
+                        "message": "请输入要保存的 Embedding 密钥",
+                    },
+                )
+            row.embedding_api_key_cipher = encrypt_secret(
+                payload.embedding_api_key
+            )
+            row.has_embedding_api_key = True
+        elif action == "clear":
+            row.embedding_api_key_cipher = None
+            row.has_embedding_api_key = False
+
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -610,44 +733,51 @@ async def test_embedding(
     the response carries a non-empty, finite numeric vector. The
     endpoint refuses with a clear message when:
 
-    * the AI provider is disabled;
+    * the embedding channel is disabled;
     * no embedding model has been selected yet;
     * the user picked an embedding model but the corresponding base
       URL or API key is missing.
+
+    The embedding side carries its own provider, base URL, API key
+    and timeout (ADR-015 phase 1) so the probe is wired to
+    ``embedding_*`` columns and is no longer affected by the chat
+    configuration.
     """
 
     row = await _get_or_create_config(db)
     if not row.embedding_model:
         return {"ok": False, "message": "尚未选择 Embedding 模型，留空即关闭"}
-    if row.provider == "disabled":
-        return {"ok": False, "message": "当前未启用任何模型来源"}
-    if row.provider == "openai":
-        if not row.openai_base_url:
-            return {"ok": False, "message": "尚未配置 OpenAI 兼容地址"}
-        if not row.has_api_key or not row.openai_api_key_cipher:
-            return {"ok": False, "message": "尚未保存 OpenAI 兼容密钥"}
+    if row.embedding_provider == "disabled":
+        return {"ok": False, "message": "Embedding 渠道未启用"}
+    if row.embedding_provider == "openai":
+        if not row.embedding_base_url:
+            return {"ok": False, "message": "尚未配置 Embedding 的 OpenAI 兼容地址"}
+        if not row.has_embedding_api_key or not row.embedding_api_key_cipher:
+            return {"ok": False, "message": "尚未保存 Embedding 的 OpenAI 兼容密钥"}
         try:
-            api_key = decrypt_secret(row.openai_api_key_cipher)
+            api_key = decrypt_secret(row.embedding_api_key_cipher)
         except (SecretStoreError, SecretDecryptError):
-            logger.warning("ai_embedding_test_decrypt_failed admin=%s", admin.username)
+            logger.warning(
+                "ai_embedding_test_decrypt_failed admin=%s", admin.username
+            )
             return {"ok": False, "message": "主密钥不匹配或密文已损坏，请联系管理员"}
         if not api_key:
-            return {"ok": False, "message": "尚未保存 OpenAI 兼容密钥"}
+            return {"ok": False, "message": "尚未保存 Embedding 的 OpenAI 兼容密钥"}
         return await _probe_openai_embedding(
-            base_url=row.openai_base_url,
+            base_url=row.embedding_base_url,
             model=row.embedding_model,
             api_key=api_key,
-            timeout=float(row.timeout_seconds or 30),
+            timeout=float(row.embedding_timeout_seconds or 30),
         )
-    if row.provider == "ollama":
-        if not row.ollama_base_url:
-            return {"ok": False, "message": "尚未配置 Ollama 地址"}
+    if row.embedding_provider == "ollama":
+        if not row.embedding_base_url:
+            return {"ok": False, "message": "尚未配置 Embedding 的 Ollama 地址"}
         return await _probe_ollama_embedding(
-            base_url=row.ollama_base_url,
+            base_url=row.embedding_base_url,
             model=row.embedding_model,
-            timeout=float(row.timeout_seconds or 30),
+            timeout=float(row.embedding_timeout_seconds or 30),
         )
-    return {"ok": False, "message": "不支持的模型来源"}
+    return {"ok": False, "message": "不支持的 Embedding 模型来源"}
 
 
 async def _probe_openai_embedding(
@@ -891,4 +1021,51 @@ async def list_models(
         "models": [{"id": model_id} for model_id in sorted_ids],
         "provider": row.provider,
         "current_model": current_model.strip(),
+    }
+
+
+@router.get("/embedding/models", response_model=dict[str, Any])
+async def list_embedding_models(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """List models from the saved, independent embedding channel."""
+
+    row = await _get_or_create_config(db)
+    timeout = float(row.embedding_timeout_seconds or 30)
+    if row.embedding_provider == "openai":
+        if not row.embedding_base_url:
+            raise HTTPException(status_code=400, detail="请先保存 Embedding 服务地址")
+        if not row.has_embedding_api_key or not row.embedding_api_key_cipher:
+            raise HTTPException(status_code=400, detail="请先保存 Embedding 密钥")
+        try:
+            api_key = decrypt_secret(row.embedding_api_key_cipher)
+        except (SecretStoreError, SecretDecryptError):
+            logger.warning("embedding_models_decrypt_failed admin=%s", admin.username)
+            raise HTTPException(status_code=500, detail="已保存的 Embedding 密钥无法读取") from None
+        model_ids = await _request_model_ids(
+            url=f"{row.embedding_base_url.rstrip('/')}/models",
+            timeout=timeout,
+            list_key="data",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+        )
+    elif row.embedding_provider == "ollama":
+        if not row.embedding_base_url:
+            raise HTTPException(status_code=400, detail="请先保存 Embedding 服务地址")
+        model_ids = await _request_model_ids(
+            url=f"{row.embedding_base_url.rstrip('/')}/api/tags",
+            timeout=timeout,
+            list_key="models",
+        )
+    else:
+        raise HTTPException(status_code=400, detail="Embedding 渠道尚未启用")
+
+    sorted_ids = sorted(set(model_ids), key=_natural_model_key)[:500]
+    return {
+        "models": [{"id": model_id} for model_id in sorted_ids],
+        "provider": row.embedding_provider,
+        "current_model": (row.embedding_model or "").strip(),
     }

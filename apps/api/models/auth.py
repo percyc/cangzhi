@@ -71,6 +71,24 @@ class AIRuntimeConfig(BaseModel):
     embedding_model = Column(String(255), nullable=True)
     timeout_seconds = Column(Integer, nullable=False, server_default=text("30"))
     prompt_version = Column(String(64), nullable=False, server_default=text("'v1'"))
+    # --- Independent embedding channel (ADR-015 phase 1) ---------------
+    # The embedding side carries its own provider, base URL, API key and
+    # timeout so swapping the chat provider (or rotating its key) does
+    # not affect the embedding pipeline and vice versa. The fields are
+    # additive: a user who never enabled embedding keeps seeing "off".
+    embedding_provider = Column(
+        String(16),
+        nullable=False,
+        server_default=text("'disabled'"),
+    )
+    embedding_base_url = Column(String(512), nullable=True)
+    embedding_api_key_cipher = Column(Text, nullable=True)
+    has_embedding_api_key = Column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    embedding_timeout_seconds = Column(
+        Integer, nullable=False, server_default=text("30")
+    )
     updated_by = Column(
         Integer,
         ForeignKey(
@@ -114,6 +132,10 @@ class AIRuntimeConfig(BaseModel):
             "embedding_model": self.embedding_model,
             "timeout_seconds": self.timeout_seconds,
             "prompt_version": self.prompt_version,
+            "embedding_provider": self.embedding_provider,
+            "embedding_base_url": self.embedding_base_url,
+            "has_embedding_api_key": bool(self.has_embedding_api_key),
+            "embedding_timeout_seconds": self.embedding_timeout_seconds,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 

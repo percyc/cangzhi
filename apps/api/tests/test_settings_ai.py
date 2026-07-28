@@ -892,7 +892,243 @@ def test_update_rejects_overly_long_embedding_model(client):
     assert response.status_code == 422
 
 
+# --- Independent embedding channel (ADR-015 phase 1) ----------------------
+
+
+def test_embedding_channel_fields_default_to_disabled_in_public_dict(client):
+    """The independent embedding channel defaults to ``disabled``
+    with no API key, no base URL, and a 30-second timeout. The
+    public response must always expose these fields so the front-end
+    can render the form without additional probes.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.get("/api/settings/ai")
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["embedding_provider"] == "disabled"
+    assert config["embedding_base_url"] is None
+    assert config["has_embedding_api_key"] is False
+    assert config["embedding_timeout_seconds"] == 30
+
+
+def test_update_can_set_and_clear_embedding_channel_openai(client):
+    """The PATCH endpoint accepts an independent ``embedding_*``
+    group. Setting ``embedding_provider`` to ``openai`` requires a
+    matching base URL, and the response mirrors every field back
+    so the front-end can re-render without an extra GET.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "replace",
+            "api_key": "sk-chat-aaaaaaaaaaaaaaaaaaaaa",
+            "embedding_model": "text-embedding-3-small",
+            "embedding_provider": "openai",
+            "embedding_base_url": "https://embed.example.com/v1",
+            "embedding_api_key_action": "replace",
+            "embedding_api_key": "sk-embed-aaaaaaaaaaaaaaaaaaaa",
+            "embedding_timeout_seconds": 45,
+        },
+    )
+    assert response.status_code == 200, response.text
+    config = response.json()["config"]
+    assert config["embedding_provider"] == "openai"
+    assert config["embedding_base_url"] == "https://embed.example.com/v1"
+    assert config["has_embedding_api_key"] is True
+    assert config["embedding_timeout_seconds"] == 45
+
+    # Persisted on disk and uses the embedding-side cipher, not the
+    # chat-side one.
+    async def _fetch():
+        async for db in app.dependency_overrides[get_db]():
+            return (await db.execute(select(AIRuntimeConfig))).scalars().first()
+
+    row = __import__("asyncio").run(_fetch())
+    assert row.embedding_provider == "openai"
+    assert row.embedding_base_url == "https://embed.example.com/v1"
+    assert row.has_embedding_api_key is True
+    assert row.embedding_timeout_seconds == 45
+    # The chat-side cipher is unrelated to the embedding-side cipher
+    # even when both happen to be OpenAI-shaped.
+    assert row.embedding_api_key_cipher != row.openai_api_key_cipher
+    assert decrypt_secret(row.embedding_api_key_cipher) == (
+        "sk-embed-aaaaaaaaaaaaaaaaaaaa"
+    )
+
+    # Switching the provider to ``ollama`` requires a fresh base URL
+    # but re-uses the same model name and keeps the timeout.
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "keep",
+            "embedding_provider": "ollama",
+            "embedding_base_url": "http://localhost:11434",
+        },
+    )
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["embedding_provider"] == "ollama"
+    assert config["embedding_base_url"] == "http://localhost:11434"
+    assert config["has_embedding_api_key"] is True  # cipher is kept for UX
+    assert config["embedding_timeout_seconds"] == 45
+
+    # Disabling the channel turns the provider flag off and leaves
+    # the rest of the row alone.
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "keep",
+            "embedding_provider": "disabled",
+            "embedding_api_key_action": "clear",
+        },
+    )
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["embedding_provider"] == "disabled"
+    assert config["has_embedding_api_key"] is False
+
+
+def test_update_rejects_embedding_provider_without_base_url(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "disabled",
+            "embedding_provider": "openai",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "embedding_openai_missing"
+
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "disabled",
+            "embedding_provider": "ollama",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "embedding_ollama_missing"
+
+
+def test_update_rejects_invalid_embedding_provider(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "disabled",
+            "embedding_provider": "unknown",
+            "embedding_base_url": "https://embed.example.com/v1",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_update_keeps_embedding_channel_when_not_specified(client):
+    """Older clients that omit the new fields must not wipe the
+    embedding channel. A PATCH without ``embedding_provider`` must
+    leave every ``embedding_*`` column at its previous value.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "replace",
+            "api_key": "sk-chat-keep-zzzzzzzzzzzzzzzz",
+            "embedding_provider": "openai",
+            "embedding_base_url": "https://embed.example.com/v1",
+            "embedding_api_key_action": "replace",
+            "embedding_api_key": "sk-embed-keep-zzzzzzzzzzzzzz",
+            "embedding_timeout_seconds": 90,
+        },
+    )
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "keep",
+        },
+    )
+    config = response.json()["config"]
+    assert config["embedding_provider"] == "openai"
+    assert config["embedding_base_url"] == "https://embed.example.com/v1"
+    assert config["has_embedding_api_key"] is True
+    assert config["embedding_timeout_seconds"] == 90
+
+
 # --- Embedding connection test --------------------------------------------
+
+
+def _configure_embedding_channel(
+    test_client,
+    *,
+    embedding_provider: str,
+    embedding_base_url: str,
+    embedding_model: str,
+    embedding_api_key: str | None = None,
+    embedding_timeout_seconds: int = 30,
+) -> None:
+    """Persist the independent embedding channel used by the probe.
+
+    The chat-side fields are kept as a placeholder so the PATCH
+    payload remains valid. The embedding test endpoint only reads
+    the ``embedding_*`` columns, so the chat-side value never
+    affects the probe.
+    """
+
+    payload: dict = {
+        "provider": "openai",
+        "openai": {
+            "base_url": "https://placeholder.example.com/v1",
+            "model": "placeholder-model",
+        },
+        "api_key_action": "keep",
+        "embedding_model": embedding_model,
+        "embedding_provider": embedding_provider,
+        "embedding_base_url": embedding_base_url,
+        "embedding_timeout_seconds": embedding_timeout_seconds,
+    }
+    if embedding_provider == "openai":
+        if embedding_api_key is not None:
+            payload["embedding_api_key_action"] = "replace"
+            payload["embedding_api_key"] = embedding_api_key
+        else:
+            payload["embedding_api_key_action"] = "keep"
+    response = test_client.patch("/api/settings/ai", json=payload)
+    assert response.status_code == 200, response.text
 
 
 def test_embedding_test_requires_authentication():
@@ -923,14 +1159,12 @@ def test_embedding_test_rejects_when_model_not_set(client):
 
     test_client, _ = client
     _setup_admin(test_client)
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "openai",
-            "openai": {"base_url": "https://api.example.com/v1", "model": "x"},
-            "api_key_action": "replace",
-            "api_key": "sk-embed-empty-zzzzzzzzzzzzzzz",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="openai",
+        embedding_base_url="https://api.example.com/v1",
+        embedding_model="",
+        embedding_api_key="sk-embed-empty-zzzzzzzzzzzzzzz",
     )
     response = test_client.post("/api/settings/ai/embedding/test")
     assert response.status_code == 200
@@ -943,13 +1177,14 @@ def test_embedding_test_rejects_when_provider_disabled(client):
     test_client, _ = client
     _setup_admin(test_client)
     # Manually persist a config with an embedding model but a
-    # disabled provider — the test endpoint must refuse on
-    # "provider disabled" rather than probe the model list.
+    # disabled embedding channel — the test endpoint must refuse on
+    # "embedding channel disabled" rather than probe the model list.
     async def _seed():
         async for db in app.dependency_overrides[get_db]():
             row = AIRuntimeConfig(
                 provider="disabled",
                 embedding_model="text-embedding-3-small",
+                embedding_provider="disabled",
                 timeout_seconds=30,
                 prompt_version="v1",
                 singleton_key="singleton",
@@ -970,18 +1205,12 @@ def test_embedding_test_openai_success_and_dimension_report(client, monkeypatch)
 
     test_client, _ = client
     _setup_admin(test_client)
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "openai",
-            "openai": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-            },
-            "api_key_action": "replace",
-            "api_key": "sk-embed-ok-aaaaaaaaaaaaaaaa",
-            "embedding_model": "text-embedding-3-small",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="openai",
+        embedding_base_url="https://api.example.com/v1",
+        embedding_model="text-embedding-3-small",
+        embedding_api_key="sk-embed-ok-aaaaaaaaaaaaaaaa",
     )
 
     captured: list[httpx.Request] = []
@@ -1032,18 +1261,12 @@ def test_embedding_test_never_leaks_key_in_error_message(client, monkeypatch):
     test_client, _ = client
     _setup_admin(test_client)
     secret = "sk-embed-leak-zzzzzzzzzzzzzzzzz"
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "openai",
-            "openai": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-            },
-            "api_key_action": "replace",
-            "api_key": secret,
-            "embedding_model": "text-embedding-3-small",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="openai",
+        embedding_base_url="https://api.example.com/v1",
+        embedding_model="text-embedding-3-small",
+        embedding_api_key=secret,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1074,20 +1297,12 @@ def test_embedding_test_rejects_empty_or_invalid_vectors(client, monkeypatch):
     test_client, _ = client
     _setup_admin(test_client)
     secret = "sk-embed-vector-aaaaaaaaaaaaaaa"
-    # Persist the embedding model once; each case only swaps the
-    # transport so we can iterate without re-creating the admin.
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "openai",
-            "openai": {
-                "base_url": "https://api.example.com/v1",
-                "model": "gpt-4o-mini",
-            },
-            "api_key_action": "replace",
-            "api_key": secret,
-            "embedding_model": "text-embedding-3-small",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="openai",
+        embedding_base_url="https://api.example.com/v1",
+        embedding_model="text-embedding-3-small",
+        embedding_api_key=secret,
     )
 
     # ``NaN`` and ``Infinity`` are not JSON-compliant under
@@ -1128,15 +1343,12 @@ def test_embedding_test_rejects_empty_or_invalid_vectors(client, monkeypatch):
 def test_embedding_test_rejects_non_json_response(client, monkeypatch):
     test_client, _ = client
     _setup_admin(test_client)
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "openai",
-            "openai": {"base_url": "https://api.example.com/v1", "model": "x"},
-            "api_key_action": "replace",
-            "api_key": "sk-embed-html-aaaaaaaaaaaaaaaa",
-            "embedding_model": "text-embedding-3-small",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="openai",
+        embedding_base_url="https://api.example.com/v1",
+        embedding_model="text-embedding-3-small",
+        embedding_api_key="sk-embed-html-aaaaaaaaaaaaaaaa",
     )
     transport = httpx.MockTransport(
         lambda request: httpx.Response(200, text="<html>homepage</html>")
@@ -1155,13 +1367,11 @@ def test_embedding_test_ollama_success(client, monkeypatch):
 
     test_client, _ = client
     _setup_admin(test_client)
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "ollama",
-            "ollama": {"base_url": "http://localhost:11434", "model": "llama3.1"},
-            "embedding_model": "nomic-embed-text",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="ollama",
+        embedding_base_url="http://localhost:11434",
+        embedding_model="nomic-embed-text",
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1189,13 +1399,11 @@ def test_embedding_test_ollama_falls_back_to_legacy_endpoint(client, monkeypatch
 
     test_client, _ = client
     _setup_admin(test_client)
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "ollama",
-            "ollama": {"base_url": "http://localhost:11434", "model": "llama3.1"},
-            "embedding_model": "nomic-embed-text",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="ollama",
+        embedding_base_url="http://localhost:11434",
+        embedding_model="nomic-embed-text",
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1221,13 +1429,11 @@ def test_embedding_test_ollama_falls_back_to_legacy_endpoint(client, monkeypatch
 def test_embedding_test_ollama_rejects_invalid_vector(client, monkeypatch):
     test_client, _ = client
     _setup_admin(test_client)
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "ollama",
-            "ollama": {"base_url": "http://localhost:11434", "model": "llama3.1"},
-            "embedding_model": "nomic-embed-text",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="ollama",
+        embedding_base_url="http://localhost:11434",
+        embedding_model="nomic-embed-text",
     )
     # 1e9999 overflows to ``inf`` when parsed as JSON, exercising
     # the NaN/Inf check in ``_validate_embedding_vector``.
@@ -1255,15 +1461,12 @@ def test_embedding_test_openai_connection_failure_is_sanitized(client, monkeypat
 
     test_client, _ = client
     _setup_admin(test_client)
-    test_client.patch(
-        "/api/settings/ai",
-        json={
-            "provider": "openai",
-            "openai": {"base_url": "https://api.example.com/v1", "model": "x"},
-            "api_key_action": "replace",
-            "api_key": "sk-embed-netfail-aaaaaaaaaaaaa",
-            "embedding_model": "text-embedding-3-small",
-        },
+    _configure_embedding_channel(
+        test_client,
+        embedding_provider="openai",
+        embedding_base_url="https://api.example.com/v1",
+        embedding_model="text-embedding-3-small",
+        embedding_api_key="sk-embed-netfail-aaaaaaaaaaaaa",
     )
 
     def handler(request: httpx.Request) -> httpx.Response:

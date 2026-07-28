@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import {
   fetchAIConfig,
   fetchAIModels,
+  fetchEmbeddingModels,
   testAIConfig,
   testEmbeddingConfig,
   updateAIConfig,
@@ -15,6 +16,7 @@ import {
 } from '@/lib/api';
 
 type Provider = AIConfig['provider'];
+type EmbeddingProvider = AIConfig['embedding_provider'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type FetchState = 'idle' | 'fetching' | 'success' | 'error';
 
@@ -27,7 +29,6 @@ export default function SettingsPage() {
   const [openaiModel, setOpenaiModel] = useState('');
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('');
-  const [embeddingModel, setEmbeddingModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [clearKey, setClearKey] = useState(false);
   const [timeoutSeconds, setTimeoutSeconds] = useState(30);
@@ -38,8 +39,23 @@ export default function SettingsPage() {
   const [models, setModels] = useState<AIModelsResponse['models']>([]);
   const [modelsFetchState, setModelsFetchState] = useState<FetchState>('idle');
   const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
-  const [embeddingTestResult, setEmbeddingTestResult] = useState<AITestResult | null>(null);
+  // --- Independent embedding channel (ADR-015 phase 1) ---
+  const [embeddingProvider, setEmbeddingProvider] =
+    useState<EmbeddingProvider>('disabled');
+  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState('');
+  const [embeddingModel, setEmbeddingModel] = useState('');
+  const [embeddingApiKey, setEmbeddingApiKey] = useState('');
+  const [clearEmbeddingApiKey, setClearEmbeddingApiKey] = useState(false);
+  const [embeddingTimeoutSeconds, setEmbeddingTimeoutSeconds] = useState(30);
+  const [embeddingTestResult, setEmbeddingTestResult] =
+    useState<AITestResult | null>(null);
   const [embeddingTesting, setEmbeddingTesting] = useState(false);
+  const [embeddingModels, setEmbeddingModels] =
+    useState<AIModelsResponse['models']>([]);
+  const [embeddingModelsState, setEmbeddingModelsState] =
+    useState<FetchState>('idle');
+  const [embeddingModelsError, setEmbeddingModelsError] =
+    useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,8 +68,13 @@ export default function SettingsPage() {
         setOpenaiModel(data.openai_model ?? '');
         setOllamaBaseUrl(data.ollama_base_url ?? 'http://localhost:11434');
         setOllamaModel(data.ollama_model ?? '');
-        setEmbeddingModel(data.embedding_model ?? '');
         setTimeoutSeconds(data.timeout_seconds || 30);
+        setEmbeddingProvider(data.embedding_provider);
+        setEmbeddingBaseUrl(
+          data.embedding_base_url ?? 'https://api.openai.com/v1',
+        );
+        setEmbeddingModel(data.embedding_model ?? '');
+        setEmbeddingTimeoutSeconds(data.embedding_timeout_seconds || 30);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -83,8 +104,20 @@ export default function SettingsPage() {
       openaiModel.trim() !== (config?.openai_model ?? '')) ||
     (provider === 'ollama' &&
       ollamaModel.trim() !== (config?.ollama_model ?? ''));
+
+  // The embedding channel has its own change tracking: changing
+  // the base URL, model, key or timeout only invalidates the
+  // embedding-side test, never the chat-side one.
+  const embeddingConnectionChanged =
+    embeddingProvider !== config?.embedding_provider ||
+    (embeddingProvider !== 'disabled' &&
+      embeddingBaseUrl.trim() !== (config?.embedding_base_url ?? '')) ||
+    Boolean(embeddingApiKey) ||
+    clearEmbeddingApiKey;
   const embeddingModelChanged =
     embeddingModel.trim() !== (config?.embedding_model ?? '');
+  const embeddingTimeoutChanged =
+    embeddingTimeoutSeconds !== (config?.embedding_timeout_seconds || 30);
 
   const handleFetchModels = async () => {
     if (connectionChanged) {
@@ -112,8 +145,9 @@ export default function SettingsPage() {
     setSaveState('saving');
     setSaveMessage(null);
     setTestResult(null);
+    setEmbeddingTestResult(null);
 
-    const payload = {
+    const payload: Parameters<typeof updateAIConfig>[0] = {
       provider,
       api_key_action: (clearKey ? 'clear' : apiKey ? 'replace' : 'keep') as
         'keep' | 'replace' | 'clear',
@@ -129,6 +163,27 @@ export default function SettingsPage() {
           : undefined,
       embedding_model: embeddingModel.trim() || null,
     };
+    if (embeddingProvider !== config.embedding_provider) {
+      payload.embedding_provider = embeddingProvider;
+    }
+    if (embeddingProvider !== 'disabled') {
+      payload.embedding_base_url = embeddingBaseUrl.trim();
+    }
+    if (
+      embeddingApiKey ||
+      clearEmbeddingApiKey ||
+      embeddingProvider !== config.embedding_provider
+    ) {
+      payload.embedding_api_key_action = (
+        clearEmbeddingApiKey ? 'clear' : embeddingApiKey ? 'replace' : 'keep'
+      ) as 'keep' | 'replace' | 'clear';
+      payload.embedding_api_key = clearEmbeddingApiKey
+        ? undefined
+        : embeddingApiKey || undefined;
+    }
+    if (embeddingTimeoutSeconds !== (config.embedding_timeout_seconds || 30)) {
+      payload.embedding_timeout_seconds = embeddingTimeoutSeconds;
+    }
 
     try {
       const next = await updateAIConfig(payload);
@@ -136,6 +191,8 @@ export default function SettingsPage() {
       invalidateModels();
       setApiKey('');
       setClearKey(false);
+      setEmbeddingApiKey('');
+      setClearEmbeddingApiKey(false);
       setSaveState('saved');
       setSaveMessage('设置已保存');
       router.refresh();
@@ -174,6 +231,30 @@ export default function SettingsPage() {
       });
     } finally {
       setEmbeddingTesting(false);
+    }
+  };
+
+  const handleFetchEmbeddingModels = async () => {
+    if (
+      embeddingConnectionChanged ||
+      embeddingTimeoutChanged ||
+      embeddingProvider === 'disabled'
+    ) {
+      setEmbeddingModelsState('error');
+      setEmbeddingModelsError('请先保存向量渠道、地址、密钥和超时设置');
+      return;
+    }
+    setEmbeddingModelsState('fetching');
+    setEmbeddingModelsError(null);
+    try {
+      const result = await fetchEmbeddingModels();
+      setEmbeddingModels(result.models);
+      setEmbeddingModelsState('success');
+    } catch (err) {
+      setEmbeddingModelsState('error');
+      setEmbeddingModelsError(
+        err instanceof Error ? err.message : '获取 Embedding 模型列表失败',
+      );
     }
   };
 
@@ -340,68 +421,199 @@ export default function SettingsPage() {
           </section>
         )}
 
-        {provider !== 'disabled' && (
-          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-base font-semibold text-slate-800">
-              Embedding 模型
-            </h2>
-            <p className="text-xs text-slate-500">
-              可选：选择一个 Embedding 模型（与上面同一个服务地址）。
-              留空即关闭 Embedding 功能，搜索仍按关键词/全文匹配工作。
-            </p>
-            <FieldWithList
-              id="embedding-model"
-              label="Embedding 模型"
-              help="可从上方获取到的模型列表中挑选，也支持手动输入。"
-              value={embeddingModel}
-              onChange={(value) => {
-                setEmbeddingModel(value);
-                setEmbeddingTestResult(null);
-              }}
-              models={models}
-              allowEmpty
-              emptyOptionLabel="（不启用 Embedding）"
-            />
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={handleEmbeddingTest}
-                disabled={
-                  embeddingTesting ||
-                  connectionChanged ||
-                  embeddingModelChanged ||
-                  !config.embedding_model
-                }
-                className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-              >
-                {embeddingTesting ? '正在测试…' : '测试 Embedding 连接'}
-              </button>
-              {embeddingModelChanged && (
-                <p className="text-sm text-amber-700">
-                  请先保存 Embedding 模型的改动
-                </p>
-              )}
-              {connectionChanged && (
-                <p className="text-sm text-amber-700">
-                  请先保存地址或密钥的改动
-                </p>
-              )}
-              {embeddingTestResult && (
-                <p
-                  className={`text-sm ${
-                    embeddingTestResult.ok
-                      ? 'text-emerald-700'
-                      : 'text-red-700'
-                  }`}
+        <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
+          <h2 className="text-base font-semibold text-slate-800">
+            Embedding 渠道
+          </h2>
+          <p className="text-xs text-slate-500">
+            可选：Embedding 渠道与上面的对话渠道相互独立，可以独立设置
+            模型来源、地址、密钥和超时。关闭后仍按关键词/全文匹配工作。
+          </p>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {(['disabled', 'openai', 'ollama'] as const).map((value) => {
+              const labels: Record<
+                EmbeddingProvider,
+                { title: string; hint: string }
+              > = {
+                disabled: {
+                  title: '不使用',
+                  hint: '关闭 Embedding，仅使用关键词检索',
+                },
+                openai: {
+                  title: 'OpenAI 兼容',
+                  hint: '复用 OpenAI 协议，单独管理密钥',
+                },
+                ollama: {
+                  title: 'Ollama / 本地',
+                  hint: '本地 Ollama 服务',
+                },
+              };
+              const label = labels[value];
+              const active = embeddingProvider === value;
+              const style = active
+                ? 'border-slate-900 bg-slate-900 text-white'
+                : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50';
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setEmbeddingProvider(value)}
+                  className={`rounded-xl border p-3 text-left ${style}`}
                 >
-                  {embeddingTestResult.ok
-                    ? 'Embedding 连接正常'
-                    : `Embedding 连接失败：${embeddingTestResult.message}`}
-                </p>
+                  <p className="text-sm font-semibold">{label.title}</p>
+                  <p
+                    className={`mt-1 text-xs ${
+                      active ? 'text-slate-200' : 'text-slate-500'
+                    }`}
+                  >
+                    {label.hint}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          {embeddingProvider !== 'disabled' && (
+            <>
+              <Field
+                id="embedding-base-url"
+                label="Embedding 服务地址"
+                help={
+                  embeddingProvider === 'ollama'
+                    ? '形如 http://localhost:11434'
+                    : '形如 https://api.openai.com/v1'
+                }
+                value={embeddingBaseUrl}
+                onChange={setEmbeddingBaseUrl}
+              />
+              {embeddingProvider === 'openai' && (
+                <div>
+                  <label
+                    htmlFor="embedding-api-key"
+                    className="block text-sm text-slate-700"
+                  >
+                    Embedding API 密钥
+                  </label>
+                  <input
+                    id="embedding-api-key"
+                    name="embedding-api-key"
+                    type="password"
+                    value={embeddingApiKey}
+                    onChange={(event) => {
+                      setEmbeddingApiKey(event.target.value);
+                      if (event.target.value) setClearEmbeddingApiKey(false);
+                    }}
+                    placeholder={
+                      config.has_embedding_api_key
+                        ? '已保存（输入新值以替换）'
+                        : '请输入密钥'
+                    }
+                    autoComplete="off"
+                    className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+                  />
+                  <p className="mt-1 text-xs text-slate-500">
+                    {config.has_embedding_api_key
+                      ? '已保存一份 Embedding 密钥。输入新值会替换，留空则保持原密钥。'
+                      : '尚未保存 Embedding 密钥。'}
+                  </p>
+                  <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={clearEmbeddingApiKey}
+                      onChange={(event) => {
+                        setClearEmbeddingApiKey(event.target.checked);
+                        if (event.target.checked) setEmbeddingApiKey('');
+                      }}
+                    />
+                    明确清除已保存的 Embedding 密钥
+                  </label>
+                </div>
               )}
-            </div>
-          </section>
-        )}
+              <FieldWithList
+                id="embedding-model"
+                label="Embedding 模型"
+                help="可从上方获取到的模型列表中挑选，也支持手动输入。留空即关闭 Embedding。"
+                value={embeddingModel}
+                onChange={(value) => {
+                  setEmbeddingModel(value);
+                  setEmbeddingTestResult(null);
+                }}
+                models={embeddingModels}
+                allowEmpty
+                emptyOptionLabel="（不启用 Embedding）"
+              />
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleFetchEmbeddingModels}
+                  disabled={
+                    embeddingModelsState === 'fetching' ||
+                    embeddingConnectionChanged ||
+                    embeddingTimeoutChanged
+                  }
+                  className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {embeddingModelsState === 'fetching'
+                    ? '正在获取…'
+                    : embeddingModels.length
+                      ? '刷新向量模型列表'
+                      : '获取向量模型列表'}
+                </button>
+                {embeddingModelsError && (
+                  <p className="text-sm text-red-700">{embeddingModelsError}</p>
+                )}
+              </div>
+              <Field
+                id="embedding-timeout"
+                label="Embedding 请求超时（秒）"
+                value={String(embeddingTimeoutSeconds)}
+                onChange={(value) =>
+                  setEmbeddingTimeoutSeconds(Number(value) || 30)
+                }
+                type="number"
+              />
+              <div className="flex flex-wrap items-center gap-3">
+        <button
+                  type="button"
+                  onClick={handleEmbeddingTest}
+                  disabled={
+                    embeddingTesting ||
+                    embeddingConnectionChanged ||
+                    embeddingModelChanged ||
+                    embeddingTimeoutChanged ||
+                    !config.embedding_model
+                  }
+                  className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+        >
+          {embeddingTesting ? '正在测试…' : '测试 Embedding 连接'}
+        </button>
+                {(embeddingConnectionChanged ||
+                  embeddingModelChanged ||
+                  embeddingTimeoutChanged) && (
+                  <p className="text-sm text-amber-700">
+                    请先保存 Embedding 渠道的改动
+                  </p>
+                )}
+                {embeddingTestResult && (
+                  <p
+                    className={`text-sm ${
+                      embeddingTestResult.ok
+                        ? 'text-emerald-700'
+                        : 'text-red-700'
+                    }`}
+                  >
+                    {embeddingTestResult.ok
+                      ? 'Embedding 连接正常'
+                      : `Embedding 连接失败：${embeddingTestResult.message}`}
+                  </p>
+                )}
+      </div>
+      <p className="text-xs text-slate-500">
+        保存和测试候选渠道不会重新生成文档向量；系统会在兼容性判定后再让你选择是否重建。
+      </p>
+            </>
+          )}
+        </section>
 
         <section>
           <Field
