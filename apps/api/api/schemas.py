@@ -96,3 +96,7 @@ class DocumentReprocessResponse(BaseModel):
     success: bool
     message: str
     job_id: int | None = None
+
+
+class DocumentCategoryUpdateRequest(BaseModel):
+    category_id: int

@@ -53,6 +53,12 @@ type ProcessingJob = {
   last_error: string | null;
 };
 
+type CategoryOption = {
+  id: number;
+  slug: string;
+  name: string;
+};
+
 type Document = {
   id: number;
   title: string;
@@ -95,22 +101,32 @@ export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
   const [document, setDocument] = useState<Document | null>(null);
   const [latestJob, setLatestJob] = useState<ProcessingJob | null>(null);
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<number | ''>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [retrying, setRetrying] = useState(false);
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [categoryMessage, setCategoryMessage] = useState('');
 
   const loadData = useCallback(async () => {
     try {
-      const [documentResponse, jobResponse] = await Promise.all([
+      const [documentResponse, jobResponse, categoriesResponse] = await Promise.all([
         fetch(`/api/documents/${params.id}`, { cache: 'no-store' }),
         fetch(`/api/documents/${params.id}/latest-job`, { cache: 'no-store' }),
+        fetch(`/api/categories`, { cache: 'no-store' }),
       ]);
       if (!documentResponse.ok) {
         throw new Error(documentResponse.status === 404 ? '资料不存在' : '读取失败');
       }
       if (!jobResponse.ok) throw new Error('读取处理状态失败');
-      setDocument(await documentResponse.json());
+      if (!categoriesResponse.ok) throw new Error('读取分类失败');
+      const documentBody = (await documentResponse.json()) as Document;
+      setDocument(documentBody);
       setLatestJob(await jobResponse.json());
+      const categoryBody = (await categoriesResponse.json()) as CategoryOption[];
+      setCategories(categoryBody);
+      setSelectedCategoryId(documentBody.primary_category?.id ?? '');
       setError('');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '读取失败');
@@ -144,6 +160,36 @@ export default function DocumentDetailPage() {
       setError(caught instanceof Error ? caught.message : '提交重试失败');
     } finally {
       setRetrying(false);
+    }
+  };
+
+  const handleSaveCategory = async () => {
+    if (selectedCategoryId === '') return;
+    setSavingCategory(true);
+    setCategoryMessage('');
+    try {
+      const response = await fetch(
+        `/api/documents/${params.id}/category`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ category_id: selectedCategoryId }),
+        },
+      );
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || '保存分类失败');
+      }
+      const updated = (await response.json()) as Document;
+      setDocument(updated);
+      setSelectedCategoryId(updated.primary_category?.id ?? '');
+      setCategoryMessage('主分类已更新');
+    } catch (caught) {
+      setCategoryMessage(
+        caught instanceof Error ? caught.message : '保存分类失败',
+      );
+    } finally {
+      setSavingCategory(false);
     }
   };
 
@@ -195,6 +241,40 @@ export default function DocumentDetailPage() {
           </span>
         </div>
       )}
+
+      <section className="mt-3 rounded-xl border border-slate-200 bg-white p-4">
+        <h2 className="text-sm font-semibold text-slate-500">手动选择主分类</h2>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <select
+            value={selectedCategoryId}
+            onChange={event => {
+              const value = event.target.value;
+              setSelectedCategoryId(value === '' ? '' : Number(value));
+              setCategoryMessage('');
+            }}
+            disabled={savingCategory}
+            className="rounded border border-slate-300 px-3 py-2 text-sm"
+          >
+            <option value="">未选择</option>
+            {categories.map(category => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={handleSaveCategory}
+            disabled={savingCategory || selectedCategoryId === ''}
+            className="rounded bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
+          >
+            {savingCategory ? '保存中…' : '保存主分类'}
+          </button>
+        </div>
+        {categoryMessage && (
+          <p className="mt-2 text-xs text-slate-500">{categoryMessage}</p>
+        )}
+      </section>
 
       {document.tags.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">

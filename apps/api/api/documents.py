@@ -16,6 +16,7 @@ from ..models.taxonomy import (
 from .schemas import (
     BlobResponse,
     CategoryMini,
+    DocumentCategoryUpdateRequest,
     DocumentReprocessResponse,
     DocumentResponse,
     DocumentSummaryResponse,
@@ -250,6 +251,53 @@ async def reprocess_document(
         message="已重新加入处理队列",
         job_id=job.id,
     )
+
+
+@router.patch("/{document_id}/category", response_model=DocumentResponse)
+async def update_document_category(
+    document_id: int,
+    payload: DocumentCategoryUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    document = await db.get(Document, document_id)
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=404, detail="资料不存在")
+
+    if document.current_version_id is None:
+        raise HTTPException(status_code=400, detail="资料没有当前版本")
+
+    version = await db.get(DocumentVersion, document.current_version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="当前版本不存在")
+
+    category = await db.get(Category, payload.category_id)
+    if category is None:
+        raise HTTPException(status_code=404, detail="分类不存在")
+
+    existing = (
+        await db.execute(
+            select(DocumentCategory).where(
+                DocumentCategory.document_version_id == version.id
+            )
+        )
+    ).scalars().all()
+    for link in existing:
+        await db.delete(link)
+    await db.flush()
+
+    db.add(
+        DocumentCategory(
+            document_id=document.id,
+            document_version_id=version.id,
+            category_id=category.id,
+            is_primary=True,
+            confidence=1.0,
+            source="user",
+        )
+    )
+    await db.commit()
+    await db.refresh(document)
+    return await build_document_response(db, document)
 
 
 @router.get("/{document_id}/latest-job", response_model=ProcessingJobResponse | None)

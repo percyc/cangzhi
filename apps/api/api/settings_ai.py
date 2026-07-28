@@ -25,12 +25,15 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
 from ..models.auth import Admin, AIRuntimeConfig
+from ..models.documents import Document
+from ..models.processing import ProcessingJob
+from ..models.taxonomy import DocumentCategory, DocumentSummary, DocumentTag
 from ..security.secrets import (
     SecretDecryptError,
     SecretStoreError,
@@ -206,6 +209,93 @@ def _to_public(row: AIRuntimeConfig) -> dict[str, Any]:
     return row.to_public_dict()
 
 
+def _provider_ready_for_understanding(row: AIRuntimeConfig) -> bool:
+    if row.provider == "openai":
+        return bool(row.openai_base_url and row.openai_model and row.has_api_key)
+    if row.provider == "ollama":
+        return bool(row.ollama_base_url and row.ollama_model)
+    return False
+
+
+async def _enqueue_unclassified_documents(
+    db: AsyncSession,
+    row: AIRuntimeConfig,
+) -> int:
+    """Queue AI organization for current versions that never got a real category."""
+
+    if not _provider_ready_for_understanding(row):
+        return 0
+
+    documents = (
+        await db.execute(
+            select(Document).where(
+                Document.is_deleted.is_(False),
+                Document.current_version_id.is_not(None),
+            )
+        )
+    ).scalars().all()
+    queued = 0
+    for document in documents:
+        version_id = document.current_version_id
+        if version_id is None:
+            continue
+        links = (
+            await db.execute(
+                select(DocumentCategory).where(
+                    DocumentCategory.document_version_id == version_id
+                )
+            )
+        ).scalars().all()
+        if links and any(link.source != "fallback" for link in links):
+            continue
+
+        await db.execute(
+            delete(DocumentCategory).where(
+                DocumentCategory.document_version_id == version_id
+            )
+        )
+        await db.execute(
+            delete(DocumentSummary).where(
+                DocumentSummary.document_version_id == version_id
+            )
+        )
+        await db.execute(
+            delete(DocumentTag).where(DocumentTag.document_version_id == version_id)
+        )
+
+        job = (
+            await db.execute(
+                select(ProcessingJob).where(
+                    ProcessingJob.document_version_id == version_id,
+                    ProcessingJob.stage == "understanding",
+                )
+            )
+        ).scalars().first()
+        if job is None:
+            job = ProcessingJob(
+                document_id=document.id,
+                document_version_id=version_id,
+                stage="understanding",
+                status="created",
+                idempotency_key=f"{version_id}:understanding:understanding:v1",
+                config_version="understanding:v1",
+            )
+        else:
+            job.status = "created"
+            job.retry_count = 0
+            job.next_retry_at = None
+            job.last_error = None
+            job.error_details = None
+            job.started_at = None
+            job.finished_at = None
+        db.add(job)
+        queued += 1
+
+    if queued:
+        await db.commit()
+    return queued
+
+
 # --- Endpoints ------------------------------------------------------------
 
 
@@ -273,11 +363,13 @@ async def update_settings(
     db.add(row)
     await db.commit()
     await db.refresh(row)
+    queued = await _enqueue_unclassified_documents(db, row)
     logger.info(
-        "ai_runtime_updated provider=%s admin=%s key_set=%s",
+        "ai_runtime_updated provider=%s admin=%s key_set=%s organize_queued=%s",
         row.provider,
         admin.username,
         row.has_api_key,
+        queued,
     )
     return {"config": _to_public(row)}
 
