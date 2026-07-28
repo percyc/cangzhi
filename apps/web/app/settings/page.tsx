@@ -456,30 +456,46 @@ function FieldWithList({
   models: AIModelsResponse['models'];
   help?: string;
 }) {
-  const listId = `${id}-models`;
+  const selectedModel = models.some((model) => model.id === value) ? value : '';
+
+  const handleSelectChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    const selectedValue = event.target.value;
+    if (selectedValue) {
+      onChange(selectedValue);
+    }
+  };
+
   return (
     <div>
       <label htmlFor={id} className="block text-sm text-slate-700">
         {label}
       </label>
-      <input
-        id={id}
-        name={id}
-        type="text"
-        list={listId}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
-      />
       {models.length > 0 && (
-        <datalist id={listId}>
+        <select
+          aria-label={`${label}快速选择`}
+          className="mb-2 mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+          onChange={handleSelectChange}
+          value={selectedModel}
+        >
+          <option value="">
+            从 {models.length} 个模型中选择
+          </option>
           {models.map((model) => (
             <option key={model.id} value={model.id}>
               {model.label || model.id}
             </option>
           ))}
-        </datalist>
+        </select>
       )}
+      <input
+        id={id}
+        name={id}
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="手动输入或搜索特殊模型名"
+        className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+      />
       {help && <p className="mt-1 text-xs text-slate-500">{help}</p>}
     </div>
   );
