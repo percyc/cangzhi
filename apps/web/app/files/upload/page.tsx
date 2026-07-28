@@ -38,7 +38,7 @@ export default function FileUploadPage() {
       xhr.onload = () => {
         if (xhr.status === 201) {
           const data = JSON.parse(xhr.responseText);
-          router.push(`/documents/${data.document_id}`);
+          router.push(`/documents/${data.id}`);
         } else {
           const err = JSON.parse(xhr.responseText);
           setError(err.detail || '上传失败，请重试');

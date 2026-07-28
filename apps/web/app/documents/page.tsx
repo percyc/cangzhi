@@ -86,27 +86,34 @@ export default function DocumentsListPage() {
       {error && <p className="text-red-600">错误: {error}</p>}
 
       {!loading && !error && (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {documents.map(doc => (
-            <div
-              key={doc.id}
-              className="border rounded p-4 shadow-sm hover:shadow transition-shadow"
-            >
-              <h2 className="text-xl font-semibold mb-2">
-                <Link href={`/documents/${doc.id}`} className="text-blue-600 hover:underline">
-                  {doc.title}
-                </Link>
-              </h2>
-              <div className="text-sm text-gray-500 space-y-1">
-                <p>类型: {getSourceTypeLabel(doc.source_type)}</p>
-                <p>创建时间: {new Date(doc.created_at).toLocaleString('zh-CN')}</p>
-                {doc.current_version && (
-                  <p>状态: {getStatusLabel(doc)}</p>
-                )}
+        documents.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
+            <p className="text-lg font-medium text-slate-800">还没有资料</p>
+            <p className="mt-2 text-sm text-slate-500">从一条随手记或一个文件开始建立你的知识库。</p>
+          </div>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {documents.map(doc => (
+              <div
+                key={doc.id}
+                className="border rounded p-4 shadow-sm hover:shadow transition-shadow"
+              >
+                <h2 className="text-xl font-semibold mb-2">
+                  <Link href={`/documents/${doc.id}`} className="text-blue-600 hover:underline">
+                    {doc.title}
+                  </Link>
+                </h2>
+                <div className="text-sm text-gray-500 space-y-1">
+                  <p>类型: {getSourceTypeLabel(doc.source_type)}</p>
+                  <p>创建时间: {new Date(doc.created_at).toLocaleString('zh-CN')}</p>
+                  {doc.current_version && (
+                    <p>状态: {getStatusLabel(doc)}</p>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )
       )}
     </main>
   );
