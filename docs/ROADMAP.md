@@ -49,11 +49,12 @@
 
 - ✅ 结构优先父子切片（M3-1）
 - ✅ PostgreSQL 全文索引（M3-1）
+- ✅ 单轮带引用问答（M3-2）：基于父子切片的 FTS 证据召回 + OpenAI/Ollama 结构化回答
 - pgvector Embedding 与 HNSW 索引
 - BM25/FTS + 向量 + 元数据过滤
 - RRF 融合和可选 Reranker
 - 搜索结果片段高亮（M3-1 提供元数据，后续完善）
-- 带引用问答
+- 多轮对话记忆
 - 点击引用定位章节、页码或段落（M3-1 已记录定位字段）
 - 首批 20～30 个检索黄金问题
 
@@ -62,7 +63,21 @@ M3-1（已交付）：解析成功后由 Worker 写入 `document_chunks`（父/�
 `page` / `paragraph_index` / `source_start` / `source_end`、`content_hash`，
 幂等可重建；`/api/search` 在 PostgreSQL 上使用 `tsvector` + GIN 索引，
 SQLite 测试环境安全降级到 `LIKE`；新增 `/search` 页面、空/无结果/错误
-状态友好、结果可点回资料详情。`embedding` / 向量 / 问答保留到 M3 后续。
+状态友好、结果可点回资料详情。
+
+M3-2（已交付，首版）：在 M3-1 的 FTS 之上交付单轮带引用问答。
+`apps/api/services/qa.py` 完成证据召回（中文自然问题通过归一化关键词
+和 2-gram/3-gram 召回，避免要求整句命中），`AIProvider.answer_question`
+为 OpenAI-compatible 与 Ollama 提供统一的结构化 JSON 输出；
+`AnswerResult` 严格校验：充分回答必须引用至少一条证据，引用 id 只能
+来自提供的证据，证据不足时必须返回 `insufficient_evidence: true`。
+新增 `POST /api/ask` 与 `GET /api/ask/status`，未配置模型返回 503、
+模型失败返回 502 且不泄露 API Key、问题长度和证据数量受限。
+新增非技术中文 `/ask` 页面：问题输入、加载态、未配置模型、无证据、
+失败态、答案、引用卡片；首页和资料列表加入“问知识库”入口。
+检索黄金集与“80% Top 5 命中”指标仍按 M3 验收执行，本版本明确
+**不是基于向量检索的混合问答**，向量召回、RRF、Reranker 仍按
+ADR-006 与 ADR-011 排到 M3 后续。
 
 验收：黄金集中，正确证据进入 Top 5 的比例达到 80%；回答不能伪造引用。
 
@@ -104,4 +119,3 @@ SQLite 测试环境安全降级到 `LIKE`；新增 `/search` 页面、空/无结
 - M3 的检索评测未达标，不通过增加更大回答模型掩盖召回问题。
 - M4 完成前不把系统暴露到公网。
 - 每个新数据源必须先满足“原文保存、幂等、失败可重试”再接入 AI。
-

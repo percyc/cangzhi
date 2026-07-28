@@ -6,10 +6,13 @@ export default function Home() {
       <p className="mb-3 text-sm font-medium tracking-[0.2em] text-amber-700">CANGZHI</p>
       <h1 className="text-4xl font-semibold tracking-tight text-slate-900">藏知</h1>
       <p className="mt-4 max-w-xl text-lg leading-8 text-slate-600">
-        先把资料和想法安心存下来。整理、理解和检索能力会在后续版本逐步补上。
+        先把资料和想法安心存下来，再通过搜索和带出处的 AI 回答随时找回。
       </p>
       <div className="mt-10 flex flex-wrap gap-3">
-        <Link href="/search" className="rounded-xl bg-slate-900 px-5 py-3 text-white">
+        <Link href="/ask" className="rounded-xl bg-slate-900 px-5 py-3 text-white">
+          问知识库
+        </Link>
+        <Link href="/search" className="rounded-xl border border-slate-300 px-5 py-3">
           搜索资料
         </Link>
         <Link href="/notes/new" className="rounded-xl border border-slate-300 px-5 py-3">

@@ -127,6 +127,10 @@ def normalize_query(query: str) -> list[str]:
     SQLite ``LIKE`` patterns. We strip very short tokens (single CJK
     characters) but keep the full original string for the
     ``websearch_to_tsquery`` style ranking.
+
+    Natural-language CJK expansion is intentionally handled by the Q&A
+    retrieval layer. Keeping ordinary search terms compact avoids noisy
+    matches and overlapping highlights on the search page.
     """
 
     cleaned = (query or "").strip()
@@ -145,7 +149,84 @@ def normalize_query(query: str) -> list[str]:
         if len(token) > 32:
             token = token[:32]
         tokens.append(token)
-    return tokens or ([cleaned] if cleaned else [])
+    if not tokens:
+        return [cleaned] if cleaned else []
+    # Deduplicate while preserving order to avoid sending the same
+    # LIKE clause twice to PostgreSQL.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in tokens:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+_CJK_RANGE = (0x3400, 0x9FFF)
+
+
+def _is_cjk_char(ch: str) -> bool:
+    if not ch:
+        return False
+    code = ord(ch)
+    return _CJK_RANGE[0] <= code <= _CJK_RANGE[1]
+
+
+def extract_cjk_ngrams(
+    text: str,
+    *,
+    min_gram: int = 2,
+    max_gram: int = 3,
+    max_ngrams: int = 24,
+) -> list[str]:
+    """Return 2/3-grams extracted from a CJK run of ``text``.
+
+    Non-CJK characters break the run; punctuation is ignored. The
+    output is bounded by ``max_ngrams`` so an attacker cannot blow up
+    the query with a huge question.
+    """
+
+    if not text:
+        return []
+    grams: list[str] = []
+    seen: set[str] = set()
+    run: list[str] = []
+    for ch in text:
+        if _is_cjk_char(ch):
+            run.append(ch)
+            continue
+        grams.extend(
+            _ngrams_from_run(run, min_gram=min_gram, max_gram=max_gram, seen=seen)
+        )
+        run = []
+    grams.extend(
+        _ngrams_from_run(run, min_gram=min_gram, max_gram=max_gram, seen=seen)
+    )
+    if len(grams) > max_ngrams:
+        grams = grams[:max_ngrams]
+    return grams
+
+
+def _ngrams_from_run(
+    run: list[str],
+    *,
+    min_gram: int,
+    max_gram: int,
+    seen: set[str],
+) -> list[str]:
+    out: list[str] = []
+    length = len(run)
+    for size in range(min_gram, max_gram + 1):
+        if length < size:
+            break
+        for start in range(0, length - size + 1):
+            gram = "".join(run[start : start + size])
+            if gram in seen:
+                continue
+            seen.add(gram)
+            out.append(gram)
+    return out
 
 
 async def search_documents(
