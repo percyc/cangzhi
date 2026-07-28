@@ -50,13 +50,26 @@ def qa_db(tmp_path):
             yield session
 
     app.dependency_overrides[get_db] = override_db
+    # The /api/ask routes are protected by ``require_admin``; inject
+    # a stub admin so the test can exercise the endpoint without
+    # driving the cookie flow.
+    from apps.api.api.auth import require_admin
+
+    app.dependency_overrides[require_admin] = lambda: _stub_admin()
     yield session_factory
     app.dependency_overrides.pop(get_db, None)
+    app.dependency_overrides.pop(require_admin, None)
 
     async def dispose():
         await engine.dispose()
 
     asyncio.run(dispose())
+
+
+def _stub_admin():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=1, username="tester", is_active=True)
 
 
 class StubProvider(AIProvider):
@@ -414,20 +427,26 @@ def test_qa_service_enforces_question_length(qa_db):
 
 
 def _override_provider(provider):
-    """Patch ``build_provider`` used by the /api/ask module.
+    """Patch ``build_provider_from_db`` used by the /api/ask module.
 
-    The endpoint resolves the provider via a function call, not a
+    The endpoint resolves the provider via an awaited call, not a
     ``Depends``, so we monkey-patch the symbol the module looks up.
+    The same pattern lets the rest of the suite inject a fake
+    provider without standing up a real model endpoint.
     """
 
     app.dependency_overrides.pop(_provider_dependency, None)
-    original = ask_module.build_provider
-    ask_module.build_provider = lambda: provider  # type: ignore[assignment]
+    original = ask_module.build_provider_from_db
+
+    async def _fake(_db):
+        return provider
+
+    ask_module.build_provider_from_db = _fake  # type: ignore[assignment]
     return original
 
 
 def _restore_provider(original):
-    ask_module.build_provider = original  # type: ignore[assignment]
+    ask_module.build_provider_from_db = original  # type: ignore[assignment]
 
 
 def test_ask_endpoint_returns_cited_answer(qa_db):
@@ -515,8 +534,12 @@ def test_ask_endpoint_returns_insufficient_without_evidence(qa_db):
 def test_ask_endpoint_returns_friendly_status_when_provider_missing(qa_db):
     from apps.api.api import ask as ask_module_local
 
-    original = ask_module_local.build_provider
-    ask_module_local.build_provider = lambda: None  # type: ignore[assignment]
+    original = ask_module_local.build_provider_from_db
+
+    async def _none(_db):
+        return None
+
+    ask_module_local.build_provider_from_db = _none  # type: ignore[assignment]
     try:
         client = TestClient(app)
         response = client.post(
@@ -524,7 +547,7 @@ def test_ask_endpoint_returns_friendly_status_when_provider_missing(qa_db):
             json={"question": "什么是向量检索？"},
         )
     finally:
-        ask_module_local.build_provider = original  # type: ignore[assignment]
+        ask_module_local.build_provider_from_db = original  # type: ignore[assignment]
     assert response.status_code == 503
     body = response.json()
     assert body["detail"]["code"] == "provider_not_configured"
@@ -538,13 +561,17 @@ def test_ask_status_endpoint(qa_db):
         def is_configured(self) -> bool:
             return False
 
-    original = ask_module_local.build_provider
-    ask_module_local.build_provider = lambda: _Unconfigured()  # type: ignore[assignment]
+    original = ask_module_local.build_provider_from_db
+
+    async def _fake(_db):
+        return _Unconfigured()
+
+    ask_module_local.build_provider_from_db = _fake  # type: ignore[assignment]
     try:
         client = TestClient(app)
         response = client.get("/api/ask/status")
     finally:
-        ask_module_local.build_provider = original  # type: ignore[assignment]
+        ask_module_local.build_provider_from_db = original  # type: ignore[assignment]
     assert response.status_code == 200
     assert response.json() == {
         "provider_configured": False,
@@ -555,4 +582,4 @@ def test_ask_status_endpoint(qa_db):
 # Import the module-level symbol used by the override helpers.
 from apps.api.api import ask as ask_module  # noqa: E402,F401
 
-_provider_dependency = ask_module.build_provider
+_provider_dependency = ask_module.build_provider_from_db

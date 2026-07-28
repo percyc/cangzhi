@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     url_fetch_timeout_seconds: float = 20.0
     url_fetch_max_redirects: int = 5
 
+    cors_allowed_origins: str = ""
+
 
 settings = Settings()
 

@@ -1,3 +1,4 @@
+from .auth import Admin, AIRuntimeConfig, AuthSession
 from .blobs import Blob
 from .chunks import DocumentChunk
 from .documents import Document, DocumentSourceType, DocumentVersion
@@ -12,6 +13,9 @@ from .taxonomy import (
 )
 
 __all__ = [
+    "Admin",
+    "AIRuntimeConfig",
+    "AuthSession",
     "Blob",
     "Category",
     "DEFAULT_CATEGORY_SLUGS",

@@ -8,7 +8,11 @@ import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from apps.api.ai import AIProviderError, UnderstandingResult, build_provider
+from apps.api.ai import (
+    AIProviderError,
+    UnderstandingResult,
+    build_provider_from_session,
+)
 from apps.api.constants import INBOX_CATEGORY_NAME, INBOX_CATEGORY_SLUG
 from apps.api.extractors import extract_xinhua_html
 from apps.api.models.blobs import Blob
@@ -326,7 +330,7 @@ def _process_understanding(
     title = document.title or (metadata.get("title") if isinstance(metadata, dict) else None) or ""
     content_for_ai = _build_ai_input(title, raw_text, metadata)
 
-    provider = build_provider()
+    provider = build_provider_from_session(session)
     if provider is None or not provider.is_configured():
         # No provider → mark the document as 'inbox' but keep it usable.
         _apply_inbox_fallback(
@@ -751,7 +755,7 @@ def _persist_understanding_result(
             document_id=document.id,
             document_version_id=version.id,
             summary=result.summary,
-            model=(settings.ai_provider or None),
+            model=(provider.name if provider else settings.ai_provider or None),
             prompt_version=settings.ai_prompt_version,
             confidence=result.confidence,
             source="model",

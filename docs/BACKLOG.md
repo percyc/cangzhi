@@ -64,6 +64,27 @@
 | CZ-406 | P1 | Reranker | 可配置关闭，失败时降级到 RRF |
 | CZ-407 | P1 | 片段编辑 | 支持拆分、合并并重新索引 |
 
+## Epic H：单用户认证与运行时配置（M3-3）
+
+| ID | 优先级 | 任务 | 完成定义 |
+|---|---:|---|---|
+| CZ-601 | P0 | ✅ 首次启动唯一管理员 | 迁移增加 `singleton_key` 唯一约束，重复 `setup` 并发 409 |
+| CZ-602 | P0 | ✅ 密码哈希 | scrypt，参数 + 盐 + 摘要自描述存储；空密码拒绝；常时比较 |
+| CZ-603 | P0 | ✅ 会话 Cookie | 32 字节 URL-safe 随机 token，HttpOnly + SameSite=Lax，12 小时 TTL；数据库只存 SHA-256 |
+| CZ-604 | P0 | ✅ 登录限流 | 进程内 5 次/分钟/IP+账户；超限 429 + 友好文案 |
+| CZ-605 | P0 | ✅ 登录/退出不泄露账户存在 | "用户名或密码不正确" 同一文案、同一状态码 |
+| CZ-606 | P0 | ✅ API 真实鉴权 | `Depends(require_admin)` 挂在每个业务路由；测试通过 `dependency_overrides` 注入；无 `*_DISABLED` 环境开关 |
+| CZ-607 | P0 | ✅ 页面 `/setup` | 一次性创建管理员，重复访问跳到 `/login` |
+| CZ-608 | P0 | ✅ 页面 `/login` | 中文错误提示；登录成功按来源跳转 |
+| CZ-609 | P0 | ✅ 模型设置页 `/settings` | 禁用/OpenAI 兼容/Ollama 三选一，base URL/model/key，key 仅 `has_api_key` 回显 |
+| CZ-610 | P0 | ✅ 密钥加密落库 | Fernet 加密 + 主密钥持久化在 storage 中（0o600）；并发创建安全 |
+| CZ-611 | P0 | ✅ 连接测试 | 探测最小 endpoint，响应脱敏，禁止回显密钥或上游原始错误 |
+| CZ-612 | P0 | ✅ DB 覆盖 env | `build_provider_from_db/_session` 始终优先于 `.env`；切换到 disabled 也立即生效 |
+| CZ-613 | P0 | ✅ Worker 读取运行时配置 | Worker 每个任务调用 `build_provider_from_session`，无需重启 |
+| CZ-614 | P0 | ✅ 顶部导航与状态 | 资料库/搜索/问知识库/设置/退出；登录状态显式可见 |
+| CZ-615 | P0 | ✅ `/ask` 未配置提示 | 提示用户前往 `/settings` 配置模型 |
+| CZ-616 | P0 | ✅ Next.js 浏览器引导 | `proxy.ts` 仅做导航重定向；API 鉴权独立 |
+
 ## Epic F：搜索与问答
 
 | ID | 优先级 | 任务 | 完成定义 |

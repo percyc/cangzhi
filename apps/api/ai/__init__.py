@@ -4,6 +4,8 @@ from .provider import (
     OllamaProvider,
     OpenAICompatibleProvider,
     build_provider,
+    build_provider_from_db,
+    build_provider_from_session,
 )
 from .schema import (
     AnswerResult,
@@ -19,5 +21,7 @@ __all__ = [
     "OpenAICompatibleProvider",
     "UnderstandingResult",
     "build_provider",
+    "build_provider_from_db",
+    "build_provider_from_session",
     "validate_against_evidence",
 ]

@@ -65,6 +65,38 @@ M3-1（已交付）：解析成功后由 Worker 写入 `document_chunks`（父/�
 SQLite 测试环境安全降级到 `LIKE`；新增 `/search` 页面、空/无结果/错误
 状态友好、结果可点回资料详情。
 
+M3-3（已交付）：单用户认证与网页模型设置。
+
+* Alembic 迁移 ``0005`` 新增 ``admins`` / ``auth_sessions`` /
+  ``ai_runtime_configs`` 三张表；管理员表和 AI 配置表都通过
+  ``singleton_key`` 唯一约束在数据库层强制单行，所以即使应用层
+  检查被绕过，并发 ``setup`` 或重复提交也只会留下第一行。
+* 单用户首次启动流程：未设置账户时 ``/setup`` 创建唯一管理员
+  （scrypt 哈希，盐随机），之后 ``/login`` 登录、``/logout`` 退出、``GET
+  /api/auth/status`` 查询状态。
+* 会话使用 32 字节 URL-safe 随机 token，HttpOnly + SameSite=Lax
+  Cookie，12 小时 TTL；数据库只存 token 的 SHA-256，泄露数据库
+  不会让 token 可重放。``/login`` 按 IP+账户限流，``/setup`` 按
+  IP 限流，分别为每分钟 5/3 次。
+* 除健康检查、``/api/auth/*`` 外所有 ``/api`` 路由都挂
+  ``Depends(require_admin)`` 依赖；测试可通过
+  ``app.dependency_overrides[require_admin]`` 注入 stub，没有任何
+  绕过生产可用的开关。``CANGZHI_AUTH_DISABLED`` 之类的环境变量
+  已被删除。
+* 新增 ``/settings``：选择禁用 / OpenAI 兼容 / Ollama，配置 base
+  URL、模型与 API key。key 在数据库中以 Fernet 密文保存（密钥从
+  ``storage/.secret_key`` 或 ``CANGZHI_SECRET_KEY`` 环境变量读
+  取），页面只返回 ``has_api_key`` 布尔值。连接测试用最小探测
+  调用并对响应做脱敏，禁止回显密钥或上游原始错误。
+* AI provider 加载新增 ``build_provider_from_db``（异步，API 路径）
+  和 ``build_provider_from_session``（同步，Worker 路径），并
+  保留 ``build_provider`` 作为环境变量回退：Web 配置始终覆盖
+  ``.env``，Worker 在每个任务里重新读取数据库配置。
+* Next.js ``proxy.ts``（原 ``middleware.ts``）只做浏览器引导，
+  API 才是最终安全边界；统一顶部导航包含资料库、搜索、问知识
+  库、设置、退出；``/ask`` 在未配置模型时提示并直接链接到
+  ``/settings``。
+
 M3-2（已交付，首版）：在 M3-1 的 FTS 之上交付单轮带引用问答。
 `apps/api/services/qa.py` 完成证据召回（中文自然问题通过归一化关键词
 和 2-gram/3-gram 召回，避免要求整句命中），`AIProvider.answer_question`

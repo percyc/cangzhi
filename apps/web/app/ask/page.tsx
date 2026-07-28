@@ -196,7 +196,10 @@ function AskClient() {
 
       {status && !status.provider_configured && (
         <Notice kind="warn">
-          当前没有配置问答模型，暂时无法生成回答。完成模型设置后即可使用。
+          当前没有配置问答模型，资料里的内容暂时无法用自然语言提问。
+          <Link href="/settings" className="ml-2 text-amber-900 underline">
+            前往模型设置
+          </Link>
         </Notice>
       )}
       {statusError && <Notice kind="error">问答状态读取失败：{statusError}</Notice>}

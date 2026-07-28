@@ -5,6 +5,7 @@ alembic
 psycopg2-binary
 asyncpg
 pgvector
+cryptography>=42.0
 python-dotenv
 pydantic>=2.0
 pydantic-settings>=2.0

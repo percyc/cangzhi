@@ -84,6 +84,39 @@
 **重新评估条件**：M3 黄金集上 FTS Top 5 命中率低于 80%，或资料数 / 跨
 文档问题显著上升，导致关键词召回不足。
 
+## ADR-013：M3-3 引入单用户认证与网页模型设置，使用 scrypt 会话、Fernet 加密与数据库唯一约束
+
+**决定**：M3-3 在同一数据库中新增 ``admins``、``auth_sessions``
+和 ``ai_runtime_configs`` 三张表。管理员密码使用 scrypt（参数
+N=2^14, r=8, p=1）哈希并以自描述 ``scrypt$N=...,r=...,p=...$salt$hash``
+格式存储；API key 使用 Fernet 加密落库，主密钥先看
+``CANGZHI_SECRET_KEY`` 环境变量，否则在共享 storage 中以
+0o600 权限生成 ``.secret_key``。会话 token 为 32 字节 URL-safe
+随机串，HttpOnly + SameSite=Lax Cookie，12 小时 TTL，数据库只
+存 SHA-256。``/login`` 在进程内按客户端 IP+账户限流，``/setup``
+按客户端 IP 限流。
+单管理员与单 AI 配置分别通过 ``singleton_key`` 唯一约束在
+数据库层强制，即使应用层检查被绕过，重复 ``setup`` 或并发
+插入也只会留下第一行。AI provider 加载新增
+``build_provider_from_db``（API 路径）和
+``build_provider_from_session``（Worker 路径），web 配置始终覆
+盖 ``.env``，``/api/settings/ai`` GET 响应只回显 ``has_api_key``
+布尔值与配置字段，不返回密钥或密钥提示。
+
+**原因**：首版只在局域网内使用，但要支持公网部署和共享服务器
+就必须先有最基础的访问控制。scrypt 在 stdlib 中可用（不需要
+第三方 C 扩展），参数比 bcrypt 更现代。Fernet 提供认证加密，
+避免单独写 MAC；主密钥放在 storage 共享卷里，API 和 Worker 都
+能读取，进程内只缓存一次。``singleton_key`` 唯一约束是廉价的
+纵深防御：应用层已经做了 ``count == 0`` 检查，数据库层再加一
+道。Next.js ``proxy.ts``（原 ``middleware.ts``）只做浏览器引导，
+API 是最终安全边界，这样可以避免 middleware 重复查询和绕过
+``dependency_overrides``。
+
+**重新评估条件**：出现多账户/团队空间需求时升级为完整的用户
+表与权限矩阵；接入云 KMS 后主密钥改用 KMS；如需 SSO/OAuth
+则换成 JWT 或 OIDC。
+
 ## ADR-012：M3-2 问答只做单轮 FTS 检索，不引入向量与对话记忆
 
 **决定**：M3-2 在不破坏 ADR-011 的前提下交付首版单轮带引用问答：
@@ -100,4 +133,3 @@ FTS 之上先稳定“提问-召回-回答-引用”闭环，能更快暴露真�
 **重新评估条件**：M3 黄金集上 FTS Top 5 命中率低于 80%、跨文档
 问题占比明显上升、且问答错误主要由召回能力不足（而非生成或
 引用校验）造成；同时 ADR-011 的重新评估条件也被触发。
-

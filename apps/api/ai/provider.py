@@ -463,7 +463,14 @@ import re  # noqa: E402 — keep at the bottom to reuse above aliases
 
 
 def build_provider() -> AIProvider | None:
-    """Return a configured provider based on the current settings, or None."""
+    """Return a configured provider based on the current settings, or None.
+
+    The synchronous helper reads the .env-style settings and is the
+    fallback used when the worker has not yet loaded the DB-backed
+    runtime configuration. The web app should call
+    :func:`build_provider_from_db` instead so user changes take
+    effect without a process restart.
+    """
 
     provider = (settings.ai_provider or "").lower()
     if provider == "openai":
@@ -482,5 +489,114 @@ def build_provider() -> AIProvider | None:
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
             timeout=settings.ai_request_timeout_seconds,
+        )
+    return None
+
+
+async def build_provider_from_db(db) -> AIProvider | None:
+    """Return a provider built from the persisted AI runtime config.
+
+    Falls back to the legacy :func:`build_provider` (env-driven
+    settings) when the table is empty or the runtime config is
+    disabled. The function is async because the AI runtime config
+    lives in the database; it accepts any object exposing a
+    SQLAlchemy ``execute`` method (``AsyncSession`` or compatible).
+    """
+
+    from sqlalchemy import select
+
+    try:
+        from ..models.auth import AIRuntimeConfig
+        from ..security.secrets import decrypt_secret
+    except ImportError:
+        return build_provider()
+
+    try:
+        row = (await db.execute(select(AIRuntimeConfig).order_by(AIRuntimeConfig.id.desc()).limit(1))).scalars().first()
+    except Exception:  # noqa: BLE001 — table missing on older deployments
+        return build_provider()
+    if row is None:
+        return build_provider()
+    if row.provider == "disabled":
+        return None
+    if row.provider == "openai":
+        if not row.openai_base_url or not row.openai_model:
+            return None
+        if not row.has_api_key or not row.openai_api_key_cipher:
+            return None
+        try:
+            api_key = decrypt_secret(row.openai_api_key_cipher)
+        except Exception:  # noqa: BLE001 — wrong key / corrupt ciphertext
+            return None
+        if not api_key:
+            return None
+        return OpenAICompatibleProvider(
+            base_url=row.openai_base_url,
+            api_key=api_key,
+            model=row.openai_model,
+            timeout=float(row.timeout_seconds or 30),
+        )
+    if row.provider == "ollama":
+        if not row.ollama_base_url or not row.ollama_model:
+            return None
+        return OllamaProvider(
+            base_url=row.ollama_base_url,
+            model=row.ollama_model,
+            timeout=float(row.timeout_seconds or 30),
+        )
+    return None
+
+
+def build_provider_from_session(session) -> AIProvider | None:
+    """Synchronous equivalent of :func:`build_provider_from_db`.
+
+    The Worker uses this with a plain ``Session`` because it polls
+    jobs in a thread rather than an event loop. The same fallback
+    semantics apply: env settings are used when the table is empty
+    or the runtime config is disabled.
+    """
+
+    from sqlalchemy import select
+
+    try:
+        from ..models.auth import AIRuntimeConfig
+        from ..security.secrets import decrypt_secret
+    except ImportError:
+        return build_provider()
+
+    try:
+        row = session.execute(
+            select(AIRuntimeConfig).order_by(AIRuntimeConfig.id.desc()).limit(1)
+        ).scalars().first()
+    except Exception:  # noqa: BLE001 — table missing on older deployments
+        return build_provider()
+    if row is None:
+        return build_provider()
+    if row.provider == "disabled":
+        return None
+    if row.provider == "openai":
+        if not row.openai_base_url or not row.openai_model:
+            return None
+        if not row.has_api_key or not row.openai_api_key_cipher:
+            return None
+        try:
+            api_key = decrypt_secret(row.openai_api_key_cipher)
+        except Exception:  # noqa: BLE001 — wrong key / corrupt ciphertext
+            return None
+        if not api_key:
+            return None
+        return OpenAICompatibleProvider(
+            base_url=row.openai_base_url,
+            api_key=api_key,
+            model=row.openai_model,
+            timeout=float(row.timeout_seconds or 30),
+        )
+    if row.provider == "ollama":
+        if not row.ollama_base_url or not row.ollama_model:
+            return None
+        return OllamaProvider(
+            base_url=row.ollama_base_url,
+            model=row.ollama_model,
+            timeout=float(row.timeout_seconds or 30),
         )
     return None

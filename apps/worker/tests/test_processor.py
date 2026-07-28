@@ -169,8 +169,8 @@ class TestJobProcessing:
 
     def test_no_model_falls_back_to_inbox_idempotently(self, session, monkeypatch):
         monkeypatch.setattr(
-            "apps.worker.services.processor.build_provider",
-            lambda: None,
+            "apps.worker.services.processor.build_provider_from_session",
+            lambda _session: None,
         )
         doc = Document(title="Fallback", source_type=DocumentSourceType.note)
         session.add(doc)

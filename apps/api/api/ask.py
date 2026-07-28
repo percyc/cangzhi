@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..ai import build_provider
+from ..ai import build_provider_from_db
 from ..core.db import get_db
 from ..models.documents import DocumentSourceType
 from ..services.qa import (
@@ -98,7 +98,7 @@ async def ask_post(
     payload: AskPayload,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    provider = build_provider()
+    provider = await build_provider_from_db(db)
     service = QAService(provider)
     if not service.is_provider_configured:
         # The retrieval layer does not need the model, but asking
@@ -125,14 +125,14 @@ async def ask_post(
 
 
 @router.get("/status", response_model=dict[str, Any])
-async def ask_status() -> dict[str, Any]:
+async def ask_status(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     """Return whether the Q&A feature is currently usable.
 
     The front end uses this to render a friendly placeholder on
     ``/ask`` before the user has typed anything.
     """
 
-    provider = build_provider()
+    provider = await build_provider_from_db(db)
     configured = provider is not None and provider.is_configured()
     return {
         "provider_configured": configured,

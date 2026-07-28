@@ -2,6 +2,7 @@
 
 import asyncio
 from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -46,6 +47,11 @@ def search_db(tmp_path):
             yield session
 
     app.dependency_overrides[get_db] = override_db
+    from apps.api.api.auth import require_admin
+
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
+        id=1, username="tester", is_active=True
+    )
     yield session_factory
 
     async def dispose():
@@ -53,6 +59,9 @@ def search_db(tmp_path):
 
     asyncio.run(dispose())
     app.dependency_overrides.pop(get_db, None)
+    from apps.api.api.auth import require_admin as _require_admin
+
+    app.dependency_overrides.pop(_require_admin, None)
 
 
 async def _seed_document(
