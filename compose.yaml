@@ -96,13 +96,12 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     container_name: cangzhi-web
-    command: ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]
+    command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
     ports:
       - "${WEB_PORT:-3000}:3000"
     environment:
       API_URL: http://api:8000
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-      ALLOWED_DEV_ORIGINS: ${ALLOWED_DEV_ORIGINS:-localhost,127.0.0.1,192.168.50.136}
     depends_on:
       api:
         condition: service_healthy

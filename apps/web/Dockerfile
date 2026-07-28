@@ -12,4 +12,8 @@ COPY . .
 
 WORKDIR /app/apps/web
 
-CMD ["npm", "run", "dev"]
+RUN npm run build
+
+ENV NODE_ENV=production
+
+CMD ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
