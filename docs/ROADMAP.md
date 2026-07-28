@@ -47,15 +47,22 @@
 
 目标：存进去的资料可以准确找回和引用。
 
-- 结构优先父子切片
-- PostgreSQL 全文索引
+- ✅ 结构优先父子切片（M3-1）
+- ✅ PostgreSQL 全文索引（M3-1）
 - pgvector Embedding 与 HNSW 索引
 - BM25/FTS + 向量 + 元数据过滤
 - RRF 融合和可选 Reranker
-- 搜索结果片段高亮
+- 搜索结果片段高亮（M3-1 提供元数据，后续完善）
 - 带引用问答
-- 点击引用定位章节、页码或段落
+- 点击引用定位章节、页码或段落（M3-1 已记录定位字段）
 - 首批 20～30 个检索黄金问题
+
+M3-1（已交付）：解析成功后由 Worker 写入 `document_chunks`（父/子），
+包含 `document_version`、`parent_id`、序号、类型、正文、heading_path、
+`page` / `paragraph_index` / `source_start` / `source_end`、`content_hash`，
+幂等可重建；`/api/search` 在 PostgreSQL 上使用 `tsvector` + GIN 索引，
+SQLite 测试环境安全降级到 `LIKE`；新增 `/search` 页面、空/无结果/错误
+状态友好、结果可点回资料详情。`embedding` / 向量 / 问答保留到 M3 后续。
 
 验收：黄金集中，正确证据进入 Top 5 的比例达到 80%；回答不能伪造引用。
 

@@ -12,6 +12,7 @@ from apps.api.ai import AIProviderError, UnderstandingResult, build_provider
 from apps.api.constants import INBOX_CATEGORY_NAME, INBOX_CATEGORY_SLUG
 from apps.api.extractors import extract_xinhua_html
 from apps.api.models.blobs import Blob
+from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import (
     Document,
     DocumentSourceType,
@@ -32,6 +33,7 @@ from apps.api.security import (
     URLSecurityError,
     fetch_url,
 )
+from apps.api.services import build_chunk_specs
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings
 
@@ -43,6 +45,8 @@ BATCH_SIZE = 10
 
 UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
+CHUNKING_STAGE = "chunking"
+CHUNKING_IDEMPOTENCY = "chunking:m3-v1"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
@@ -249,6 +253,41 @@ def _enqueue_understanding_job(
     return job
 
 
+def _enqueue_chunking_job(
+    session: Session,
+    *,
+    document_id: int,
+    version_id: int,
+) -> ProcessingJob:
+    idempotency_key = f"{version_id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}"
+    existing = session.scalar(
+        select(ProcessingJob).where(ProcessingJob.idempotency_key == idempotency_key)
+    )
+    if existing is not None:
+        if existing.status in ("completed", "failed"):
+            return existing
+        existing.status = "created"
+        existing.retry_count = 0
+        existing.next_retry_at = None
+        existing.last_error = None
+        existing.error_details = None
+        existing.started_at = None
+        existing.finished_at = None
+        session.add(existing)
+        return existing
+
+    job = ProcessingJob(
+        document_id=document_id,
+        document_version_id=version_id,
+        stage=CHUNKING_STAGE,
+        status="created",
+        idempotency_key=idempotency_key,
+        config_version=CHUNKING_IDEMPOTENCY,
+    )
+    session.add(job)
+    return job
+
+
 def _process_understanding(
     session: Session,
     job: ProcessingJob,
@@ -356,6 +395,241 @@ def _complete_understanding_job(
         session.add(version)
     session.commit()
     return True
+
+
+def _process_chunking(
+    session: Session,
+    job: ProcessingJob,
+    document: Document,
+    version: DocumentVersion,
+) -> bool:
+    """Materialize parent/child chunks for the document version.
+
+    The function is idempotent: it always replaces the current set of
+    chunks for the version so re-runs converge to the same result.
+    The chunk content is derived from ``version.structured_content``
+    and a SHA-256 seed so the external_id and content_hash are
+    stable across runs.
+    """
+
+    structured_payload = version.structured_content or {}
+    if not structured_payload:
+        job.status = "failed"
+        job.finished_at = utc_now()
+        job.next_retry_at = None
+        job.last_error = "缺少结构化内容，无法生成切片"
+        job.error_details = {"reason": "missing_structured_content"}
+        version.processing_status = "failed"
+        session.add_all([job, version])
+        session.commit()
+        return False
+
+    try:
+        structured = _structured_content_from_payload(structured_payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "chunking_invalid_payload",
+            document_id=document.id,
+            version_id=version.id,
+        )
+        job.status = "failed"
+        job.finished_at = utc_now()
+        job.next_retry_at = None
+        job.last_error = f"无法读取结构化内容：{exc}"
+        job.error_details = {"exception": str(exc)}
+        version.processing_status = "failed"
+        session.add_all([job, version])
+        session.commit()
+        return False
+
+    seed_input = "|".join(
+        [
+            str(version.id),
+            version.content_hash or "",
+            structured.full_text()[:1000],
+        ]
+    )
+    content_hash_seed = hashlib.sha256(seed_input.encode("utf-8")).hexdigest()
+
+    try:
+        specs = build_chunk_specs(
+            structured,
+            content_hash_seed=content_hash_seed,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "chunking_failed",
+            document_id=document.id,
+            version_id=version.id,
+        )
+        job.retry_count += 1
+        job.finished_at = utc_now()
+        job.last_error = f"切片失败：{exc}"
+        job.error_details = {"exception": str(exc)}
+        if job.retry_count >= (job.max_retries or MAX_RETRIES):
+            job.status = "failed"
+            job.next_retry_at = None
+            version.processing_status = "failed"
+        else:
+            job.status = "retry"
+            job.next_retry_at = calculate_next_retry_at(job.retry_count - 1)
+            version.processing_status = "retry"
+        session.add_all([job, version])
+        session.commit()
+        return False
+
+    _replace_version_chunks(session, document, version, specs)
+
+    job.status = "completed"
+    job.finished_at = utc_now()
+    job.next_retry_at = None
+    job.last_error = None
+    job.error_details = None
+    session.add(job)
+    if version.processing_status in ("ready", "chunking", "processing"):
+        version.processing_status = "ready"
+    version.meta = {
+        **(version.meta or {}),
+        "chunk_count": sum(1 for spec in specs if spec.role == "child"),
+        "parent_count": sum(1 for spec in specs if spec.role == "parent"),
+        "chunk_config_version": CHUNKING_IDEMPOTENCY,
+    }
+    session.add(version)
+    session.commit()
+    logger.info(
+        "chunking_completed",
+        document_id=document.id,
+        version_id=version.id,
+        chunks=len(specs),
+    )
+    return True
+
+
+def _replace_version_chunks(
+    session: Session,
+    document: Document,
+    version: DocumentVersion,
+    specs,
+) -> None:
+    """Replace all chunks for a version, preserving stable ids.
+
+    We delete the existing rows first because the chunker is
+    deterministic but the content hash or structure can change as
+    the parser improves. The unique constraint on
+    ``(document_version_id, external_id)`` keeps accidental
+    concurrent runs from creating duplicates.
+    """
+
+    existing_chunks = list(
+        session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            )
+        ).all()
+    )
+    session.execute(
+        delete(DocumentChunk).where(
+            DocumentChunk.document_version_id == version.id
+        ),
+        execution_options={"synchronize_session": False},
+    )
+    session.flush()
+    for existing_chunk in existing_chunks:
+        if existing_chunk in session:
+            session.expunge(existing_chunk)
+
+    parent_id_by_external: dict[str, int] = {}
+    title = (document.title or "").strip()
+    for spec in specs:
+        search_text = _build_search_text(title, spec)
+        chunk = DocumentChunk(
+            document_id=document.id,
+            document_version_id=version.id,
+            parent_id=None,
+            external_id=spec.external_id,
+            role=spec.role,
+            chunk_type=spec.chunk_type,
+            order_index=spec.order_index,
+            content=spec.content,
+            search_text=search_text,
+            content_hash=spec.content_hash,
+            heading_path=list(spec.heading_path),
+            page=spec.page,
+            paragraph_index=spec.paragraph_index,
+            source_start=spec.source_start,
+            source_end=spec.source_end,
+            char_count=spec.char_count,
+            token_estimate=spec.token_estimate,
+            language=spec.language,
+            extra={},
+            is_current=True,
+        )
+        session.add(chunk)
+        session.flush()
+        if spec.role == "parent":
+            parent_id_by_external[spec.external_id] = chunk.id
+
+    # Wire parent_id now that all rows have integer ids.
+    for spec in specs:
+        if spec.role != "child" or not spec.parent_external_id:
+            continue
+        parent_pk = parent_id_by_external.get(spec.parent_external_id)
+        if parent_pk is None:
+            continue
+        # Locate the persisted child row and patch its parent_id.
+        child_row = session.scalar(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id,
+                DocumentChunk.external_id == spec.external_id,
+            )
+        )
+        if child_row is None:
+            continue
+        child_row.parent_id = parent_pk
+        session.add(child_row)
+
+
+def _build_search_text(title: str, spec) -> str:
+    heading = " > ".join(spec.heading_path or [])
+    pieces: list[str] = []
+    if title:
+        pieces.append(title)
+    if heading:
+        pieces.append(heading)
+    pieces.append(spec.content)
+    return "\n".join(piece for piece in pieces if piece).strip()
+
+
+def _structured_content_from_payload(payload: dict) -> StructuredContent:
+    """Build a :class:`StructuredContent` from a stored dict payload.
+
+    The chunker accepts a dict directly, but the dataclass form is
+    convenient for the worker. We use it as a compatibility shim for
+    older payloads that pre-date the typed parsers.
+    """
+
+    from apps.api.parsers.base import Block
+
+    blocks_payload = payload.get("blocks") or []
+    blocks = [
+        Block(
+            type=item.get("type") or "paragraph",
+            text=item.get("text") or "",
+            heading_path=list(item.get("heading_path") or []),
+            page=item.get("page"),
+            paragraph_index=item.get("paragraph_index"),
+            level=item.get("level"),
+        )
+        for item in blocks_payload
+        if isinstance(item, dict)
+    ]
+    metadata = payload.get("metadata") or {}
+    return StructuredContent(
+        document_type=payload.get("document_type") or "txt",
+        blocks=blocks,
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        schema_version=payload.get("schema_version", 1),
+    )
 
 
 def _build_ai_input(title: str, raw_text: str, metadata: dict) -> str:
@@ -509,6 +783,11 @@ def _clear_understanding_results(
             DocumentSummary.document_version_id == version_id
         )
     )
+    _reset_understanding_job(session, version_id)
+    _reset_chunking_job(session, version_id)
+
+
+def _reset_understanding_job(session: Session, version_id: int) -> None:
     understanding_job = session.scalar(
         select(ProcessingJob).where(
             ProcessingJob.idempotency_key
@@ -516,14 +795,30 @@ def _clear_understanding_results(
         )
     )
     if understanding_job is not None:
-        understanding_job.status = "created"
-        understanding_job.retry_count = 0
-        understanding_job.next_retry_at = None
-        understanding_job.last_error = None
-        understanding_job.error_details = None
-        understanding_job.started_at = None
-        understanding_job.finished_at = None
+        _reset_processing_job(understanding_job)
         session.add(understanding_job)
+
+
+def _reset_chunking_job(session: Session, version_id: int) -> None:
+    chunking_job = session.scalar(
+        select(ProcessingJob).where(
+            ProcessingJob.idempotency_key
+            == f"{version_id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}"
+        )
+    )
+    if chunking_job is not None:
+        _reset_processing_job(chunking_job)
+        session.add(chunking_job)
+
+
+def _reset_processing_job(job: ProcessingJob) -> None:
+    job.status = "created"
+    job.retry_count = 0
+    job.next_retry_at = None
+    job.last_error = None
+    job.error_details = None
+    job.started_at = None
+    job.finished_at = None
 
 
 def process_single_job(session: Session, job_id: int) -> bool:
@@ -572,6 +867,9 @@ def process_single_job(session: Session, job_id: int) -> bool:
 
     if stage == UNDERSTANDING_STAGE:
         return _process_understanding(session, job, document, version)
+
+    if stage == CHUNKING_STAGE:
+        return _process_chunking(session, job, document, version)
 
     return _process_parsing(session, job, document, version)
 
@@ -680,6 +978,11 @@ def _process_parsing(
             >= MIN_USEFUL_URL_TEXT_LENGTH
         )
         if document.source_type != DocumentSourceType.url or has_useful_text:
+            _enqueue_chunking_job(
+                session,
+                document_id=document.id,
+                version_id=version.id,
+            )
             _enqueue_understanding_job(
                 session,
                 document_id=document.id,

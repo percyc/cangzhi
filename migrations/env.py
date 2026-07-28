@@ -22,6 +22,7 @@ if config.config_file_name is not None:
 # Import models - import directly since we're using absolute imports after adding to path
 from apps.api.core.db import Base
 from apps.api.models.blobs import Blob
+from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.taxonomy import (

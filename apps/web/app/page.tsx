@@ -9,7 +9,10 @@ export default function Home() {
         先把资料和想法安心存下来。整理、理解和检索能力会在后续版本逐步补上。
       </p>
       <div className="mt-10 flex flex-wrap gap-3">
-        <Link href="/notes/new" className="rounded-xl bg-slate-900 px-5 py-3 text-white">
+        <Link href="/search" className="rounded-xl bg-slate-900 px-5 py-3 text-white">
+          搜索资料
+        </Link>
+        <Link href="/notes/new" className="rounded-xl border border-slate-300 px-5 py-3">
           记录一个想法
         </Link>
         <Link href="/files/upload" className="rounded-xl border border-slate-300 px-5 py-3">

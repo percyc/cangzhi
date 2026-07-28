@@ -87,8 +87,14 @@ export default function DocumentsListPage() {
 
       <div className="flex flex-wrap gap-3 mb-6">
         <Link
-          href="/notes/new"
+          href="/search"
           className="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800"
+        >
+          搜索资料
+        </Link>
+        <Link
+          href="/notes/new"
+          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
         >
           记录一个想法
         </Link>
