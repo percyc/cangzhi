@@ -58,6 +58,7 @@
 |---|---:|---|---|
 | CZ-401 | P0 | ✅ 结构优先父子切片 | 保留标题路径、页码、source span、content_hash，幂等可重建 |
 | CZ-402 | P0 | ✅ 全文索引 | 精确术语、标题和正文均可搜索（PG `tsvector` + GIN；SQLite `LIKE` 降级） |
+| CZ-408 | P0 | ✅ 确定性文档类型检测 | 不依赖 LLM，结构统计+关键词检测，类型适配切片 |
 | CZ-403 | P0 | Embedding 管线 | 内容哈希未变化时不重复生成向量 |
 | CZ-404 | P0 | 向量索引 | pgvector HNSW 查询可用 |
 | CZ-405 | P0 | RRF 融合 | 全文与向量结果可解释地合并 |
@@ -78,8 +79,9 @@
 | CZ-608 | P0 | ✅ 页面 `/login` | 中文错误提示；登录成功按来源跳转 |
 | CZ-609 | P0 | ✅ 模型设置页 `/settings` | 禁用/OpenAI 兼容/Ollama 三选一，base URL/model/key，key 仅 `has_api_key` 回显 |
 | CZ-610 | P0 | ✅ 密钥加密落库 | Fernet 加密 + 主密钥持久化在 storage 中（0o600）；并发创建安全 |
-| CZ-611 | P0 | ✅ 连接测试 | 探测最小 endpoint，响应脱敏，禁止回显密钥或上游原始错误 |
+| CZ-611 | P0 | ✅ 连接测试 | 探测最小 endpoint，响应脱敏，禁止回显密钥或上游原始错误；OpenAI compatible 必须验证 JSON 结构和模型存在 |
 | CZ-612 | P0 | ✅ DB 覆盖 env | `build_provider_from_db/_session` 始终优先于 `.env`；切换到 disabled 也立即生效 |
+| CZ-617 | P0 | ✅ prompt_version 收口 | 不再允许用户修改，内部固定版本追溯，Worker 从 DB 配置读取版本 |
 | CZ-613 | P0 | ✅ Worker 读取运行时配置 | Worker 每个任务调用 `build_provider_from_session`，无需重启 |
 | CZ-614 | P0 | ✅ 顶部导航与状态 | 资料库/搜索/问知识库/设置/退出；登录状态显式可见 |
 | CZ-615 | P0 | ✅ `/ask` 未配置提示 | 提示用户前往 `/settings` 配置模型 |

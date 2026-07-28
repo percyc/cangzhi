@@ -102,6 +102,10 @@ class TestChunkingJob:
         assert child.char_count > 0
         assert child.token_estimate > 0
         assert child.is_current is True
+        session.refresh(version)
+        assert version.meta["document_profile"]["detected_type"] == "general"
+        assert version.meta["chunking_config"]["profile_version"] == "chunk-profile:v1"
+        assert child.extra["document_profile"]["profile_version"] == "chunk-profile:v1"
 
     def test_chunking_is_idempotent(self, session):
         document = Document(

@@ -50,6 +50,9 @@
 - ✅ 结构优先父子切片（M3-1）
 - ✅ PostgreSQL 全文索引（M3-1）
 - ✅ 单轮带引用问答（M3-2）：基于父子切片的 FTS 证据召回 + OpenAI/Ollama 结构化回答
+- ✅ 单用户认证与网页模型设置（M3-3）
+- ✅ 确定性文档类型检测与类型适配切片（M3-4）
+- **当前依然使用关键词全文召回**，向量召回和 RRF 融合后续处理
 - pgvector Embedding 与 HNSW 索引
 - BM25/FTS + 向量 + 元数据过滤
 - RRF 融合和可选 Reranker
@@ -112,6 +115,19 @@ M3-2（已交付，首版）：在 M3-1 的 FTS 之上交付单轮带引用问�
 ADR-006 与 ADR-011 排到 M3 后续。
 
 验收：黄金集中，正确证据进入 Top 5 的比例达到 80%；回答不能伪造引用。
+
+M3-4（已交付，本次迭代）：确定性文档类型检测与类型适配切片。
+
+* 新建 `apps/api/documents/` 模块：检测依据解析文档类型、块类型占比、标题/正文关键词，保守评分后输出文档类型，低置信度强制降级为 general。
+* 支持输出类型：`general/legal/contract/paper/meeting/code/table`。
+* 类型感知分块：`general` 保持当前行为；`code/table` 使用更大块参数尽量保持单个代码块/表格块完整；其他类型首版识别后记录元数据，分块暂时使用 general 参数；特殊规则足够可靠后再添加专属参数。
+* 清理未生效的父片段尺寸参数：父片段明确保存完整章节，子片段按类型配置控制尺寸，避免配置与真实行为不一致。
+* 元数据写入：`DocumentVersion.meta` 写入 document_profile、chunking_config、structure_anomaly；每个 `DocumentChunk.extra` 写入类型信息；检测分块幂等可重复处理，显式 reprocess 后获得新策略，不批量重处理已有文档。
+* 模型连接测试改进：OpenAI-compatible /models 响应必须验证 JSON 结构，并且检查配置模型是否存在于返回列表；HTML 2xx 不再判定成功；错误信息严格脱敏。
+* **提示词版本收口**：prompt_version 不再允许网页设置和 API 用户修改，仅作为内部提示词包版本追溯，保留在 DocumentSummary 作为处理记录；Worker 从 DB 加载实际运行配置获取版本，不再使用环境默认值；首版仅支持 v1，未知版本安全回退。
+* 兼容 SQLite 和 PostgreSQL 两种数据库，代码不绑定特定后端。
+
+验收：检测结果确定，相同文档重复处理得到相同元数据；大代码文档切片保持块完整性；模型连接测试正确识别 HTML 响应为失败；连接测试不泄露敏感信息。
 
 ## M4：个人 Beta 稳定性（3～5 个开发日）
 

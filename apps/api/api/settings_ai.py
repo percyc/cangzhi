@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -96,13 +96,14 @@ class _OllamaConfig(BaseModel):
 
 
 class AIConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = Field(min_length=1, max_length=16)
     openai: _OpenAIConfig | None = None
     ollama: _OllamaConfig | None = None
     api_key_action: str = Field(default="keep", max_length=16)
     api_key: str | None = Field(default=None, max_length=512)
     timeout_seconds: int | None = Field(default=None, ge=1, le=600)
-    prompt_version: str | None = Field(default=None, max_length=64)
 
     @field_validator("provider")
     @classmethod
@@ -190,8 +191,6 @@ async def update_settings(
     row.provider = payload.provider
     if payload.timeout_seconds is not None:
         row.timeout_seconds = payload.timeout_seconds
-    if payload.prompt_version:
-        row.prompt_version = payload.prompt_version.strip()[:64] or "v1"
 
     if payload.provider == "openai":
         if payload.openai is None:
@@ -297,12 +296,62 @@ async def _probe_openai(
             response = await client.get(url, headers=headers)
     except httpx.HTTPError as exc:
         return _safe_failure("无法连接 OpenAI 兼容服务", exc)
+
     if response.status_code >= 400:
         return {
             "ok": False,
             "message": f"服务返回 HTTP {response.status_code}，请检查地址、密钥和模型权限",
         }
-    return {"ok": True, "message": "连接正常"}
+
+    try:
+        data = response.json()
+    except ValueError:
+        return {
+            "ok": False,
+            "message": "服务返回的不是模型列表，请检查 API 地址是否包含正确的版本路径",
+        }
+
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "message": "服务返回的模型列表格式不正确",
+        }
+
+    models_data = data.get("data")
+    if not isinstance(models_data, list):
+        return {
+            "ok": False,
+            "message": "服务返回的模型列表格式不正确",
+        }
+
+    # Check if our configured model is available in the list
+    model_ids = []
+    for item in models_data:
+        if isinstance(item, dict):
+            # Different providers use different keys: id/name/model
+            candidate_id = item.get("id") or item.get("name") or item.get("model")
+            if candidate_id:
+                model_ids.append(str(candidate_id).strip())
+
+    if not model_ids:
+        return {"ok": False, "message": "服务没有返回任何可用模型"}
+
+    if model.strip() not in model_ids:
+        matching = [m for m in model_ids if model.strip().lower() in m.lower()]
+        if matching:
+            suggestions = ", ".join(m[:30] for m in matching[:3])
+            msg = f"配置的模型 '{model[:30]}...' 不在模型列表中，找到相似模型：{suggestions}"
+        else:
+            available = ", ".join(m[:20] for m in model_ids[:5])
+            if len(model_ids) > 5:
+                available += "..."
+            msg = f"配置的模型不在列表中，可用模型：{available}"
+        return {
+            "ok": False,
+            "message": msg,
+        }
+
+    return {"ok": True, "message": "连接正常，模型已验证"}
 
 
 async def _probe_ollama(
@@ -317,13 +366,58 @@ async def _probe_ollama(
             response = await client.get(url)
     except httpx.HTTPError as exc:
         return _safe_failure("无法连接 Ollama 服务", exc)
+
+    # Check that response is actually JSON
+    try:
+        data = response.json()
+    except ValueError:
+        return {
+            "ok": False,
+            "message": "Ollama 返回了非 JSON 响应，请检查服务地址是否正确",
+        }
+
     if response.status_code >= 400:
         return {
             "ok": False,
             "message": f"Ollama 返回 HTTP {response.status_code}，请检查服务地址",
         }
-    return {"ok": True, "message": "连接正常"}
+
+    # Verify expected structure and check model exists
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "message": "JSON 结构不符合 Ollama 格式",
+        }
+
+    models_data = data.get("models")
+    if not isinstance(models_data, list):
+        # Older Ollama versions may have different format - accept if 2xx
+        return {"ok": True, "message": "连接成功（无法验证模型列表）"}
+
+    # Check model name
+    model_names = []
+    for item in models_data:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("model")
+            if name:
+                model_names.append(str(name).strip())
+
+    if not model_names:
+        return {"ok": True, "message": "连接成功（无法验证模型列表）"}
+
+    if model.strip() not in model_names:
+        available = ", ".join(m[:30] for m in model_names[:5])
+        if len(model_names) > 5:
+            available += "..."
+        return {
+            "ok": False,
+            "message": f"配置的模型 '{model[:30]}...' 不在可用列表中，可用：{available}",
+        }
+
+    return {"ok": True, "message": "连接正常，模型已验证"}
 
 
 def _safe_failure(prefix: str, exc: Exception) -> dict[str, Any]:
+    # Never leak exception strings that may contain API keys or secrets
+    # Only report the exception type, no details
     return {"ok": False, "message": f"{prefix}：{type(exc).__name__}"}

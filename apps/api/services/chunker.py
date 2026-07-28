@@ -37,8 +37,6 @@ from ..parsers.base import Block, StructuredContent
 CHILD_TARGET_MAX_CHARS = 600
 CHILD_HARD_MAX_CHARS = 900
 CHILD_TARGET_MIN_CHARS = 80
-PARENT_SOFT_MAX_CHARS = 2_000
-PARENT_HARD_MAX_CHARS = 3_500
 
 # Sentence boundary detectors. Chinese punctuation first so we don't
 # split on the ASCII period inside a number; newline is always a
@@ -102,8 +100,6 @@ def build_chunk_specs(
     child_max_chars: int = CHILD_TARGET_MAX_CHARS,
     child_hard_max_chars: int = CHILD_HARD_MAX_CHARS,
     child_min_chars: int = CHILD_TARGET_MIN_CHARS,
-    parent_soft_max_chars: int = PARENT_SOFT_MAX_CHARS,
-    parent_hard_max_chars: int = PARENT_HARD_MAX_CHARS,
 ) -> list[ChunkSpec]:
     """Return the parent and child chunks for a structured document.
 
@@ -155,8 +151,6 @@ def build_chunk_specs(
             target_max=child_max_chars,
             hard_max=child_hard_max_chars,
             min_chars=child_min_chars,
-            parent_soft_max=parent_soft_max_chars,
-            parent_hard_max=parent_hard_max_chars,
         )
         for child in children:
             child.parent_external_id = parent_external_id
@@ -300,8 +294,6 @@ def _split_section_into_children(
     target_max: int,
     hard_max: int,
     min_chars: int,
-    parent_soft_max: int,
-    parent_hard_max: int,
 ) -> list[ChunkSpec]:
     """Split a section's body into child chunks.
 
@@ -309,6 +301,9 @@ def _split_section_into_children(
     (or sentence fragments) until the soft target is reached. If a
     single block exceeds ``hard_max`` it is split at sentence
     boundaries and, as a last resort, by character.
+
+    Parent chunks intentionally retain the complete semantic section.
+    Only child chunks are size-bounded because they are the retrieval units.
     """
 
     if not section.blocks:
@@ -319,6 +314,8 @@ def _split_section_into_children(
     ]
     full_text = _join_section_text(section)
     body_pages = {b.page for b in body_blocks if b.page is not None}
+
+    # If parent is within limits, return as single child chunk normally
     if len(full_text) <= target_max and len(body_pages) <= 1:
         first_paragraph_index = (
             body_blocks[0].paragraph_index

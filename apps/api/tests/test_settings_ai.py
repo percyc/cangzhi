@@ -176,7 +176,6 @@ def test_update_openai_config_encrypts_key_and_returns_only_flag(client):
             "api_key_action": "replace",
             "api_key": "sk-test-very-long-secret-1234567890",
             "timeout_seconds": 45,
-            "prompt_version": "v2",
         },
     )
     assert response.status_code == 200
@@ -187,7 +186,8 @@ def test_update_openai_config_encrypts_key_and_returns_only_flag(client):
     assert "openai_api_key" not in config
     assert "hint" not in config
     assert config["timeout_seconds"] == 45
-    assert config["prompt_version"] == "v2"
+    # prompt_version is read-only compatibility metadata.
+    assert config["prompt_version"] == "v1"
 
     # Confirm the database stores a ciphertext, not the plaintext.
     async def _fetch():
@@ -200,6 +200,16 @@ def test_update_openai_config_encrypts_key_and_returns_only_flag(client):
     assert row is not None
     assert row.openai_api_key_cipher != "sk-test-very-long-secret-1234567890"
     assert decrypt_secret(row.openai_api_key_cipher) == "sk-test-very-long-secret-1234567890"
+
+
+def test_prompt_version_cannot_be_changed_by_client(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={"provider": "disabled", "prompt_version": "v2"},
+    )
+    assert response.status_code == 422
 
 
 def test_keep_action_does_not_overwrite_existing_key(client):
@@ -357,6 +367,55 @@ def test_connection_test_disabled_provider(client):
     body = response.json()
     assert body["ok"] is False
     assert "未启用" in body["message"]
+
+
+def test_connection_test_rejects_html_200(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://gateway.example.com", "model": "demo-model"},
+            "api_key_action": "replace",
+            "api_key": "sk-html-test-aaaaaaaaaaaaaaaa",
+        },
+    )
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<html>gateway home</html>")
+    )
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    body = test_client.post("/api/settings/ai/test").json()
+    assert body["ok"] is False
+    assert "API 地址" in body["message"]
+
+
+def test_connection_test_checks_configured_model(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://gateway.example.com/v1", "model": "wanted"},
+            "api_key_action": "replace",
+            "api_key": "sk-model-test-aaaaaaaaaaaaaaa",
+        },
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"data": [{"id": "other"}]})
+    )
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    body = test_client.post("/api/settings/ai/test").json()
+    assert body["ok"] is False
+    assert "模型" in body["message"]
 
 
 # --- DB config overrides env -------------------------------------------

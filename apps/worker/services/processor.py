@@ -9,11 +9,18 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from apps.api.ai import (
+    AIProvider,
     AIProviderError,
     UnderstandingResult,
     build_provider_from_session,
 )
 from apps.api.constants import INBOX_CATEGORY_NAME, INBOX_CATEGORY_SLUG
+from apps.api.documents import (
+    ChunkingConfig,
+    DocumentProfile,
+    detect_document_type,
+    get_chunking_config,
+)
 from apps.api.extractors import extract_xinhua_html
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
@@ -379,7 +386,7 @@ def _process_understanding(
         )
         return _complete_understanding_job(session, job, document, version)
 
-    _persist_understanding_result(session, version, document, result, categories)
+    _persist_understanding_result(session, version, document, result, categories, provider)
     return _complete_understanding_job(session, job, document, version)
 
 
@@ -455,10 +462,68 @@ def _process_chunking(
     )
     content_hash_seed = hashlib.sha256(seed_input.encode("utf-8")).hexdigest()
 
+    # Step 1: Detect document type and check for structure anomalies
+    profile: DocumentProfile
+    chunking_config: ChunkingConfig
+    structure_anomaly: str | None = None
+
+    try:
+        # Extract features for detection
+        block_types = [b.type for b in structured.blocks]
+        headings: list[str] = []
+        first_paragraphs: list[str] = []
+        for b in structured.blocks:
+            if b.type == "heading" and b.text:
+                headings.append(b.text)
+            elif b.type == "paragraph" and b.text:
+                if len(first_paragraphs) < 10:
+                    first_paragraphs.append(b.text)
+
+        profile = detect_document_type(
+            parser_type=structured.document_type,
+            block_types=block_types,
+            title=document.title,
+            headings=headings,
+            first_paragraphs=first_paragraphs,
+        )
+
+        chunking_config = get_chunking_config(profile)
+
+        # Only flag shapes where an optional future AI boundary pass may help.
+        if not structured.blocks:
+            structure_anomaly = "empty_document"
+        elif (
+            not headings
+            and profile.detected_type not in {"code", "table"}
+            and max(len(block.text or "") for block in structured.blocks)
+            > chunking_config.child_hard_max_chars * 2
+        ):
+            structure_anomaly = "long_unstructured_text"
+    except Exception as exc:
+        # Fall back to safe defaults if anything goes wrong
+        logger.warning(
+            "document_detection_failed",
+            document_id=document.id,
+            version_id=version.id,
+            error=str(exc),
+        )
+        profile = DocumentProfile(
+            detected_type="general",
+            confidence=0.0,
+            scores={},
+            evidence={"fallback_reason": "detection_error"},
+        )
+        chunking_config = get_chunking_config(profile)
+        structure_anomaly = f"detection_error: {exc}"
+
+    # Step 2: Build chunks with detected type's config
     try:
         specs = build_chunk_specs(
             structured,
             content_hash_seed=content_hash_seed,
+            child_max_chars=chunking_config.child_target_max_chars,
+            child_hard_max_chars=chunking_config.child_hard_max_chars,
+            child_min_chars=chunking_config.child_target_min_chars,
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception(
@@ -482,7 +547,7 @@ def _process_chunking(
         session.commit()
         return False
 
-    _replace_version_chunks(session, document, version, specs)
+    _replace_version_chunks(session, document, version, specs, profile, chunking_config)
 
     job.status = "completed"
     job.finished_at = utc_now()
@@ -492,19 +557,28 @@ def _process_chunking(
     session.add(job)
     if version.processing_status in ("ready", "chunking", "processing"):
         version.processing_status = "ready"
-    version.meta = {
-        **(version.meta or {}),
-        "chunk_count": sum(1 for spec in specs if spec.role == "child"),
-        "parent_count": sum(1 for spec in specs if spec.role == "parent"),
-        "chunk_config_version": CHUNKING_IDEMPOTENCY,
-    }
+
+    # Write detection results and config to DocumentVersion.meta
+    # Idempotent: always overwrite with latest detection
+    meta = dict(version.meta or {})
+    meta["document_profile"] = profile.to_dict()
+    meta["chunking_config"] = chunking_config.to_dict()
+    meta["structure_anomaly"] = structure_anomaly
+    meta["chunk_count"] = sum(1 for spec in specs if spec.role == "child")
+    meta["parent_count"] = sum(1 for spec in specs if spec.role == "parent")
+    meta["chunk_config_version"] = CHUNKING_IDEMPOTENCY
+    version.meta = meta
     session.add(version)
+
     session.commit()
     logger.info(
         "chunking_completed",
         document_id=document.id,
         version_id=version.id,
+        detected_type=profile.detected_type,
+        confidence=profile.confidence,
         chunks=len(specs),
+        anomaly=structure_anomaly,
     )
     return True
 
@@ -514,6 +588,8 @@ def _replace_version_chunks(
     document: Document,
     version: DocumentVersion,
     specs,
+    profile: DocumentProfile,
+    chunking_config: ChunkingConfig,
 ) -> None:
     """Replace all chunks for a version, preserving stable ids.
 
@@ -544,8 +620,19 @@ def _replace_version_chunks(
 
     parent_id_by_external: dict[str, int] = {}
     title = (document.title or "").strip()
+    # Add profile info to each chunk's extra
+    chunk_extra = {
+        "document_profile": {
+            "detected_type": profile.detected_type,
+            "confidence": profile.confidence,
+            "profile_version": chunking_config.profile_version,
+        },
+    }
     for spec in specs:
         search_text = _build_search_text(title, spec)
+        extra = dict(chunk_extra)
+        if spec.extra:
+            extra.update(spec.extra)
         chunk = DocumentChunk(
             document_id=document.id,
             document_version_id=version.id,
@@ -565,7 +652,7 @@ def _replace_version_chunks(
             char_count=spec.char_count,
             token_estimate=spec.token_estimate,
             language=spec.language,
-            extra={},
+            extra=extra,
             is_current=True,
         )
         session.add(chunk)
@@ -704,6 +791,7 @@ def _persist_understanding_result(
     document: Document,
     result: UnderstandingResult,
     categories: list[Category],
+    provider: AIProvider | None = None,
 ) -> None:
     by_slug = {cat.slug: cat for cat in categories}
     primary = by_slug.get(result.category_slug)
@@ -756,7 +844,7 @@ def _persist_understanding_result(
             document_version_id=version.id,
             summary=result.summary,
             model=(provider.name if provider else settings.ai_provider or None),
-            prompt_version=settings.ai_prompt_version,
+            prompt_version=(provider.prompt_version if provider else "v1"),
             confidence=result.confidence,
             source="model",
             extra={"doc_type": result.doc_type, "rationale": result.rationale},

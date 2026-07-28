@@ -7,6 +7,7 @@ from typing import Any, Iterable, Sequence
 import httpx
 
 from ..core.config import settings
+from .prompts import get_allowed_version
 from .schema import AnswerResult, UnderstandingResult, validate_against_evidence
 
 
@@ -59,6 +60,7 @@ class AIProviderError(RuntimeError):
 
 class AIProvider(ABC):
     name: str = ""
+    prompt_version: str = "v1"
 
     @abstractmethod
     def is_configured(self) -> bool: ...
@@ -193,11 +195,13 @@ class OpenAICompatibleProvider(AIProvider):
         api_key: str,
         model: str,
         timeout: float,
+        prompt_version: str = "v1",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._timeout = timeout
+        self.prompt_version = get_allowed_version(prompt_version)
 
     def is_configured(self) -> bool:
         return bool(self._api_key) and bool(self._base_url) and bool(self._model)
@@ -306,10 +310,17 @@ class OpenAICompatibleProvider(AIProvider):
 class OllamaProvider(AIProvider):
     name = "ollama"
 
-    def __init__(self, base_url: str, model: str, timeout: float) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float,
+        prompt_version: str = "v1",
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout
+        self.prompt_version = get_allowed_version(prompt_version)
 
     def is_configured(self) -> bool:
         return bool(self._base_url) and bool(self._model)
@@ -481,6 +492,7 @@ def build_provider() -> AIProvider | None:
             api_key=settings.openai_api_key,
             model=settings.openai_model,
             timeout=settings.ai_request_timeout_seconds,
+            prompt_version=settings.ai_prompt_version,
         )
     if provider == "ollama":
         if not settings.ollama_base_url:
@@ -489,6 +501,7 @@ def build_provider() -> AIProvider | None:
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
             timeout=settings.ai_request_timeout_seconds,
+            prompt_version=settings.ai_prompt_version,
         )
     return None
 
@@ -535,6 +548,7 @@ async def build_provider_from_db(db) -> AIProvider | None:
             api_key=api_key,
             model=row.openai_model,
             timeout=float(row.timeout_seconds or 30),
+            prompt_version=row.prompt_version,
         )
     if row.provider == "ollama":
         if not row.ollama_base_url or not row.ollama_model:
@@ -543,6 +557,7 @@ async def build_provider_from_db(db) -> AIProvider | None:
             base_url=row.ollama_base_url,
             model=row.ollama_model,
             timeout=float(row.timeout_seconds or 30),
+            prompt_version=row.prompt_version,
         )
     return None
 
@@ -590,6 +605,7 @@ def build_provider_from_session(session) -> AIProvider | None:
             api_key=api_key,
             model=row.openai_model,
             timeout=float(row.timeout_seconds or 30),
+            prompt_version=row.prompt_version,
         )
     if row.provider == "ollama":
         if not row.ollama_base_url or not row.ollama_model:
@@ -598,5 +614,6 @@ def build_provider_from_session(session) -> AIProvider | None:
             base_url=row.ollama_base_url,
             model=row.ollama_model,
             timeout=float(row.timeout_seconds or 30),
+            prompt_version=row.prompt_version,
         )
     return None

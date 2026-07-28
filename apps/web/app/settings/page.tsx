@@ -26,7 +26,6 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState('');
   const [clearKey, setClearKey] = useState(false);
   const [timeoutSeconds, setTimeoutSeconds] = useState(30);
-  const [promptVersion, setPromptVersion] = useState('v1');
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<AITestResult | null>(null);
@@ -44,7 +43,6 @@ export default function SettingsPage() {
         setOllamaBaseUrl(data.ollama_base_url ?? 'http://localhost:11434');
         setOllamaModel(data.ollama_model ?? 'llama3.1');
         setTimeoutSeconds(data.timeout_seconds || 30);
-        setPromptVersion(data.prompt_version || 'v1');
       })
       .catch((err) => {
         if (cancelled) return;
@@ -70,7 +68,6 @@ export default function SettingsPage() {
         | 'clear',
       api_key: clearKey ? undefined : apiKey || undefined,
       timeout_seconds: timeoutSeconds,
-      prompt_version: promptVersion.trim() || 'v1',
       openai:
         provider === 'openai'
           ? { base_url: openaiBaseUrl.trim(), model: openaiModel.trim() }
@@ -241,19 +238,13 @@ export default function SettingsPage() {
           </section>
         )}
 
-        <section className="grid gap-4 sm:grid-cols-2">
+        <section>
           <Field
             id="timeout"
             label="请求超时（秒）"
             value={String(timeoutSeconds)}
             onChange={(value) => setTimeoutSeconds(Number(value) || 30)}
             type="number"
-          />
-          <Field
-            id="prompt-version"
-            label="提示词版本"
-            value={promptVersion}
-            onChange={setPromptVersion}
           />
         </section>
 
