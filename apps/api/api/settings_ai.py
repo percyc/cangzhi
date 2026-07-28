@@ -136,6 +136,7 @@ class AIConfigUpdate(BaseModel):
     api_key_action: str = Field(default="keep", max_length=16)
     api_key: str | None = Field(default=None, max_length=512)
     timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    embedding_model: str | None = Field(default=None, max_length=255)
 
     @field_validator("provider")
     @classmethod
@@ -151,6 +152,18 @@ class AIConfigUpdate(BaseModel):
         cleaned = (value or "keep").strip().lower()
         if cleaned not in {"keep", "replace", "clear"}:
             raise ValueError("不支持的密钥操作")
+        return cleaned
+
+    @field_validator("embedding_model")
+    @classmethod
+    def _embedding_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > 200:
+            raise ValueError("Embedding 模型名称不能超过 200 个字符")
         return cleaned
 
 
@@ -223,6 +236,9 @@ async def update_settings(
     row.provider = payload.provider
     if payload.timeout_seconds is not None:
         row.timeout_seconds = payload.timeout_seconds
+    # Preserve the setting for older clients that do not send this new field.
+    if "embedding_model" in payload.model_fields_set:
+        row.embedding_model = payload.embedding_model
 
     if payload.provider == "openai":
         if payload.openai is None:
@@ -424,6 +440,245 @@ def _safe_failure(prefix: str, exc: Exception) -> dict[str, Any]:
     # Never leak exception strings that may contain API keys or secrets
     # Only report the exception type, no details
     return {"ok": False, "message": f"{prefix}：{type(exc).__name__}"}
+
+
+# --- Embedding connection test --------------------------------------------
+#
+# The embedding test is intentionally isolated from the chat test:
+# the chat path calls ``/chat/completions`` (OpenAI) or ``/api/chat``
+# (Ollama), but the embedding endpoints have a different shape, so
+# their own probe is needed. The probe is read-only: it sends a
+# single very short test string and validates that the response
+# contains a non-empty, finite numeric vector. When the user has
+# not picked an embedding model yet the endpoint refuses with a
+# gentle hint and the existing FTS path is untouched.
+
+
+_EMBEDDING_PROBE_TEXT = "ping"
+
+
+def _validate_embedding_vector(value: Any) -> int:
+    """Return the dimensionality of a single, well-formed embedding vector.
+
+    ``value`` is whatever the provider returned for the first row of
+    the probe input. We require a non-empty list of numbers, each of
+    which must be finite (no NaN, no inf). The dimensionality is
+    reported back to the operator so they can sanity-check the
+    configuration before vector search ships.
+    """
+
+    if not isinstance(value, list) or not value:
+        raise ValueError("返回的向量为空或不是数组")
+    for item in value:
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            raise ValueError("向量包含非数值字段")
+        if isinstance(item, float) and (item != item or item in (float("inf"), float("-inf"))):
+            raise ValueError("向量包含非法数值（NaN/Inf）")
+    return len(value)
+
+
+def _extract_openai_embedding(payload: Any) -> list:
+    if not isinstance(payload, dict):
+        raise ValueError("top-level response is not an object")
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        raise ValueError("响应缺少 data 字段")
+    first = data[0]
+    if not isinstance(first, dict):
+        raise ValueError("响应 data[0] 不是对象")
+    return first.get("embedding")
+
+
+def _extract_ollama_embedding(payload: Any) -> list:
+    if not isinstance(payload, dict):
+        raise ValueError("top-level response is not an object")
+    embeddings = payload.get("embeddings")
+    if isinstance(embeddings, list) and embeddings:
+        first = embeddings[0]
+        if isinstance(first, list):
+            return first
+    # Older Ollama releases use ``embedding`` (singular) under the
+    # legacy ``/api/embeddings`` endpoint. The new ``/api/embed``
+    # endpoint always uses ``embeddings``; we keep the fallback so
+    # a stale proxy does not surface as a hard error.
+    legacy = payload.get("embedding")
+    if isinstance(legacy, list) and legacy:
+        return legacy
+    raise ValueError("响应缺少 embeddings/embedding 字段")
+
+
+@router.post("/embedding/test", response_model=dict[str, Any])
+async def test_embedding(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """Probe the embedding endpoint configured for the active provider.
+
+    The probe sends a one-word string (``"ping"``) and validates that
+    the response carries a non-empty, finite numeric vector. The
+    endpoint refuses with a clear message when:
+
+    * the AI provider is disabled;
+    * no embedding model has been selected yet;
+    * the user picked an embedding model but the corresponding base
+      URL or API key is missing.
+    """
+
+    row = await _get_or_create_config(db)
+    if not row.embedding_model:
+        return {"ok": False, "message": "尚未选择 Embedding 模型，留空即关闭"}
+    if row.provider == "disabled":
+        return {"ok": False, "message": "当前未启用任何模型来源"}
+    if row.provider == "openai":
+        if not row.openai_base_url:
+            return {"ok": False, "message": "尚未配置 OpenAI 兼容地址"}
+        if not row.has_api_key or not row.openai_api_key_cipher:
+            return {"ok": False, "message": "尚未保存 OpenAI 兼容密钥"}
+        try:
+            api_key = decrypt_secret(row.openai_api_key_cipher)
+        except (SecretStoreError, SecretDecryptError):
+            logger.warning("ai_embedding_test_decrypt_failed admin=%s", admin.username)
+            return {"ok": False, "message": "主密钥不匹配或密文已损坏，请联系管理员"}
+        if not api_key:
+            return {"ok": False, "message": "尚未保存 OpenAI 兼容密钥"}
+        return await _probe_openai_embedding(
+            base_url=row.openai_base_url,
+            model=row.embedding_model,
+            api_key=api_key,
+            timeout=float(row.timeout_seconds or 30),
+        )
+    if row.provider == "ollama":
+        if not row.ollama_base_url:
+            return {"ok": False, "message": "尚未配置 Ollama 地址"}
+        return await _probe_ollama_embedding(
+            base_url=row.ollama_base_url,
+            model=row.embedding_model,
+            timeout=float(row.timeout_seconds or 30),
+        )
+    return {"ok": False, "message": "不支持的模型来源"}
+
+
+async def _probe_openai_embedding(
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    timeout: float,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/embeddings"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    body = {"model": model, "input": _EMBEDDING_PROBE_TEXT}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.post(url, headers=headers, json=body)
+    except httpx.HTTPError as exc:
+        return _safe_failure("无法连接 Embedding 服务", exc)
+
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "message": f"服务返回 HTTP {response.status_code}，请检查地址、密钥和模型权限",
+        }
+
+    try:
+        data = response.json()
+    except ValueError:
+        return {
+            "ok": False,
+            "message": "Embedding 服务返回的不是 JSON",
+        }
+
+    try:
+        vector = _extract_openai_embedding(data)
+        dim = _validate_embedding_vector(vector)
+    except ValueError as exc:
+        return {"ok": False, "message": f"Embedding 响应无效：{exc}"}
+
+    return {
+        "ok": True,
+        "message": f"连接正常，Embedding 模型已验证（维度 {dim}）",
+    }
+
+
+async def _probe_ollama_embedding(
+    *,
+    base_url: str,
+    model: str,
+    timeout: float,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/embed"
+    body = {"model": model, "input": _EMBEDDING_PROBE_TEXT}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.post(url, json=body)
+    except httpx.HTTPError as exc:
+        return _safe_failure("无法连接 Ollama Embedding 服务", exc)
+
+    if response.status_code >= 400:
+        # Some older Ollama builds only expose ``/api/embeddings``.
+        # Fall back to that legacy path so the user still gets a
+        # useful result instead of a hard error.
+        if response.status_code in (404, 405):
+            return await _probe_ollama_legacy_embedding(
+                base_url=base_url, model=model, timeout=timeout
+            )
+        return {
+            "ok": False,
+            "message": f"Ollama Embedding 返回 HTTP {response.status_code}",
+        }
+
+    try:
+        data = response.json()
+    except ValueError:
+        return {"ok": False, "message": "Ollama Embedding 返回的不是 JSON"}
+
+    try:
+        vector = _extract_ollama_embedding(data)
+        dim = _validate_embedding_vector(vector)
+    except ValueError as exc:
+        return {"ok": False, "message": f"Ollama Embedding 响应无效：{exc}"}
+
+    return {
+        "ok": True,
+        "message": f"连接正常，Embedding 模型已验证（维度 {dim}）",
+    }
+
+
+async def _probe_ollama_legacy_embedding(
+    *,
+    base_url: str,
+    model: str,
+    timeout: float,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/embeddings"
+    body = {"model": model, "prompt": _EMBEDDING_PROBE_TEXT}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.post(url, json=body)
+    except httpx.HTTPError as exc:
+        return _safe_failure("无法连接 Ollama Embedding 服务", exc)
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "message": f"Ollama Embedding 返回 HTTP {response.status_code}",
+        }
+    try:
+        data = response.json()
+    except ValueError:
+        return {"ok": False, "message": "Ollama Embedding 返回的不是 JSON"}
+    try:
+        vector = _extract_ollama_embedding(data)
+        dim = _validate_embedding_vector(vector)
+    except ValueError as exc:
+        return {"ok": False, "message": f"Ollama Embedding 响应无效：{exc}"}
+    return {
+        "ok": True,
+        "message": f"连接正常，Embedding 模型已验证（维度 {dim}）",
+    }
 
 
 # --- Model list endpoint ---------------------------------------------------

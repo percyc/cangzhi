@@ -7,6 +7,7 @@ import {
   fetchAIConfig,
   fetchAIModels,
   testAIConfig,
+  testEmbeddingConfig,
   updateAIConfig,
   type AIConfig,
   type AIModelsResponse,
@@ -26,6 +27,7 @@ export default function SettingsPage() {
   const [openaiModel, setOpenaiModel] = useState('');
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState('http://localhost:11434');
   const [ollamaModel, setOllamaModel] = useState('');
+  const [embeddingModel, setEmbeddingModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [clearKey, setClearKey] = useState(false);
   const [timeoutSeconds, setTimeoutSeconds] = useState(30);
@@ -36,6 +38,8 @@ export default function SettingsPage() {
   const [models, setModels] = useState<AIModelsResponse['models']>([]);
   const [modelsFetchState, setModelsFetchState] = useState<FetchState>('idle');
   const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
+  const [embeddingTestResult, setEmbeddingTestResult] = useState<AITestResult | null>(null);
+  const [embeddingTesting, setEmbeddingTesting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,6 +52,7 @@ export default function SettingsPage() {
         setOpenaiModel(data.openai_model ?? '');
         setOllamaBaseUrl(data.ollama_base_url ?? 'http://localhost:11434');
         setOllamaModel(data.ollama_model ?? '');
+        setEmbeddingModel(data.embedding_model ?? '');
         setTimeoutSeconds(data.timeout_seconds || 30);
       })
       .catch((err) => {
@@ -78,6 +83,8 @@ export default function SettingsPage() {
       openaiModel.trim() !== (config?.openai_model ?? '')) ||
     (provider === 'ollama' &&
       ollamaModel.trim() !== (config?.ollama_model ?? ''));
+  const embeddingModelChanged =
+    embeddingModel.trim() !== (config?.embedding_model ?? '');
 
   const handleFetchModels = async () => {
     if (connectionChanged) {
@@ -120,6 +127,7 @@ export default function SettingsPage() {
         provider === 'ollama'
           ? { base_url: ollamaBaseUrl.trim(), model: ollamaModel.trim() }
           : undefined,
+      embedding_model: embeddingModel.trim() || null,
     };
 
     try {
@@ -150,6 +158,22 @@ export default function SettingsPage() {
       });
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleEmbeddingTest = async () => {
+    setEmbeddingTesting(true);
+    setEmbeddingTestResult(null);
+    try {
+      const result = await testEmbeddingConfig();
+      setEmbeddingTestResult(result);
+    } catch (err) {
+      setEmbeddingTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : '测试 Embedding 连接失败',
+      });
+    } finally {
+      setEmbeddingTesting(false);
     }
   };
 
@@ -316,6 +340,69 @@ export default function SettingsPage() {
           </section>
         )}
 
+        {provider !== 'disabled' && (
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="text-base font-semibold text-slate-800">
+              Embedding 模型
+            </h2>
+            <p className="text-xs text-slate-500">
+              可选：选择一个 Embedding 模型（与上面同一个服务地址）。
+              留空即关闭 Embedding 功能，搜索仍按关键词/全文匹配工作。
+            </p>
+            <FieldWithList
+              id="embedding-model"
+              label="Embedding 模型"
+              help="可从上方获取到的模型列表中挑选，也支持手动输入。"
+              value={embeddingModel}
+              onChange={(value) => {
+                setEmbeddingModel(value);
+                setEmbeddingTestResult(null);
+              }}
+              models={models}
+              allowEmpty
+              emptyOptionLabel="（不启用 Embedding）"
+            />
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleEmbeddingTest}
+                disabled={
+                  embeddingTesting ||
+                  connectionChanged ||
+                  embeddingModelChanged ||
+                  !config.embedding_model
+                }
+                className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {embeddingTesting ? '正在测试…' : '测试 Embedding 连接'}
+              </button>
+              {embeddingModelChanged && (
+                <p className="text-sm text-amber-700">
+                  请先保存 Embedding 模型的改动
+                </p>
+              )}
+              {connectionChanged && (
+                <p className="text-sm text-amber-700">
+                  请先保存地址或密钥的改动
+                </p>
+              )}
+              {embeddingTestResult && (
+                <p
+                  className={`text-sm ${
+                    embeddingTestResult.ok
+                      ? 'text-emerald-700'
+                      : 'text-red-700'
+                  }`}
+                >
+                  {embeddingTestResult.ok
+                    ? 'Embedding 连接正常'
+                    : `Embedding 连接失败：${embeddingTestResult.message}`}
+                </p>
+              )}
+            </div>
+          </section>
+        )}
+
         <section>
           <Field
             id="timeout"
@@ -448,6 +535,8 @@ function FieldWithList({
   onChange,
   models,
   help,
+  allowEmpty = false,
+  emptyOptionLabel = '',
 }: {
   id: string;
   label: string;
@@ -455,11 +544,25 @@ function FieldWithList({
   onChange: (next: string) => void;
   models: AIModelsResponse['models'];
   help?: string;
+  allowEmpty?: boolean;
+  emptyOptionLabel?: string;
 }) {
-  const selectedModel = models.some((model) => model.id === value) ? value : '';
+  const matches = models.some((model) => model.id === value);
+  // The <select> can only show one of the known options. When the
+  // user types a value that is not in the list, fall back to the
+  // placeholder option so the widget never displays a phantom value.
+  const selectValue = matches
+    ? value
+    : allowEmpty
+      ? '__empty__'
+      : '';
 
   const handleSelectChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     const selectedValue = event.target.value;
+    if (allowEmpty && selectedValue === '__empty__') {
+      onChange('');
+      return;
+    }
     if (selectedValue) {
       onChange(selectedValue);
     }
@@ -475,11 +578,15 @@ function FieldWithList({
           aria-label={`${label}快速选择`}
           className="mb-2 mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
           onChange={handleSelectChange}
-          value={selectedModel}
+          value={selectValue}
         >
-          <option value="">
-            从 {models.length} 个模型中选择
-          </option>
+          {allowEmpty ? (
+            <option value="__empty__">{emptyOptionLabel || '（不选择）'}</option>
+          ) : (
+            <option value="">
+              从 {models.length} 个模型中选择
+            </option>
+          )}
           {models.map((model) => (
             <option key={model.id} value={model.id}>
               {model.label || model.id}

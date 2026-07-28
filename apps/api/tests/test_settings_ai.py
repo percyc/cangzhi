@@ -358,6 +358,10 @@ class _MockAsyncClient:
         request = httpx.Request("GET", str(url), **kwargs)
         return self._transport.handle_request(request)
 
+    async def post(self, url, **kwargs):
+        request = httpx.Request("POST", str(url), **kwargs)
+        return self._transport.handle_request(request)
+
 
 def test_connection_test_disabled_provider(client):
     test_client, _ = client
@@ -792,3 +796,485 @@ def test_models_caps_at_500_entries(client, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert len(data["models"]) == 500
+
+
+# --- Embedding model field -------------------------------------------------
+
+
+def test_embedding_model_is_default_null_in_public_dict(client):
+    """The embedding_model field defaults to null and is exposed
+    on the public response so the page can render an empty input.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.get("/api/settings/ai")
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert "embedding_model" in config
+    assert config["embedding_model"] is None
+
+
+def test_update_can_set_and_clear_embedding_model(client):
+    """The PATCH endpoint persists the new field; an explicit empty
+    string clears it so the feature can be turned off.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.example.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "replace",
+            "api_key": "sk-embed-persist-aaaaaaaaaaaaaa",
+            "embedding_model": "text-embedding-3-small",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["config"]["embedding_model"] == "text-embedding-3-small"
+
+    # Persisted on disk
+    async def _fetch():
+        async for db in app.dependency_overrides[get_db]():
+            return (await db.execute(select(AIRuntimeConfig))).scalars().first()
+
+    row = __import__("asyncio").run(_fetch())
+    assert row.embedding_model == "text-embedding-3-small"
+
+    # Older clients that omit the new field must not clear it.
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.example.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "keep",
+        },
+    )
+    assert response.json()["config"]["embedding_model"] == "text-embedding-3-small"
+
+    # Empty string clears the field — embedding is off again.
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.example.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "keep",
+            "embedding_model": "",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["config"]["embedding_model"] is None
+
+
+def test_update_rejects_overly_long_embedding_model(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "x"},
+            "api_key_action": "keep",
+            "embedding_model": "a" * 300,
+        },
+    )
+    assert response.status_code == 422
+
+
+# --- Embedding connection test --------------------------------------------
+
+
+def test_embedding_test_requires_authentication():
+    """Anonymous requests must be rejected, matching the rest of the
+    settings routes.
+    """
+
+    from fastapi.testclient import TestClient as TC
+
+    app.dependency_overrides.pop(require_admin, None)
+    try:
+        with TC(app) as client_:
+            response = client_.post("/api/settings/ai/embedding/test")
+            assert response.status_code == 401
+            assert response.json()["detail"]["code"] == "unauthenticated"
+    finally:
+        from types import SimpleNamespace
+
+        app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
+            id=1, username="tester", is_active=True
+        )
+
+
+def test_embedding_test_rejects_when_model_not_set(client):
+    """A missing embedding model must be reported as off, not as a
+    successful probe — keeps the FTS path safe.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "x"},
+            "api_key_action": "replace",
+            "api_key": "sk-embed-empty-zzzzzzzzzzzzzzz",
+        },
+    )
+    response = test_client.post("/api/settings/ai/embedding/test")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert "Embedding" in body["message"]
+
+
+def test_embedding_test_rejects_when_provider_disabled(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    # Manually persist a config with an embedding model but a
+    # disabled provider — the test endpoint must refuse on
+    # "provider disabled" rather than probe the model list.
+    async def _seed():
+        async for db in app.dependency_overrides[get_db]():
+            row = AIRuntimeConfig(
+                provider="disabled",
+                embedding_model="text-embedding-3-small",
+                timeout_seconds=30,
+                prompt_version="v1",
+                singleton_key="singleton",
+            )
+            db.add(row)
+            await db.commit()
+
+    __import__("asyncio").run(_seed())
+    body = test_client.post("/api/settings/ai/embedding/test").json()
+    assert body["ok"] is False
+    assert "未启用" in body["message"]
+
+
+def test_embedding_test_openai_success_and_dimension_report(client, monkeypatch):
+    """A valid OpenAI /v1/embeddings response yields ok=true with
+    the reported dimensionality.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.example.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "replace",
+            "api_key": "sk-embed-ok-aaaaaaaaaaaaaaaa",
+            "embedding_model": "text-embedding-3-small",
+        },
+    )
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"embedding": [0.1, 0.2, 0.3, 0.4]},
+                ],
+                "model": "text-embedding-3-small",
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.post("/api/settings/ai/embedding/test")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert "4" in body["message"]
+
+    # The probe must hit /embeddings, send a tiny input and include
+    # the configured model name. Any secret must never appear in
+    # the request.
+    assert captured, "expected at least one HTTP request"
+    request = captured[0]
+    assert request.url.path.endswith("/embeddings")
+    body_text = request.content.decode("utf-8")
+    payload = json.loads(body_text)
+    assert payload["model"] == "text-embedding-3-small"
+    assert payload["input"]  # a short, non-empty string
+    assert len(payload["input"]) < 32
+    assert "sk-embed-ok-aaaaaaaaaaaaaaaa" not in body_text
+
+
+def test_embedding_test_never_leaks_key_in_error_message(client, monkeypatch):
+    """A 500 from the upstream that embeds the API key must not
+    surface the key in the public response.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    secret = "sk-embed-leak-zzzzzzzzzzzzzzzzz"
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.example.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "replace",
+            "api_key": secret,
+            "embedding_model": "text-embedding-3-small",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            text=f"upstream failure {secret} Bearer {secret}",
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.post("/api/settings/ai/embedding/test")
+    body = response.json()
+    assert body["ok"] is False
+    assert secret not in body["message"]
+    assert secret not in response.text
+    assert "HTTP 500" in body["message"]
+
+
+def test_embedding_test_rejects_empty_or_invalid_vectors(client, monkeypatch):
+    """Vectors that are empty, missing, or contain NaN/Inf must be
+    rejected. The error message must not leak the API key.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    secret = "sk-embed-vector-aaaaaaaaaaaaaaa"
+    # Persist the embedding model once; each case only swaps the
+    # transport so we can iterate without re-creating the admin.
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {
+                "base_url": "https://api.example.com/v1",
+                "model": "gpt-4o-mini",
+            },
+            "api_key_action": "replace",
+            "api_key": secret,
+            "embedding_model": "text-embedding-3-small",
+        },
+    )
+
+    # ``NaN`` and ``Infinity`` are not JSON-compliant under
+    # ``json.dumps``; we craft the raw response body ourselves so
+    # the server still sees a 200 with the malformed payload. The
+    # ``hint`` is a substring we expect to find in the user-facing
+    # error so each case asserts a different failure surface.
+    cases = [
+        (b'{"data": []}', "缺少 data"),
+        (b'{"data": [{}]}', "不是数组"),
+        (b'{"data": [{"embedding": []}]}', "不是数组"),
+        (b'{"data": [{"embedding": [1e9999, 0.1]}]}', "NaN"),
+        (b'{"data": [{"embedding": [0.1, 1e9999]}]}', "NaN"),
+        (b'{"data": [{"embedding": ["x", 0.1]}]}', "非数值"),
+    ]
+    for payload, hint in cases:
+        transport = httpx.MockTransport(
+            lambda request, body=payload: httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=body,
+            )
+        )
+        monkeypatch.setattr(
+            "apps.api.api.settings_ai.httpx.AsyncClient",
+            lambda *args, **kwargs: _MockAsyncClient(transport),
+        )
+        response = test_client.post("/api/settings/ai/embedding/test")
+        body = response.json()
+        assert body["ok"] is False, f"expected rejection for {hint}"
+        assert hint in body["message"], (
+            f"missing hint {hint!r} in {body['message']!r}"
+        )
+        assert secret not in body["message"]
+        assert secret not in response.text
+
+
+def test_embedding_test_rejects_non_json_response(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "x"},
+            "api_key_action": "replace",
+            "api_key": "sk-embed-html-aaaaaaaaaaaaaaaa",
+            "embedding_model": "text-embedding-3-small",
+        },
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<html>homepage</html>")
+    )
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    body = test_client.post("/api/settings/ai/embedding/test").json()
+    assert body["ok"] is False
+    assert "JSON" in body["message"]
+
+
+def test_embedding_test_ollama_success(client, monkeypatch):
+    """A valid Ollama /api/embed response yields ok=true."""
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "ollama",
+            "ollama": {"base_url": "http://localhost:11434", "model": "llama3.1"},
+            "embedding_model": "nomic-embed-text",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/api/embed")
+        return httpx.Response(
+            200,
+            json={"model": "nomic-embed-text", "embeddings": [[0.5, -0.5, 1.0]]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    body = test_client.post("/api/settings/ai/embedding/test").json()
+    assert body["ok"] is True
+    assert "3" in body["message"]
+
+
+def test_embedding_test_ollama_falls_back_to_legacy_endpoint(client, monkeypatch):
+    """If the modern /api/embed returns 404 the probe falls back to
+    the legacy /api/embeddings endpoint and validates that one.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "ollama",
+            "ollama": {"base_url": "http://localhost:11434", "model": "llama3.1"},
+            "embedding_model": "nomic-embed-text",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/embed"):
+            return httpx.Response(404, text="not found")
+        assert request.url.path.endswith("/api/embeddings")
+        return httpx.Response(
+            200,
+            json={"embedding": [0.1, 0.2, 0.3, 0.4, 0.5]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    body = test_client.post("/api/settings/ai/embedding/test").json()
+    assert body["ok"] is True
+    assert "5" in body["message"]
+
+
+def test_embedding_test_ollama_rejects_invalid_vector(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "ollama",
+            "ollama": {"base_url": "http://localhost:11434", "model": "llama3.1"},
+            "embedding_model": "nomic-embed-text",
+        },
+    )
+    # 1e9999 overflows to ``inf`` when parsed as JSON, exercising
+    # the NaN/Inf check in ``_validate_embedding_vector``.
+    body_bytes = b'{"embeddings": [[1e9999, 0.1]]}'
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=body_bytes,
+        )
+    )
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    body = test_client.post("/api/settings/ai/embedding/test").json()
+    assert body["ok"] is False
+    assert "非法" in body["message"] or "NaN" in body["message"]
+
+
+def test_embedding_test_openai_connection_failure_is_sanitized(client, monkeypatch):
+    """A network failure must surface only the exception class, not
+    a verbose traceback or any embedded credentials.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "x"},
+            "api_key_action": "replace",
+            "api_key": "sk-embed-netfail-aaaaaaaaaaaaa",
+            "embedding_model": "text-embedding-3-small",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("sk-embed-netfail-aaaaaaaaaaaaa unreachable")
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    body = test_client.post("/api/settings/ai/embedding/test").json()
+    assert body["ok"] is False
+    assert "sk-embed-netfail-aaaaaaaaaaaaa" not in body["message"]
+    assert "无法连接" in body["message"]

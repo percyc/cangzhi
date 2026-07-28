@@ -68,6 +68,7 @@ class AIRuntimeConfig(BaseModel):
     )
     ollama_base_url = Column(String(512), nullable=True)
     ollama_model = Column(String(255), nullable=True)
+    embedding_model = Column(String(255), nullable=True)
     timeout_seconds = Column(Integer, nullable=False, server_default=text("30"))
     prompt_version = Column(String(64), nullable=False, server_default=text("'v1'"))
     updated_by = Column(
@@ -110,6 +111,7 @@ class AIRuntimeConfig(BaseModel):
             "has_api_key": bool(self.has_api_key),
             "ollama_base_url": self.ollama_base_url,
             "ollama_model": self.ollama_model,
+            "embedding_model": self.embedding_model,
             "timeout_seconds": self.timeout_seconds,
             "prompt_version": self.prompt_version,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

@@ -12,6 +12,7 @@ export type AIConfig = {
   has_api_key: boolean;
   ollama_base_url: string | null;
   ollama_model: string | null;
+  embedding_model: string | null;
   timeout_seconds: number;
   prompt_version: string;
   updated_at: string | null;
@@ -32,6 +33,7 @@ export type AIConfigPayload = {
   api_key_action: 'keep' | 'replace' | 'clear';
   api_key?: string;
   timeout_seconds?: number;
+  embedding_model?: string | null;
 };
 
 export type AITestResult = {
@@ -126,6 +128,17 @@ export async function testAIConfig(): Promise<AITestResult> {
   });
   if (!response.ok) {
     throw new Error(await extractErrorMessage(response, '测试连接失败'));
+  }
+  return parseJson<AITestResult>(response);
+}
+
+export async function testEmbeddingConfig(): Promise<AITestResult> {
+  const response = await fetch('/api/settings/ai/embedding/test', {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '测试 Embedding 连接失败'));
   }
   return parseJson<AITestResult>(response);
 }
