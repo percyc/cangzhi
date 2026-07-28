@@ -12,6 +12,11 @@ COPY . .
 
 WORKDIR /app/apps/web
 
+# Next.js resolves rewrites while building the production bundle.
+# Use the Compose service name here; a runtime-only API_URL is too late.
+ARG API_URL=http://api:8000
+ENV API_URL=${API_URL}
+
 RUN npm run build
 
 ENV NODE_ENV=production

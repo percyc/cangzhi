@@ -95,6 +95,8 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        API_URL: http://api:8000
     container_name: cangzhi-web
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
     ports:
