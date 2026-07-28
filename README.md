@@ -54,3 +54,65 @@
 
 > 粘贴一篇文章链接 → 自动下载和解析 → 自动归类 → 在知识库中找到 → 提问并得到带出处的回答 → 修改错误分类且系统记录纠正。
 
+## 本地开发启动
+
+### 前置要求
+
+- Docker 和 Docker Compose
+- Python 3.11+（本地开发时使用）
+- Node.js 20+（本地前端开发时使用）
+
+### 快速启动
+
+1. 复制环境变量模板：
+
+```bash
+cp .env.example .env
+```
+
+2. 一键启动所有服务：
+
+```bash
+make up
+```
+
+这会启动：
+
+- PostgreSQL 16 + pgvector
+- 自动运行数据库迁移
+- FastAPI 应用（http://localhost:8000）
+- 后台处理 Worker
+- Next.js Web 应用（http://localhost:3000）
+
+### 常用命令
+
+```bash
+# 查看服务状态
+make ps
+
+# 查看日志
+make logs             # 所有服务
+make logs-api         # 仅 API
+
+# 重新运行迁移（本地开发）
+make migrate
+
+# 运行测试
+make test             # 所有测试
+make test-api         # 仅 API 测试
+
+# 停止服务
+make down
+
+# ⚠️ 停止服务并删除所有数据库数据（清空后无法恢复）
+make down-volumes
+
+# 完整安装所有依赖到本地（用于 IDE 提示和本地测试）
+make install
+```
+
+### 健康检查端点
+
+- Web：`GET http://localhost:3000/api/health`，返回 200 表示正常
+- API liveness：`GET http://localhost:8000/api/liveness`，进程存活即返回 200
+- API readiness：`GET http://localhost:8000/api/readiness`，数据库连接正常才返回 200

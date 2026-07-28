@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+apps/web/node_modules/
+.venv/
+__pycache__
+*.pyc
+
+# Git
+.git
+.gitignore
+.github
+
+# Environment
+.env
+.env.*
+
+# Data
+storage
+postgres_data
+
+# Build artifacts
+.next/
+apps/web/.next/
+apps/web/tsconfig.tsbuildinfo
+dist
+build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Testing and linting
+.pytest_cache
+.coverage
+htmlcov
+.mypy_cache
