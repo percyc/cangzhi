@@ -19,6 +19,7 @@ class Document(BaseModel):
     title = Column(String(1024), nullable=False, index=True)
     description = Column(Text, nullable=True)
     source_type = Column(Enum(DocumentSourceType), nullable=False)
+    source_url = Column(String(2048), nullable=True)
     current_version_id = Column(
         Integer,
         ForeignKey(

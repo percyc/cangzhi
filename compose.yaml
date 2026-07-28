@@ -44,6 +44,10 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cangzhi}:${POSTGRES_PASSWORD:-cangzhi-dev}@postgres:5432/${POSTGRES_DB:-cangzhi}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
       STORAGE_PATH: /app/storage
       MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}
     depends_on:
@@ -67,6 +71,16 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cangzhi}:${POSTGRES_PASSWORD:-cangzhi-dev}@postgres:5432/${POSTGRES_DB:-cangzhi}
       POLL_INTERVAL: ${POLL_INTERVAL:-5}
+      STORAGE_PATH: /app/storage
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
+      URL_FETCH_MAX_BYTES: ${URL_FETCH_MAX_BYTES:-5242880}
+      URL_FETCH_TIMEOUT_SECONDS: ${URL_FETCH_TIMEOUT_SECONDS:-20}
+      URL_FETCH_MAX_REDIRECTS: ${URL_FETCH_MAX_REDIRECTS:-5}
     depends_on:
       api:
         condition: service_healthy

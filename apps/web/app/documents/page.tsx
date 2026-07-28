@@ -3,6 +3,23 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
+type DocumentSummary = {
+  summary: string;
+  source: string;
+};
+
+type DocumentCategory = {
+  id: number;
+  slug: string;
+  name: string;
+};
+
+type DocumentTag = {
+  id: number;
+  slug: string;
+  name: string;
+};
+
 type DocumentVersion = {
   id: number;
   version_number: number;
@@ -17,10 +34,29 @@ type Document = {
   title: string;
   description: string | null;
   source_type: string;
+  source_url: string | null;
   is_deleted: boolean;
   created_at: string;
   updated_at: string;
   current_version: DocumentVersion | null;
+  primary_category: DocumentCategory | null;
+  categories: DocumentCategory[];
+  tags: DocumentTag[];
+  summary: DocumentSummary | null;
+};
+
+const statusLabels: Record<string, string> = {
+  created: '待处理',
+  processing: '处理中',
+  retry: '等待重试',
+  ready: '已完成',
+  failed: '处理失败',
+};
+
+const sourceTypeLabels: Record<string, string> = {
+  note: '随手记',
+  file: '文件',
+  url: '链接',
 };
 
 export default function DocumentsListPage() {
@@ -44,74 +80,89 @@ export default function DocumentsListPage() {
       });
   }, []);
 
-  const getSourceTypeLabel = (type: string) => {
-    switch (type) {
-      case 'note': return '随手记';
-      case 'file': return '文件';
-      case 'url': return '链接';
-      default: return type;
-    }
-  };
-
-  const getStatusLabel = (doc: Document) => {
-    if (!doc.current_version) return '';
-    switch (doc.current_version.processing_status) {
-      case 'created': return '待处理';
-      case 'ready': return '已完成';
-      case 'failed': return '处理失败';
-      default: return doc.current_version.processing_status;
-    }
-  };
-
   return (
     <main className="container mx-auto p-4">
-      <h1 className="text-2xl font-bold mb-4">文档列表</h1>
+      <h1 className="text-2xl font-bold mb-4">资料库</h1>
 
-      <div className="flex gap-4 mb-6">
+      <div className="flex flex-wrap gap-3 mb-6">
         <Link
           href="/notes/new"
-          className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          className="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800"
         >
-          新建随手记
+          记录一个想法
         </Link>
         <Link
           href="/files/upload"
-          className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
+          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
         >
           上传文件
         </Link>
+        <Link
+          href="/links/new"
+          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
+        >
+          收藏链接
+        </Link>
+        <Link
+          href="/categories"
+          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
+        >
+          分类管理
+        </Link>
       </div>
 
-      {loading && <p>加载中...</p>}
-      {error && <p className="text-red-600">错误: {error}</p>}
+      {loading && <p className="text-slate-500">加载中…</p>}
+      {error && <p className="text-red-600">错误：{error}</p>}
 
       {!loading && !error && (
         documents.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
             <p className="text-lg font-medium text-slate-800">还没有资料</p>
-            <p className="mt-2 text-sm text-slate-500">从一条随手记或一个文件开始建立你的知识库。</p>
+            <p className="mt-2 text-sm text-slate-500">从一条随手记、一篇文章链接或一个文件开始建立你的知识库。</p>
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {documents.map(doc => (
-              <div
-                key={doc.id}
-                className="border rounded p-4 shadow-sm hover:shadow transition-shadow"
-              >
-                <h2 className="text-xl font-semibold mb-2">
-                  <Link href={`/documents/${doc.id}`} className="text-blue-600 hover:underline">
-                    {doc.title}
-                  </Link>
-                </h2>
-                <div className="text-sm text-gray-500 space-y-1">
-                  <p>类型: {getSourceTypeLabel(doc.source_type)}</p>
-                  <p>创建时间: {new Date(doc.created_at).toLocaleString('zh-CN')}</p>
-                  {doc.current_version && (
-                    <p>状态: {getStatusLabel(doc)}</p>
+            {documents.map(doc => {
+              const version = doc.current_version;
+              const status = version?.processing_status || 'created';
+              return (
+                <div
+                  key={doc.id}
+                  className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow transition-shadow"
+                >
+                  <h2 className="text-lg font-semibold text-slate-900">
+                    <Link href={`/documents/${doc.id}`} className="hover:underline">
+                      {doc.title}
+                    </Link>
+                  </h2>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5">
+                      {sourceTypeLabels[doc.source_type] || doc.source_type}
+                    </span>
+                    <span>{statusLabels[status] || status}</span>
+                    {doc.primary_category && (
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">
+                        {doc.primary_category.name}
+                      </span>
+                    )}
+                  </div>
+                  {doc.summary?.summary && (
+                    <p className="mt-3 text-sm text-slate-600 line-clamp-3">
+                      {doc.summary.summary}
+                    </p>
+                  )}
+                  {doc.tags.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-1">
+                      {doc.tags.slice(0, 4).map(tag => (
+                        <span key={tag.id} className="rounded-full border border-slate-200 px-2 py-0.5 text-xs text-slate-600">
+                          #{tag.name}
+                        </span>
+                      ))}
+                    </div>
                   )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )
       )}

@@ -24,6 +24,13 @@ from apps.api.core.db import Base
 from apps.api.models.blobs import Blob
 from apps.api.models.documents import Document, DocumentVersion
 from apps.api.models.processing import ProcessingJob
+from apps.api.models.taxonomy import (
+    Category,
+    DocumentCategory,
+    DocumentSummary,
+    DocumentTag,
+    Tag,
+)
 
 # target metadata
 target_metadata = Base.metadata

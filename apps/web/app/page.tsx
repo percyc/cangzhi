@@ -1,4 +1,4 @@
-import Link from 'next/link'
+import Link from 'next/link';
 
 export default function Home() {
   return (
@@ -15,10 +15,16 @@ export default function Home() {
         <Link href="/files/upload" className="rounded-xl border border-slate-300 px-5 py-3">
           上传资料
         </Link>
+        <Link href="/links/new" className="rounded-xl border border-slate-300 px-5 py-3">
+          收藏链接
+        </Link>
         <Link href="/documents" className="rounded-xl border border-slate-300 px-5 py-3">
           查看全部资料
         </Link>
+        <Link href="/categories" className="rounded-xl border border-slate-300 px-5 py-3">
+          分类管理
+        </Link>
       </div>
     </main>
-  )
+  );
 }

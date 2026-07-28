@@ -6,25 +6,108 @@ from ..core.db import get_db
 from ..models.processing import ProcessingJob
 from ..models.blobs import Blob
 from ..models.documents import Document, DocumentVersion
+from ..models.taxonomy import (
+    Category,
+    DocumentCategory,
+    DocumentSummary,
+    DocumentTag,
+    Tag,
+)
 from .schemas import (
     BlobResponse,
-    DocumentResponse,
-    DocumentVersionResponse,
+    CategoryMini,
     DocumentReprocessResponse,
+    DocumentResponse,
+    DocumentSummaryResponse,
+    DocumentVersionResponse,
     ProcessingJobResponse,
+    TagMini,
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+async def _load_categories_for_versions(
+    db: AsyncSession,
+    version_ids: list[int],
+) -> dict[int, tuple[CategoryMini | None, list[CategoryMini]]]:
+    if not version_ids:
+        return {}
+    result = await db.execute(
+        select(DocumentCategory, Category)
+        .join(Category, Category.id == DocumentCategory.category_id)
+        .where(DocumentCategory.document_version_id.in_(version_ids))
+        .order_by(DocumentCategory.id)
+    )
+    grouped: dict[int, list[tuple[DocumentCategory, Category]]] = {}
+    for link, category in result.all():
+        grouped.setdefault(link.document_version_id, []).append((link, category))
+    output: dict[int, tuple[CategoryMini | None, list[CategoryMini]]] = {}
+    for version_id, links in grouped.items():
+        cats = [
+            CategoryMini.model_validate(cat)
+            for _link, cat in sorted(links, key=lambda item: item[0].id)
+        ]
+        primary = next(
+            (
+                cat
+                for (link, cat) in links
+                if link.is_primary
+            ),
+            None,
+        )
+        primary_dto = CategoryMini.model_validate(primary) if primary is not None else None
+        output[version_id] = (primary_dto, cats)
+    return output
+
+
+async def _load_tags_for_versions(
+    db: AsyncSession,
+    version_ids: list[int],
+) -> dict[int, list[TagMini]]:
+    if not version_ids:
+        return {}
+    result = await db.execute(
+        select(DocumentTag, Tag)
+        .join(Tag, Tag.id == DocumentTag.tag_id)
+        .where(DocumentTag.document_version_id.in_(version_ids))
+        .order_by(DocumentTag.id)
+    )
+    grouped: dict[int, list[TagMini]] = {}
+    for _link, tag in result.all():
+        grouped.setdefault(_link.document_version_id, []).append(
+            TagMini.model_validate(tag)
+        )
+    return grouped
+
+
+async def _load_summaries_for_versions(
+    db: AsyncSession,
+    version_ids: list[int],
+) -> dict[int, DocumentSummaryResponse]:
+    if not version_ids:
+        return {}
+    result = await db.execute(
+        select(DocumentSummary).where(
+            DocumentSummary.document_version_id.in_(version_ids)
+        )
+    )
+    return {
+        summary.document_version_id: DocumentSummaryResponse.model_validate(summary)
+        for summary in result.scalars().all()
+    }
 
 
 async def build_document_response(
     db: AsyncSession,
     document: Document,
 ) -> DocumentResponse:
-    version_response = None
+    version_response: DocumentVersionResponse | None = None
+    version_id: int | None = None
     if document.current_version_id is not None:
         version = await db.get(DocumentVersion, document.current_version_id)
         if version is not None:
+            version_id = version.id
             blob_response = None
             if version.blob_id is not None:
                 blob = await db.get(Blob, version.blob_id)
@@ -39,17 +122,35 @@ async def build_document_response(
                 processing_status=version.processing_status,
                 created_at=version.created_at,
                 blob=blob_response,
+                source_url=document.source_url,
             )
+
+    primary_category = None
+    categories: list[CategoryMini] = []
+    tags: list[TagMini] = []
+    summary: DocumentSummaryResponse | None = None
+    if version_id is not None:
+        cat_map = await _load_categories_for_versions(db, [version_id])
+        tag_map = await _load_tags_for_versions(db, [version_id])
+        summary_map = await _load_summaries_for_versions(db, [version_id])
+        primary_category, categories = cat_map.get(version_id, (None, []))
+        tags = tag_map.get(version_id, [])
+        summary = summary_map.get(version_id)
 
     return DocumentResponse(
         id=document.id,
         title=document.title,
         description=document.description,
         source_type=document.source_type.value,
+        source_url=document.source_url,
         is_deleted=document.is_deleted,
         created_at=document.created_at,
         updated_at=document.updated_at,
         current_version=version_response,
+        primary_category=primary_category,
+        categories=categories,
+        tags=tags,
+        summary=summary,
     )
 
 
@@ -134,7 +235,7 @@ async def reprocess_document(
             idempotency_key=idempotency_key,
             retry_count=0,
             max_retries=3,
-            config_version="1",
+            config_version="2",
         )
 
     version.processing_status = "created"

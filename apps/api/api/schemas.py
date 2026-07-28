@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BlobResponse(BaseModel):
@@ -12,6 +12,22 @@ class BlobResponse(BaseModel):
     content_type: str
     file_size: int
     original_filename: str | None
+
+
+class CategoryMini(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    slug: str
+    name: str
+
+
+class TagMini(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    slug: str
+    name: str
 
 
 class DocumentVersionResponse(BaseModel):
@@ -25,6 +41,19 @@ class DocumentVersionResponse(BaseModel):
     processing_status: str
     created_at: datetime
     blob: BlobResponse | None = None
+    source_url: str | None = None
+
+
+class DocumentSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    summary: str
+    confidence: float | None
+    model: str | None
+    prompt_version: str | None
+    source: str
+    created_at: datetime
 
 
 class DocumentResponse(BaseModel):
@@ -34,10 +63,15 @@ class DocumentResponse(BaseModel):
     title: str
     description: str | None
     source_type: str
+    source_url: str | None
     is_deleted: bool
     created_at: datetime
     updated_at: datetime
     current_version: DocumentVersionResponse | None = None
+    primary_category: CategoryMini | None = None
+    categories: list[CategoryMini] = Field(default_factory=list)
+    tags: list[TagMini] = Field(default_factory=list)
+    summary: DocumentSummaryResponse | None = None
 
 
 class ProcessingJobResponse(BaseModel):

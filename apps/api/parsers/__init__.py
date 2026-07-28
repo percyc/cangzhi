@@ -11,6 +11,7 @@ from .text import TextParser
 from .markdown import MarkdownParser
 from .pdf import PdfParser
 from .docx import DocxParser
+from .html import HtmlParser
 
 __all__ = [
     "BaseParser",
@@ -23,5 +24,6 @@ __all__ = [
     "MarkdownParser",
     "PdfParser",
     "DocxParser",
+    "HtmlParser",
     "get_parser_for_content",
 ]
