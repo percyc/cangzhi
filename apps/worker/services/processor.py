@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.ai import AIProviderError, UnderstandingResult, build_provider
 from apps.api.constants import INBOX_CATEGORY_NAME, INBOX_CATEGORY_SLUG
+from apps.api.extractors import extract_xinhua_html
 from apps.api.models.blobs import Blob
 from apps.api.models.documents import (
     Document,
@@ -44,6 +45,7 @@ UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
+MIN_USEFUL_URL_TEXT_LENGTH = 20
 
 
 def utc_now() -> datetime.datetime:
@@ -637,7 +639,32 @@ def _process_parsing(
                 result.error_details,
             )
 
-        _apply_parse_result(session, document, version, result.structured_content)
+        structured_content = result.structured_content
+        if (
+            document.source_type == DocumentSourceType.url
+            and len(structured_content.full_text().strip())
+            < MIN_USEFUL_URL_TEXT_LENGTH
+        ):
+            try:
+                adapted_html = extract_xinhua_html(
+                    document.source_url or "",
+                    max_bytes=settings.url_fetch_max_bytes,
+                    timeout_seconds=settings.url_fetch_timeout_seconds,
+                )
+                if adapted_html is not None:
+                    adapted = get_parser_for_content(
+                        "text/html", document.source_url
+                    ).parse(adapted_html, "text/html")
+                    if adapted.success and adapted.structured_content is not None:
+                        structured_content = adapted.structured_content
+            except (URLFetchError, URLSecurityError) as exc:
+                logger.warning(
+                    "url_adapter_failed",
+                    document_id=document.id,
+                    error=str(exc),
+                )
+
+        _apply_parse_result(session, document, version, structured_content)
 
         job.status = "completed"
         job.finished_at = utc_now()
@@ -647,12 +674,27 @@ def _process_parsing(
         session.add(job)
         if job.config_version == "2":
             _clear_understanding_results(session, version.id)
-        # Always enqueue understanding after a successful parse.
-        _enqueue_understanding_job(
-            session,
-            document_id=document.id,
-            version_id=version.id,
+        has_useful_text = bool(
+            (version.raw_content or "").strip()
+            and len((version.raw_content or "").strip())
+            >= MIN_USEFUL_URL_TEXT_LENGTH
         )
+        if document.source_type != DocumentSourceType.url or has_useful_text:
+            _enqueue_understanding_job(
+                session,
+                document_id=document.id,
+                version_id=version.id,
+            )
+        else:
+            version.processing_status = "unsupported"
+            version.meta = {
+                **(version.meta or {}),
+                "extraction_status": "dynamic_page",
+                "extraction_message": (
+                    "该网页需要执行脚本加载正文，目前还没有适配此网站。"
+                ),
+            }
+            session.add(version)
         session.commit()
         logger.info(
             "parse_completed",

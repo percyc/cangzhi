@@ -39,6 +39,7 @@ class DocumentVersionResponse(BaseModel):
     raw_content: str | None
     structured_content: dict[str, Any] | None
     processing_status: str
+    meta: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     blob: BlobResponse | None = None
     source_url: str | None = None

@@ -28,6 +28,10 @@ type DocumentVersion = {
   version_number: number;
   raw_content: string | null;
   processing_status: string;
+  meta: {
+    extraction_status?: string;
+    extraction_message?: string;
+  };
   structured_content: {
     metadata?: {
       author?: string | null;
@@ -69,6 +73,7 @@ const statusLabels: Record<string, string> = {
   retry: '等待重试',
   ready: '已完成',
   failed: '处理失败',
+  unsupported: '暂未提取正文',
 };
 
 const statusColors: Record<string, string> = {
@@ -77,6 +82,7 @@ const statusColors: Record<string, string> = {
   retry: 'text-amber-700',
   ready: 'text-green-700',
   failed: 'text-red-700',
+  unsupported: 'text-amber-700',
 };
 
 const sourceTypeLabels: Record<string, string> = {
@@ -151,7 +157,7 @@ export default function DocumentDetailPage() {
 
   const version = document.current_version;
   const status = version?.processing_status || 'created';
-  const canRetry = status === 'failed';
+  const canRetry = ['failed', 'unsupported'].includes(status);
   const metadata = version?.structured_content?.metadata;
 
   return (
@@ -238,7 +244,12 @@ export default function DocumentDetailPage() {
         </article>
       ) : (
         <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-slate-600">
-          {status === 'failed' ? '暂时没有可显示的正文。' : '正在提取正文，请稍候…'}
+          {['created', 'processing', 'retry'].includes(status)
+            ? '正在提取正文，请稍候…'
+            : version?.meta?.extraction_message ||
+              (status === 'ready'
+                ? '处理已经完成，但没有识别到可显示的正文。你可以尝试重新处理。'
+                : '暂时没有可显示的正文。')}
         </div>
       )}
 

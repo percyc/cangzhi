@@ -120,6 +120,7 @@ async def build_document_response(
                 raw_content=version.raw_content,
                 structured_content=version.structured_content,
                 processing_status=version.processing_status,
+                meta=version.meta or {},
                 created_at=version.created_at,
                 blob=blob_response,
                 source_url=document.source_url,

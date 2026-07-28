@@ -4,6 +4,7 @@ import http.client
 import socket
 import ssl
 from dataclasses import dataclass
+from collections.abc import Mapping
 from urllib.parse import urljoin, urlsplit
 
 from .url_safety import URLSecurityError, normalize_url, resolve_allowed_addresses
@@ -86,8 +87,15 @@ def fetch_url(
     max_redirects: int = 5,
     user_agent: str = DEFAULT_USER_AGENT,
     follow_redirects: bool = True,
+    accept: str = "text/html,application/xhtml+xml",
+    allowed_content_types: set[str] | None = None,
+    request_headers: Mapping[str, str] | None = None,
 ) -> FetchedPage:
-    """Fetch an HTML page with DNS/IP validation on every redirect."""
+    """Fetch a page with DNS/IP validation on every redirect.
+
+    The defaults only accept HTML. Trusted internal adapters may opt into
+    additional response types and add protocol-specific headers.
+    """
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     if timeout_seconds <= 0:
@@ -128,16 +136,22 @@ def fetch_url(
             timeout_seconds,
         )
         try:
+            headers = {
+                "Host": host_header,
+                "User-Agent": user_agent,
+                "Accept": accept,
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+                "Connection": "close",
+            }
+            if request_headers:
+                protected = {"host", "connection", "content-length"}
+                for key, value in request_headers.items():
+                    if key.lower() not in protected:
+                        headers[key] = value
             connection.request(
                 "GET",
                 request_target,
-                headers={
-                    "Host": host_header,
-                    "User-Agent": user_agent,
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
-                    "Connection": "close",
-                },
+                headers=headers,
             )
             response = connection.getresponse()
 
@@ -154,8 +168,9 @@ def fetch_url(
                 raise URLFetchError(f"远端返回状态码 {response.status}")
 
             media_type = _content_type(response.getheader("Content-Type"))
-            if media_type not in _HTML_CONTENT_TYPES:
-                raise URLFetchError("仅支持 HTML 页面")
+            accepted_types = allowed_content_types or _HTML_CONTENT_TYPES
+            if media_type not in accepted_types:
+                raise URLFetchError("远端返回了不支持的内容类型")
             content_length = response.getheader("Content-Length")
             if content_length:
                 try:

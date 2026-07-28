@@ -1,10 +1,18 @@
 import socket
+import json
 
 import pytest
 
 from apps.api.ai.provider import AIProviderError, _parse_and_validate
+from apps.api.extractors.xinhua import extract_xinhua_html
 from apps.api.parsers.html import HtmlParser
-from apps.api.security import URLFetchError, URLSecurityError, fetch_url, normalize_url
+from apps.api.security import (
+    FetchedPage,
+    URLFetchError,
+    URLSecurityError,
+    fetch_url,
+    normalize_url,
+)
 from apps.api.security.url_safety import AllowedAddress, resolve_allowed_addresses
 
 
@@ -123,6 +131,58 @@ def test_html_parser_extracts_visible_article_metadata():
     assert result.structured_content.metadata["published_at"] == "2026-07-28"
     assert "Visible paragraph." in result.structured_content.full_text()
     assert "hidden" not in result.structured_content.full_text()
+
+
+def test_xinhua_adapter_fetches_signed_article_api(monkeypatch):
+    captured = {}
+    article = {
+        "topic": "测试标题",
+        "summary": "测试摘要",
+        "releasedate": "2026-07-28",
+        "content": "<p>这是新华社正文内容。</p>",
+    }
+
+    def fake_fetch(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        payload = {
+            "code": "0",
+            "data": "var XinhuammNews =" + json.dumps(article, ensure_ascii=False) + ";",
+        }
+        return FetchedPage(
+            url=url,
+            final_url=url,
+            status_code=200,
+            content_type="application/json",
+            raw_bytes=json.dumps(payload, ensure_ascii=False).encode(),
+        )
+
+    monkeypatch.setattr("apps.api.extractors.xinhua.fetch_url", fake_fetch)
+    monkeypatch.setattr("apps.api.extractors.xinhua.time.time", lambda: 1234.5)
+    html = extract_xinhua_html(
+        "https://h.xinhuaxmt.com/vh512/share/13217069?newstype=1001",
+        max_bytes=1024,
+        timeout_seconds=5,
+    )
+
+    assert html is not None
+    assert "这是新华社正文内容".encode() in html
+    assert "/news-detail/13217069?docid=13217069&share=0" in captured["url"]
+    headers = captured["kwargs"]["request_headers"]
+    assert headers["Timestamp"] == "1234500"
+    assert len(headers["Signature"]) == 64
+    assert captured["kwargs"]["max_redirects"] == 0
+
+
+def test_xinhua_adapter_ignores_unrecognized_urls():
+    assert (
+        extract_xinhua_html(
+            "https://example.com/vh512/share/13217069",
+            max_bytes=1024,
+            timeout_seconds=5,
+        )
+        is None
+    )
 
 
 def test_ai_schema_rejects_category_outside_whitelist():

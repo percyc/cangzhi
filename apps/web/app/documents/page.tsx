@@ -51,6 +51,7 @@ const statusLabels: Record<string, string> = {
   retry: '等待重试',
   ready: '已完成',
   failed: '处理失败',
+  unsupported: '暂未提取正文',
 };
 
 const sourceTypeLabels: Record<string, string> = {

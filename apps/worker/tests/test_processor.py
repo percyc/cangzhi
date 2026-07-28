@@ -114,6 +114,59 @@ class TestJobProcessing:
         assert job.status == "failed"
         assert version.processing_status == "failed"
 
+    def test_dynamic_url_without_adapter_is_marked_unsupported(
+        self, session, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "apps.worker.services.processor._fetch_and_store_url",
+            lambda *args: (
+                b"<html><head><title>Dynamic page</title></head>"
+                b"<body><div id='app'></div><script src='app.js'></script></body></html>",
+                "text/html",
+            ),
+        )
+        monkeypatch.setattr(
+            "apps.worker.services.processor.extract_xinhua_html",
+            lambda *args, **kwargs: None,
+        )
+        doc = Document(
+            title="Dynamic page",
+            source_type=DocumentSourceType.url,
+            source_url="https://example.com/article",
+        )
+        session.add(doc)
+        session.flush()
+        version = DocumentVersion(
+            document_id=doc.id,
+            version_number=1,
+            content_hash="dynamic",
+            processing_status="created",
+        )
+        session.add(version)
+        session.flush()
+        job = ProcessingJob(
+            document_id=doc.id,
+            document_version_id=version.id,
+            stage="parsing",
+            idempotency_key=f"{doc.id}:{version.id}:parsing:dynamic",
+            config_version="2",
+        )
+        session.add(job)
+        session.commit()
+
+        assert process_single_job(session, job.id) is True
+        session.refresh(version)
+        session.refresh(job)
+        assert job.status == "completed"
+        assert version.processing_status == "unsupported"
+        assert version.meta["extraction_status"] == "dynamic_page"
+        assert session.scalar(
+            select(ProcessingJob).where(
+                ProcessingJob.stage == "understanding",
+                ProcessingJob.document_version_id == version.id,
+            )
+        ) is None
+
     def test_no_model_falls_back_to_inbox_idempotently(self, session, monkeypatch):
         monkeypatch.setattr(
             "apps.worker.services.processor.build_provider",
