@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import text
 from ..core.db import Base
@@ -20,7 +20,7 @@ class ProcessingJob(BaseModel):
     max_retries = Column(Integer, nullable=False, default=3, server_default=text("3"))
     next_retry_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
-    error_details = Column(JSONB, nullable=True)
+    error_details = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
     config_version = Column(String(64), nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)

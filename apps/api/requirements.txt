@@ -8,6 +8,8 @@ pgvector
 python-dotenv
 pydantic>=2.0
 pydantic-settings>=2.0
+python-multipart
+aiosqlite
 pytest
 pytest-asyncio
 httpx

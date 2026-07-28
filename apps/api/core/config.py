@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     ollama_base_url: str = "http://localhost:11434"
     storage_path: str = "./storage"
+    max_upload_size_mb: int = 50
     log_level: str = "info"
 
 

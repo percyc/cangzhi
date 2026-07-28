@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
-from .api import health
+from .api import documents, files, health, notes
 
 app = FastAPI(title="藏知 API", version="0.1.0")
 
@@ -15,6 +15,9 @@ app.add_middleware(
 )
 
 app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(notes.router, prefix="/api")
+app.include_router(files.router, prefix="/api")
+app.include_router(documents.router, prefix="/api")
 
 
 @app.get("/")

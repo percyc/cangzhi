@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, Enum, Boolean, ForeignKey
+from sqlalchemy import Boolean, Column, Enum, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy import text
@@ -29,21 +29,30 @@ class Document(BaseModel):
         nullable=True,
     )
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"), index=True)
-    meta = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    meta = Column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    )
 
 
 class DocumentVersion(BaseModel):
     __tablename__ = "document_versions"
 
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    blob_id = Column(Integer, ForeignKey("blobs.id"), nullable=True, index=True)
     version_number = Column(Integer, nullable=False)
     content_hash = Column(String(64), nullable=False)
     raw_content = Column(Text, nullable=True)
-    structured_content = Column(JSONB, nullable=True)
+    structured_content = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
     processing_status = Column(
         String(20), nullable=False, default="created", server_default=text("'created'")
     )
-    meta = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    meta = Column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    )
 
     __table_args__ = (
         UniqueConstraint("document_id", "version_number", name="uix_document_version"),
