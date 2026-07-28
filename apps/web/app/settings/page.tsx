@@ -5,14 +5,17 @@ import { useRouter } from 'next/navigation';
 
 import {
   fetchAIConfig,
+  fetchAIModels,
   testAIConfig,
   updateAIConfig,
   type AIConfig,
+  type AIModelsResponse,
   type AITestResult,
 } from '@/lib/api';
 
 type Provider = AIConfig['provider'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+type FetchState = 'idle' | 'fetching' | 'success' | 'error';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -20,9 +23,9 @@ export default function SettingsPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [provider, setProvider] = useState<Provider>('disabled');
   const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
-  const [openaiModel, setOpenaiModel] = useState('gpt-4o-mini');
+  const [openaiModel, setOpenaiModel] = useState('');
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState('http://localhost:11434');
-  const [ollamaModel, setOllamaModel] = useState('llama3.1');
+  const [ollamaModel, setOllamaModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [clearKey, setClearKey] = useState(false);
   const [timeoutSeconds, setTimeoutSeconds] = useState(30);
@@ -30,6 +33,9 @@ export default function SettingsPage() {
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<AITestResult | null>(null);
   const [testing, setTesting] = useState(false);
+  const [models, setModels] = useState<AIModelsResponse['models']>([]);
+  const [modelsFetchState, setModelsFetchState] = useState<FetchState>('idle');
+  const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,9 +45,9 @@ export default function SettingsPage() {
         setConfig(data);
         setProvider(data.provider);
         setOpenaiBaseUrl(data.openai_base_url ?? 'https://api.openai.com/v1');
-        setOpenaiModel(data.openai_model ?? 'gpt-4o-mini');
+        setOpenaiModel(data.openai_model ?? '');
         setOllamaBaseUrl(data.ollama_base_url ?? 'http://localhost:11434');
-        setOllamaModel(data.ollama_model ?? 'llama3.1');
+        setOllamaModel(data.ollama_model ?? '');
         setTimeoutSeconds(data.timeout_seconds || 30);
       })
       .catch((err) => {
@@ -53,6 +59,46 @@ export default function SettingsPage() {
     };
   }, []);
 
+  const invalidateModels = () => {
+    setModels([]);
+    setModelsFetchState('idle');
+    setModelsFetchError(null);
+  };
+
+  const connectionChanged =
+    provider !== config?.provider ||
+    (provider === 'openai' &&
+      (openaiBaseUrl.trim() !== (config?.openai_base_url ?? '') ||
+        Boolean(apiKey) ||
+        clearKey)) ||
+    (provider === 'ollama' &&
+      ollamaBaseUrl.trim() !== (config?.ollama_base_url ?? ''));
+  const modelChanged =
+    (provider === 'openai' &&
+      openaiModel.trim() !== (config?.openai_model ?? '')) ||
+    (provider === 'ollama' &&
+      ollamaModel.trim() !== (config?.ollama_model ?? ''));
+
+  const handleFetchModels = async () => {
+    if (connectionChanged) {
+      setModelsFetchState('error');
+      setModelsFetchError('地址、密钥或模型来源有改动，请先保存设置');
+      return;
+    }
+    setModelsFetchState('fetching');
+    setModelsFetchError(null);
+    try {
+      const result = await fetchAIModels();
+      setModels(result.models);
+      setModelsFetchState('success');
+    } catch (err) {
+      setModelsFetchState('error');
+      setModelsFetchError(
+        err instanceof Error ? err.message : '获取模型列表失败',
+      );
+    }
+  };
+
   const handleSave = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!config) return;
@@ -63,9 +109,7 @@ export default function SettingsPage() {
     const payload = {
       provider,
       api_key_action: (clearKey ? 'clear' : apiKey ? 'replace' : 'keep') as
-        | 'keep'
-        | 'replace'
-        | 'clear',
+        'keep' | 'replace' | 'clear',
       api_key: clearKey ? undefined : apiKey || undefined,
       timeout_seconds: timeoutSeconds,
       openai:
@@ -81,6 +125,7 @@ export default function SettingsPage() {
     try {
       const next = await updateAIConfig(payload);
       setConfig(next);
+      invalidateModels();
       setApiKey('');
       setClearKey(false);
       setSaveState('saved');
@@ -139,11 +184,21 @@ export default function SettingsPage() {
           <h2 className="text-base font-semibold text-slate-800">模型来源</h2>
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
             {(['disabled', 'openai', 'ollama'] as const).map((value) => {
-              const labels: Record<Provider, { title: string; hint: string }> = {
-                disabled: { title: '不使用', hint: '资料会正常入库，但不会调用 AI' },
-                openai: { title: 'OpenAI 兼容', hint: '支持 OpenAI 以及兼容协议的服务' },
-                ollama: { title: 'Ollama / 本地', hint: '本地运行的 Ollama 服务' },
-              };
+              const labels: Record<Provider, { title: string; hint: string }> =
+                {
+                  disabled: {
+                    title: '不使用',
+                    hint: '资料会正常入库，但不会调用 AI',
+                  },
+                  openai: {
+                    title: 'OpenAI 兼容',
+                    hint: '支持 OpenAI 以及兼容协议的服务',
+                  },
+                  ollama: {
+                    title: 'Ollama / 本地',
+                    hint: '本地运行的 Ollama 服务',
+                  },
+                };
               const label = labels[value];
               const active = provider === value;
               const style = active
@@ -153,11 +208,16 @@ export default function SettingsPage() {
                 <button
                   key={value}
                   type="button"
-                  onClick={() => setProvider(value)}
+                  onClick={() => {
+                    setProvider(value);
+                    invalidateModels();
+                  }}
                   className={`rounded-xl border p-4 text-left ${style}`}
                 >
                   <p className="text-sm font-semibold">{label.title}</p>
-                  <p className={`mt-1 text-xs ${active ? 'text-slate-200' : 'text-slate-500'}`}>
+                  <p
+                    className={`mt-1 text-xs ${active ? 'text-slate-200' : 'text-slate-500'}`}
+                  >
                     {label.hint}
                   </p>
                 </button>
@@ -168,19 +228,26 @@ export default function SettingsPage() {
 
         {provider === 'openai' && (
           <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-base font-semibold text-slate-800">OpenAI 兼容配置</h2>
+            <h2 className="text-base font-semibold text-slate-800">
+              OpenAI 兼容配置
+            </h2>
             <Field
               id="openai-base-url"
               label="API 地址"
               help="形如 https://api.openai.com/v1"
               value={openaiBaseUrl}
-              onChange={setOpenaiBaseUrl}
+              onChange={(value) => {
+                setOpenaiBaseUrl(value);
+                invalidateModels();
+              }}
             />
-            <Field
+            <FieldWithList
               id="openai-model"
               label="模型名称"
+              help="保存地址和密钥后，可获取模型列表快速选择；也可以手动输入。"
               value={openaiModel}
               onChange={setOpenaiModel}
+              models={models}
             />
             <div>
               <label htmlFor="api-key" className="block text-sm text-slate-700">
@@ -193,9 +260,12 @@ export default function SettingsPage() {
                 value={apiKey}
                 onChange={(event) => {
                   setApiKey(event.target.value);
+                  invalidateModels();
                   if (event.target.value) setClearKey(false);
                 }}
-                placeholder={config.has_api_key ? '已保存（输入新值以替换）' : '请输入密钥'}
+                placeholder={
+                  config.has_api_key ? '已保存（输入新值以替换）' : '请输入密钥'
+                }
                 autoComplete="off"
                 className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
               />
@@ -210,6 +280,7 @@ export default function SettingsPage() {
                   checked={clearKey}
                   onChange={(event) => {
                     setClearKey(event.target.checked);
+                    invalidateModels();
                     if (event.target.checked) setApiKey('');
                   }}
                 />
@@ -221,19 +292,26 @@ export default function SettingsPage() {
 
         {provider === 'ollama' && (
           <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-base font-semibold text-slate-800">Ollama 配置</h2>
+            <h2 className="text-base font-semibold text-slate-800">
+              Ollama 配置
+            </h2>
             <Field
               id="ollama-base-url"
               label="服务地址"
               help="形如 http://localhost:11434"
               value={ollamaBaseUrl}
-              onChange={setOllamaBaseUrl}
+              onChange={(value) => {
+                setOllamaBaseUrl(value);
+                invalidateModels();
+              }}
             />
-            <Field
+            <FieldWithList
               id="ollama-model"
               label="模型名称"
+              help="保存服务地址后，可获取本地模型列表快速选择；也可以手动输入。"
               value={ollamaModel}
               onChange={setOllamaModel}
+              models={models}
             />
           </section>
         )}
@@ -248,6 +326,43 @@ export default function SettingsPage() {
           />
         </section>
 
+        {provider !== 'disabled' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleFetchModels}
+              disabled={modelsFetchState === 'fetching' || connectionChanged}
+              className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {modelsFetchState === 'fetching'
+                ? '正在获取模型列表…'
+                : models.length
+                  ? '刷新模型列表'
+                  : '获取模型列表'}
+            </button>
+            {connectionChanged && (
+              <p className="text-sm text-amber-700">
+                请先保存地址、密钥或模型来源的改动
+              </p>
+            )}
+            {modelsFetchError && (
+              <p className="text-sm text-red-700">
+                获取失败：{modelsFetchError}
+              </p>
+            )}
+            {modelsFetchState === 'success' && models.length > 0 && (
+              <p className="text-sm text-emerald-700">
+                已获取 {models.length} 个模型，可在模型名称输入框中选择
+              </p>
+            )}
+            {modelsFetchState === 'success' && models.length === 0 && (
+              <p className="text-sm text-slate-600">
+                服务返回空列表，请手动输入模型名称
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="submit"
@@ -259,7 +374,12 @@ export default function SettingsPage() {
           <button
             type="button"
             onClick={handleTest}
-            disabled={testing || provider === 'disabled'}
+            disabled={
+              testing ||
+              provider === 'disabled' ||
+              connectionChanged ||
+              modelChanged
+            }
             className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
           >
             {testing ? '正在测试…' : '测试连接'}
@@ -316,6 +436,50 @@ function Field({
         onChange={(event) => onChange(event.target.value)}
         className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
       />
+      {help && <p className="mt-1 text-xs text-slate-500">{help}</p>}
+    </div>
+  );
+}
+
+function FieldWithList({
+  id,
+  label,
+  value,
+  onChange,
+  models,
+  help,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  models: AIModelsResponse['models'];
+  help?: string;
+}) {
+  const listId = `${id}-models`;
+  return (
+    <div>
+      <label htmlFor={id} className="block text-sm text-slate-700">
+        {label}
+      </label>
+      <input
+        id={id}
+        name={id}
+        type="text"
+        list={listId}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+      />
+      {models.length > 0 && (
+        <datalist id={listId}>
+          {models.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.label || model.id}
+            </option>
+          ))}
+        </datalist>
+      )}
       {help && <p className="mt-1 text-xs text-slate-500">{help}</p>}
     </div>
   );

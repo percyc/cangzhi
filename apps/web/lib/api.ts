@@ -32,13 +32,29 @@ export type AIConfigPayload = {
   api_key_action: 'keep' | 'replace' | 'clear';
   api_key?: string;
   timeout_seconds?: number;
-  prompt_version?: string;
 };
 
 export type AITestResult = {
   ok: boolean;
   message: string;
 };
+
+export type AIModelsResponse = {
+  models: Array<{ id: string; label?: string }>;
+  provider: string;
+  current_model: string;
+};
+
+export async function fetchAIModels(): Promise<AIModelsResponse> {
+  const response = await fetch('/api/settings/ai/models', {
+    cache: 'no-store',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '获取模型列表失败'));
+  }
+  return parseJson<AIModelsResponse>(response);
+}
 
 async function parseJson<T>(response: Response): Promise<T> {
   const text = await response.text();
@@ -87,7 +103,9 @@ export async function fetchAIConfig(): Promise<AIConfig> {
   return body.config;
 }
 
-export async function updateAIConfig(payload: AIConfigPayload): Promise<AIConfig> {
+export async function updateAIConfig(
+  payload: AIConfigPayload,
+): Promise<AIConfig> {
   const response = await fetch('/api/settings/ai', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -112,7 +130,10 @@ export async function testAIConfig(): Promise<AITestResult> {
   return parseJson<AITestResult>(response);
 }
 
-export async function askStatus(): Promise<{ provider_configured: boolean; provider: string }> {
+export async function askStatus(): Promise<{
+  provider_configured: boolean;
+  provider: string;
+}> {
   const response = await fetch('/api/ask/status', {
     cache: 'no-store',
     credentials: 'include',
@@ -123,7 +144,10 @@ export async function askStatus(): Promise<{ provider_configured: boolean; provi
   return parseJson(response);
 }
 
-async function extractErrorMessage(response: Response, fallback: string): Promise<string> {
+async function extractErrorMessage(
+  response: Response,
+  fallback: string,
+): Promise<string> {
   try {
     const payload = await parseJson<unknown>(response);
     return extractDetailMessage(payload, fallback);

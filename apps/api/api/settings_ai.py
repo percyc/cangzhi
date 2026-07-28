@@ -60,14 +60,46 @@ def _validate_url(value: str) -> str:
 
 def _validate_model(value: str) -> str:
     cleaned = (value or "").strip()
-    if not cleaned or len(cleaned) > 200:
-        raise ValueError("模型名称长度应在 1-200 之间")
+    if len(cleaned) > 200:
+        raise ValueError("模型名称不能超过 200 个字符")
     return cleaned
+
+
+def _extract_model_ids(payload: Any, *, list_key: str) -> list[str]:
+    """Parse a compatible model-list response without retaining upstream data."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("top-level response is not an object")
+    items = payload.get(list_key)
+    if not isinstance(items, list):
+        raise ValueError("model list is missing")
+
+    model_ids: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get("id") or item.get("name") or item.get("model")
+        if candidate is None:
+            continue
+        model_id = str(candidate).strip()
+        if model_id:
+            model_ids.append(model_id[:255])
+    return model_ids
+
+
+def _natural_model_key(model_id: str) -> list[tuple[int, int | str]]:
+    """Sort model-2 before model-10 while remaining case-insensitive."""
+
+    return [
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in re.split(r"(\d+)", model_id)
+        if part
+    ]
 
 
 class _OpenAIConfig(BaseModel):
     base_url: str = Field(min_length=1, max_length=512)
-    model: str = Field(min_length=1, max_length=255)
+    model: str = Field(default="", max_length=255)
 
     @field_validator("base_url")
     @classmethod
@@ -82,7 +114,7 @@ class _OpenAIConfig(BaseModel):
 
 class _OllamaConfig(BaseModel):
     base_url: str = Field(min_length=1, max_length=512)
-    model: str = Field(min_length=1, max_length=255)
+    model: str = Field(default="", max_length=255)
 
     @field_validator("base_url")
     @classmethod
@@ -199,7 +231,7 @@ async def update_settings(
                 detail={"code": "openai_missing", "message": "请填写 OpenAI-compatible 配置"},
             )
         row.openai_base_url = payload.openai.base_url
-        row.openai_model = payload.openai.model
+        row.openai_model = payload.openai.model or None
         action = payload.api_key_action
         if action == "replace":
             if not payload.api_key:
@@ -220,7 +252,7 @@ async def update_settings(
                 detail={"code": "ollama_missing", "message": "请填写 Ollama 配置"},
             )
         row.ollama_base_url = payload.ollama.base_url
-        row.ollama_model = payload.ollama.model
+        row.ollama_model = payload.ollama.model or None
     row.updated_by = admin.id
     db.add(row)
     await db.commit()
@@ -311,27 +343,13 @@ async def _probe_openai(
             "message": "服务返回的不是模型列表，请检查 API 地址是否包含正确的版本路径",
         }
 
-    if not isinstance(data, dict):
+    try:
+        model_ids = _extract_model_ids(data, list_key="data")
+    except ValueError:
         return {
             "ok": False,
             "message": "服务返回的模型列表格式不正确",
         }
-
-    models_data = data.get("data")
-    if not isinstance(models_data, list):
-        return {
-            "ok": False,
-            "message": "服务返回的模型列表格式不正确",
-        }
-
-    # Check if our configured model is available in the list
-    model_ids = []
-    for item in models_data:
-        if isinstance(item, dict):
-            # Different providers use different keys: id/name/model
-            candidate_id = item.get("id") or item.get("name") or item.get("model")
-            if candidate_id:
-                model_ids.append(str(candidate_id).strip())
 
     if not model_ids:
         return {"ok": False, "message": "服务没有返回任何可用模型"}
@@ -382,25 +400,10 @@ async def _probe_ollama(
             "message": f"Ollama 返回 HTTP {response.status_code}，请检查服务地址",
         }
 
-    # Verify expected structure and check model exists
-    if not isinstance(data, dict):
-        return {
-            "ok": False,
-            "message": "JSON 结构不符合 Ollama 格式",
-        }
-
-    models_data = data.get("models")
-    if not isinstance(models_data, list):
-        # Older Ollama versions may have different format - accept if 2xx
-        return {"ok": True, "message": "连接成功（无法验证模型列表）"}
-
-    # Check model name
-    model_names = []
-    for item in models_data:
-        if isinstance(item, dict):
-            name = item.get("name") or item.get("model")
-            if name:
-                model_names.append(str(name).strip())
+    try:
+        model_names = _extract_model_ids(data, list_key="models")
+    except ValueError:
+        return {"ok": False, "message": "Ollama 返回的模型列表格式不正确"}
 
     if not model_names:
         return {"ok": True, "message": "连接成功（无法验证模型列表）"}
@@ -421,3 +424,124 @@ def _safe_failure(prefix: str, exc: Exception) -> dict[str, Any]:
     # Never leak exception strings that may contain API keys or secrets
     # Only report the exception type, no details
     return {"ok": False, "message": f"{prefix}：{type(exc).__name__}"}
+
+
+# --- Model list endpoint ---------------------------------------------------
+
+
+async def _request_model_ids(
+    *,
+    url: str,
+    timeout: float,
+    list_key: str,
+    headers: dict[str, str] | None = None,
+) -> list[str]:
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "connection_failed",
+                "message": f"无法连接模型服务：{type(exc).__name__}",
+            },
+        ) from None
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "upstream_error",
+                "message": f"模型服务返回 HTTP {response.status_code}",
+            },
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "invalid_json",
+                "message": "模型服务返回的不是模型列表，请检查已保存的 API 地址",
+            },
+        ) from None
+    try:
+        return _extract_model_ids(payload, list_key=list_key)
+    except ValueError:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "invalid_format",
+                "message": "模型服务返回的模型列表格式不正确",
+            },
+        ) from None
+
+
+@router.get("/models", response_model=dict[str, Any])
+async def list_models(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """List models using only the encrypted, persisted provider configuration."""
+
+    row = await _get_or_create_config(db)
+    timeout = float(row.timeout_seconds or 30)
+    if row.provider == "openai":
+        if not row.openai_base_url:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "missing_base_url", "message": "请先保存 OpenAI 兼容服务地址"},
+            )
+        if not row.has_api_key or not row.openai_api_key_cipher:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "missing_api_key", "message": "请先保存 OpenAI 兼容密钥"},
+            )
+        try:
+            api_key = decrypt_secret(row.openai_api_key_cipher)
+        except (SecretStoreError, SecretDecryptError):
+            logger.warning("ai_models_decrypt_failed admin=%s", admin.username)
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "decrypt_failed", "message": "已保存的密钥无法读取，请重新保存"},
+            ) from None
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "missing_api_key", "message": "请先保存 OpenAI 兼容密钥"},
+            )
+        model_ids = await _request_model_ids(
+            url=f"{row.openai_base_url.rstrip('/')}/models",
+            timeout=timeout,
+            list_key="data",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+        )
+        current_model = row.openai_model or ""
+    elif row.provider == "ollama":
+        if not row.ollama_base_url:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "missing_base_url", "message": "请先保存 Ollama 服务地址"},
+            )
+        model_ids = await _request_model_ids(
+            url=f"{row.ollama_base_url.rstrip('/')}/api/tags",
+            timeout=timeout,
+            list_key="models",
+        )
+        current_model = row.ollama_model or ""
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "provider_disabled", "message": "当前未启用任何模型来源"},
+        )
+
+    sorted_ids = sorted(set(model_ids), key=_natural_model_key)[:500]
+    return {
+        "models": [{"id": model_id} for model_id in sorted_ids],
+        "provider": row.provider,
+        "current_model": current_model.strip(),
+    }

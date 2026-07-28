@@ -547,3 +547,248 @@ def test_settings_routes_require_authentication():
         app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
             id=1, username="tester", is_active=True
         )
+
+
+# --- Model list endpoint ---------------------------------------------------
+
+
+def test_models_endpoint_requires_authentication():
+    """Anonymous requests must be rejected."""
+    from fastapi.testclient import TestClient as TC
+
+    app.dependency_overrides.pop(require_admin, None)
+    try:
+        with TC(app) as client:
+            response = client.get("/api/settings/ai/models")
+            assert response.status_code == 401
+            assert response.json()["detail"]["code"] == "unauthenticated"
+    finally:
+        from types import SimpleNamespace
+
+        app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
+            id=1, username="tester", is_active=True
+        )
+
+
+def test_models_endpoint_rejects_disabled_provider(client):
+    """Must return 400 when provider is disabled."""
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.get("/api/settings/ai/models")
+    assert response.status_code == 400
+    assert "未启用" in response.json()["detail"]["message"]
+
+
+def test_models_openai_requires_saved_api_key(client):
+    """Must return 400 when API key is not saved."""
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o"},
+            "api_key_action": "clear",
+        },
+    )
+    response = test_client.get("/api/settings/ai/models")
+    assert response.status_code == 400
+    assert "请先保存" in response.json()["detail"]["message"]
+
+
+def test_openai_connection_can_be_saved_before_model_is_selected(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": ""},
+            "api_key_action": "replace",
+            "api_key": "sk-first-setup-without-model",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["config"]["openai_model"] is None
+
+
+def test_models_endpoint_handles_non_json_response(client, monkeypatch):
+    """HTML responses must give clean error without leaking."""
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://gateway.example.com", "model": "demo"},
+            "api_key_action": "replace",
+            "api_key": "sk-test-html",
+        },
+    )
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, text="<html><body>gateway</body></html>")
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.get("/api/settings/ai/models")
+    assert response.status_code == 502
+    assert "不是模型列表" in response.json()["detail"]["message"]
+    assert "sk-test-html" not in response.text
+
+
+def test_models_endpoint_sorts_and_deduplicates(client, monkeypatch):
+    """Response must be sorted naturally and deduplicated."""
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "gpt-4o"},
+            "api_key_action": "replace",
+            "api_key": "sk-test-models",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "gpt-4o-mini"},
+                    {"id": "gpt-4o"},
+                    {"id": "gpt-3.5-turbo"},
+                    {"id": "gpt-4o"},  # duplicate
+                    {"id": "claude-3-opus"},
+                    {"id": "model-10"},
+                    {"id": "model-2"},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.get("/api/settings/ai/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["provider"] == "openai"
+    assert data["current_model"] == "gpt-4o"
+    assert len(data["models"]) == 6
+    ids = [m["id"] for m in data["models"]]
+    # Natural sorted
+    assert ids == [
+        "claude-3-opus",
+        "gpt-3.5-turbo",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "model-2",
+        "model-10",
+    ]
+
+
+def test_models_endpoint_sanitizes_upstream_http_error(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    secret = "sk-upstream-secret-never-return"
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "gpt-4o"},
+            "api_key_action": "replace",
+            "api_key": secret,
+        },
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(401, text=f"invalid bearer {secret}")
+    )
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.get("/api/settings/ai/models")
+    assert response.status_code == 502
+    assert "HTTP 401" in response.json()["detail"]["message"]
+    assert secret not in response.text
+
+
+def test_models_ollama_parses_tags(client, monkeypatch):
+    """Ollama /api/tags response must be parsed correctly."""
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "ollama",
+            "ollama": {"base_url": "http://localhost:11434", "model": "llama3.1"},
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"name": "llama3.1:latest"},
+                    {"model": "mistral:7b-instruct"},
+                    {"name": "llama3.1:latest"},  # duplicate
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.get("/api/settings/ai/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["models"]) == 2
+    ids = [m["id"] for m in data["models"]]
+    assert sorted(ids) == sorted(["llama3.1:latest", "mistral:7b-instruct"])
+
+
+def test_models_caps_at_500_entries(client, monkeypatch):
+    """Response must be capped at 500 models even if upstream returns more."""
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "test"},
+            "api_key_action": "replace",
+            "api_key": "sk-test-many",
+        },
+    )
+
+    models_data = [{"id": f"model-{i:03d}"} for i in range(600)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": models_data})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.get("/api/settings/ai/models")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["models"]) == 500
