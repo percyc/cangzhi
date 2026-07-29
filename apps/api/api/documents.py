@@ -16,6 +16,7 @@ from ..models.taxonomy import (
     DocumentTag,
     Tag,
 )
+from ..models.webdav import WebDAVSource
 from .schemas import (
     BlobResponse,
     CategoryMini,
@@ -165,12 +166,30 @@ async def build_document_response(
         tags = tag_map.get(version_id, [])
         summary = summary_map.get(version_id)
 
+    origin = None
+    document_meta = document.meta or {}
+    if document_meta.get("external_source") == "webdav":
+        connector_id = document_meta.get("webdav_source_id")
+        connector = (
+            await db.get(WebDAVSource, connector_id)
+            if isinstance(connector_id, int)
+            else None
+        )
+        origin = {
+            "kind": "webdav",
+            "label": connector.name if connector else "已删除的 WebDAV 连接器",
+            "connector_id": connector_id,
+            "remote_path": document_meta.get("webdav_path"),
+            "connector_available": connector is not None,
+        }
+
     return DocumentResponse(
         id=document.id,
         title=document.title,
         description=document.description,
         source_type=document.source_type.value,
         source_url=document.source_url,
+        origin=origin,
         is_deleted=document.is_deleted,
         created_at=document.created_at,
         updated_at=document.updated_at,

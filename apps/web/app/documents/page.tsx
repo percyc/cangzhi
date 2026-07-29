@@ -35,6 +35,13 @@ type Document = {
   description: string | null;
   source_type: string;
   source_url: string | null;
+  origin: {
+    kind: string;
+    label: string;
+    connector_id: number | null;
+    remote_path: string | null;
+    connector_available: boolean;
+  } | null;
   is_deleted: boolean;
   created_at: string;
   updated_at: string;
@@ -150,7 +157,9 @@ export default function DocumentsListPage() {
                   </h2>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                     <span className="rounded-full bg-slate-100 px-2 py-0.5">
-                      {sourceTypeLabels[doc.source_type] || doc.source_type}
+                      {doc.origin?.kind === 'webdav'
+                        ? `WebDAV · ${doc.origin.label}`
+                        : sourceTypeLabels[doc.source_type] || doc.source_type}
                     </span>
                     <span>{statusLabels[status] || status}</span>
                     {doc.primary_category && (
@@ -159,6 +168,11 @@ export default function DocumentsListPage() {
                       </span>
                     )}
                   </div>
+                  {doc.origin?.remote_path && (
+                    <p className="mt-2 truncate text-xs text-slate-400" title={doc.origin.remote_path}>
+                      远端：{doc.origin.remote_path}
+                    </p>
+                  )}
                   {doc.summary?.summary && (
                     <p className="mt-3 text-sm text-slate-600 line-clamp-3">
                       {doc.summary.summary}

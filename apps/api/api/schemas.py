@@ -57,6 +57,14 @@ class DocumentSummaryResponse(BaseModel):
     created_at: datetime
 
 
+class DocumentOriginResponse(BaseModel):
+    kind: str
+    label: str
+    connector_id: int | None = None
+    remote_path: str | None = None
+    connector_available: bool = False
+
+
 class DocumentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -65,6 +73,7 @@ class DocumentResponse(BaseModel):
     description: str | None
     source_type: str
     source_url: str | None
+    origin: DocumentOriginResponse | None = None
     is_deleted: bool
     created_at: datetime
     updated_at: datetime

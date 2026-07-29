@@ -93,6 +93,13 @@ type Document = {
   description: string | null;
   source_type: string;
   source_url: string | null;
+  origin: {
+    kind: string;
+    label: string;
+    connector_id: number | null;
+    remote_path: string | null;
+    connector_available: boolean;
+  } | null;
   created_at: string;
   current_version: DocumentVersion | null;
   primary_category: DocumentCategory | null;
@@ -286,6 +293,27 @@ export default function DocumentDetailPage() {
           >
             {document.source_url}
           </a>
+        </div>
+      )}
+      {document.origin?.kind === 'webdav' && (
+        <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm">
+          <div>
+            <span className="text-slate-500">知识来源：</span>
+            {document.origin.connector_available && document.origin.connector_id ? (
+              <Link href="/sources" className="font-medium text-violet-800 hover:underline">
+                WebDAV · {document.origin.label}
+              </Link>
+            ) : (
+              <span className="font-medium text-slate-700">
+                WebDAV · {document.origin.label}
+              </span>
+            )}
+          </div>
+          {document.origin.remote_path && (
+            <div className="mt-1 break-all font-mono text-xs text-slate-600">
+              {document.origin.remote_path}
+            </div>
+          )}
         </div>
       )}
 
