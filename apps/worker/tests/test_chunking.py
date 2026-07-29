@@ -155,6 +155,46 @@ class TestChunkingJob:
             row.content_hash for row in second
         }
 
+    def test_new_version_retires_previous_version_chunks(self, session):
+        document = Document(title="版本更新", source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        versions = []
+        for number in (1, 2):
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=number,
+                content_hash=f"seed-{number}",
+                structured_content=_make_structured_payload(),
+                processing_status="ready",
+            )
+            session.add(version)
+            session.flush()
+            job = ProcessingJob(
+                document_id=document.id,
+                document_version_id=version.id,
+                stage=CHUNKING_STAGE,
+                idempotency_key=f"{version.id}:{CHUNKING_STAGE}:version-test",
+                config_version="version-test",
+            )
+            session.add(job)
+            session.commit()
+            assert _process_chunking(session, job, document, version) is True
+            versions.append(version)
+
+        old_chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == versions[0].id
+            )
+        ).all()
+        new_chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == versions[1].id
+            )
+        ).all()
+        assert old_chunks and all(chunk.is_current is False for chunk in old_chunks)
+        assert new_chunks and all(chunk.is_current is True for chunk in new_chunks)
+
     def test_processing_pipeline_enqueues_chunking_after_parse(self, session):
         document = Document(
             title="完整流程", source_type=DocumentSourceType.note

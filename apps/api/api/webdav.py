@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.config import settings
 from ..core.db import get_db
+from ..models.blobs import Blob
+from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from ..models.processing import ProcessingJob
 from ..models.webdav import WebDAVEntry, WebDAVSource
 from ..security.secrets import decrypt_secret, encrypt_secret
 from ..security.url_safety import URLSecurityError
-from ..services.webdav import WebDAVError, propfind, validate_webdav_url
+from ..services.webdav import (
+    WebDAVError,
+    download_file,
+    propfind,
+    validate_webdav_url,
+)
+from ..storage import get_storage
+from ..storage.base import BlobStorage
+from .files import normalized_filename, validate_file_type
 
 router = APIRouter(prefix="/webdav", tags=["webdav"])
 DEFAULT_EXTENSIONS = [".pdf", ".docx", ".md", ".markdown", ".txt"]
@@ -56,10 +69,66 @@ async def _source_or_404(db: AsyncSession, source_id: int) -> WebDAVSource:
 
 @router.get("", response_model=list[dict[str, Any]])
 async def list_sources(db: AsyncSession = Depends(get_db)):
-    rows = (
+    rows = list(
         await db.execute(select(WebDAVSource).order_by(WebDAVSource.id.desc()))
     ).scalars()
-    return [row.to_public_dict() for row in rows]
+    counts = {
+        source_id: {
+            "total": total,
+            "pending": pending,
+            "failed": failed,
+            "synced": synced,
+        }
+        for source_id, total, pending, failed, synced in (
+            await db.execute(
+                select(
+                    WebDAVEntry.source_id,
+                    func.count(WebDAVEntry.id),
+                    func.count(WebDAVEntry.id).filter(
+                        WebDAVEntry.state.in_(("discovered", "changed"))
+                    ),
+                    func.count(WebDAVEntry.id).filter(WebDAVEntry.state == "failed"),
+                    func.count(WebDAVEntry.id).filter(WebDAVEntry.state == "synced"),
+                ).group_by(WebDAVEntry.source_id)
+            )
+        ).all()
+    }
+    result = []
+    for row in rows:
+        item = row.to_public_dict()
+        item["entry_counts"] = counts.get(
+            row.id, {"total": 0, "pending": 0, "failed": 0, "synced": 0}
+        )
+        result.append(item)
+    return result
+
+
+@router.get("/{source_id}/entries", response_model=list[dict[str, Any]])
+async def list_entries(source_id: int, db: AsyncSession = Depends(get_db)):
+    await _source_or_404(db, source_id)
+    entries = (
+        (
+            await db.execute(
+                select(WebDAVEntry)
+                .where(WebDAVEntry.source_id == source_id)
+                .order_by(WebDAVEntry.remote_path)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": entry.id,
+            "remote_path": entry.remote_path,
+            "file_size": entry.file_size,
+            "state": entry.state,
+            "document_id": entry.document_id,
+            "last_error": entry.last_error,
+            "synced_at": entry.synced_at.isoformat() if entry.synced_at else None,
+        }
+        for entry in entries
+    ]
 
 
 @router.post("", response_model=dict[str, Any], status_code=201)
@@ -188,4 +257,166 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         "unchanged": unchanged,
         "missing": missing,
         "eligible_files": len(files),
+    }
+
+
+@router.post("/{source_id}/sync", response_model=dict[str, Any])
+async def sync_source(
+    source_id: int,
+    db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
+):
+    """Download new/changed files and enqueue the normal ingestion pipeline."""
+
+    source = await _source_or_404(db, source_id)
+    entries = (
+        (
+            await db.execute(
+                select(WebDAVEntry)
+                .where(
+                    WebDAVEntry.source_id == source.id,
+                    WebDAVEntry.state.in_(("discovered", "changed", "failed")),
+                )
+                .order_by(WebDAVEntry.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    source.sync_status = "syncing"
+    source.last_error = None
+    await db.commit()
+    imported = updated = unchanged = failed = 0
+    password = decrypt_secret(source.password_cipher)
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+
+    for entry in entries:
+        try:
+            payload, upstream_type = await download_file(
+                base_url=source.base_url,
+                remote_path=entry.remote_path,
+                username=source.username,
+                password=password,
+                trusted_private_network=source.trusted_private_network,
+                max_bytes=max_bytes,
+            )
+            filename = normalized_filename(PurePosixPath(entry.remote_path).name)
+            content_type = validate_file_type(
+                filename, upstream_type.split(";", 1)[0].strip()
+            )
+            stored = storage.save(BytesIO(payload), max_bytes=max_bytes)
+            entry.content_hash = stored.sha256
+            existing_blob = await db.scalar(
+                select(Blob).where(Blob.sha256 == stored.sha256)
+            )
+            if existing_blob is not None:
+                storage.delete(stored.storage_key)
+                blob = existing_blob
+            else:
+                blob = Blob(
+                    sha256=stored.sha256,
+                    storage_key=stored.storage_key,
+                    content_type=content_type,
+                    file_size=stored.size,
+                    original_filename=filename,
+                )
+                db.add(blob)
+                await db.flush()
+
+            document = (
+                await db.get(Document, entry.document_id)
+                if entry.document_id is not None
+                else None
+            )
+            if document is None:
+                document = Document(
+                    title=(PurePosixPath(filename).stem or filename)[:1024],
+                    source_type=DocumentSourceType.file,
+                    meta={
+                        "external_source": "webdav",
+                        "webdav_source_id": source.id,
+                        "webdav_path": entry.remote_path,
+                    },
+                )
+                db.add(document)
+                await db.flush()
+                version_number = 1
+                imported += 1
+            else:
+                current = (
+                    await db.get(DocumentVersion, document.current_version_id)
+                    if document.current_version_id
+                    else None
+                )
+                if current is not None and current.content_hash == stored.sha256:
+                    entry.state = "synced"
+                    entry.synced_at = datetime.now(timezone.utc)
+                    unchanged += 1
+                    await db.commit()
+                    continue
+                version_number = (
+                    int(
+                        (
+                            await db.execute(
+                                select(func.max(DocumentVersion.version_number)).where(
+                                    DocumentVersion.document_id == document.id
+                                )
+                            )
+                        ).scalar_one()
+                        or 0
+                    )
+                    + 1
+                )
+                updated += 1
+            version = DocumentVersion(
+                document_id=document.id,
+                blob_id=blob.id,
+                version_number=version_number,
+                content_hash=stored.sha256,
+                processing_status="created",
+                meta={
+                    "external_source": "webdav",
+                    "webdav_source_id": source.id,
+                    "webdav_path": entry.remote_path,
+                },
+            )
+            db.add(version)
+            await db.flush()
+            document.current_version_id = version.id
+            entry.document_id = document.id
+            entry.state = "synced"
+            entry.synced_at = datetime.now(timezone.utc)
+            entry.last_error = None
+            db.add(
+                ProcessingJob(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    stage="stored",
+                    status="created",
+                    idempotency_key=f"{version.id}:stored:webdav-v1",
+                    config_version="webdav-v1",
+                )
+            )
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            await db.rollback()
+            entry = await db.get(WebDAVEntry, entry.id)
+            if entry is not None:
+                entry.state = "failed"
+                entry.last_error = str(exc)[:1000]
+                await db.commit()
+            failed += 1
+
+    source = await db.get(WebDAVSource, source_id)
+    assert source is not None
+    source.sync_status = "failed" if failed else "idle"
+    source.last_sync_at = datetime.now(timezone.utc)
+    source.last_error = f"{failed} 个文件同步失败" if failed else None
+    await db.commit()
+    return {
+        "ok": failed == 0,
+        "imported": imported,
+        "updated": updated,
+        "unchanged": unchanged,
+        "failed": failed,
     }

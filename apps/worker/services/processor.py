@@ -4,7 +4,7 @@ import datetime
 import hashlib
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from apps.api.ai import (
@@ -717,6 +717,19 @@ def _replace_version_chunks(
         session.scalars(
             select(DocumentChunk).where(DocumentChunk.document_version_id == version.id)
         ).all()
+    )
+    # A document may receive a new version from WebDAV or manual reprocessing.
+    # Keep historical chunks for traceability, but only the current version may
+    # participate in retrieval.
+    session.execute(
+        update(DocumentChunk)
+        .where(
+            DocumentChunk.document_id == document.id,
+            DocumentChunk.document_version_id != version.id,
+            DocumentChunk.is_current.is_(True),
+        )
+        .values(is_current=False),
+        execution_options={"synchronize_session": False},
     )
     session.execute(
         delete(DocumentChunk).where(DocumentChunk.document_version_id == version.id),

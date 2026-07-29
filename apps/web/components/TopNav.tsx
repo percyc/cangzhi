@@ -8,6 +8,7 @@ import { fetchAuthStatus, type AuthStatus } from '@/lib/api';
 
 const NAV_ITEMS = [
   { href: '/documents', label: '资料库' },
+  { href: '/sources', label: '知识源' },
   { href: '/processing', label: '处理中心' },
   { href: '/search', label: '搜索' },
   { href: '/ask', label: '问知识库' },
