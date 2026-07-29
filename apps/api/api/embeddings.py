@@ -24,7 +24,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
@@ -32,24 +32,19 @@ from ..embeddings import CANARY_VERSION
 from ..embeddings.build_service import (
     ACTIVATABLE_STATUSES,
     BUILDABLE_STATUSES,
-    BuildServiceError,
-    ConfigLocked,
-    ProfileNotActivatable,
-    ProfileNotBuildable,
-    ProfileNotFound,
-    ProfileNotReady,
     RETRYABLE_STATUSES,
+    BuildServiceError,
     activate_profile,
     get_profile_summaries,
-    rollback_profile,
     retry_profile,
+    rollback_profile,
     start_build,
 )
 from ..embeddings.service import test_candidate_embedding
 from ..models.auth import AIRuntimeConfig
-from ..models.embedding_profiles import EmbeddingProfile
+from ..models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
+from ..models.processing import ProcessingJob
 from .auth import require_admin
-
 
 logger = logging.getLogger(__name__)
 
@@ -252,3 +247,47 @@ async def post_rollback_profile(
     except BuildServiceError as exc:
         raise _translate_build_error(exc) from None
     return result.to_public_dict()
+
+
+@router.delete(
+    "/profiles/{profile_id}",
+    response_model=dict[str, Any],
+)
+async def delete_embedding_profile(
+    profile_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+) -> dict[str, Any]:
+    """Delete an inactive, non-building vector index version."""
+
+    profile = await db.get(EmbeddingProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="向量索引版本不存在")
+    config = (
+        await db.execute(
+            select(AIRuntimeConfig).where(
+                AIRuntimeConfig.active_embedding_profile_id == profile_id
+            )
+        )
+    ).scalars().first()
+    if profile.status == "active" or config is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="当前生效的向量索引不能删除，请先启用或回滚到其他版本",
+        )
+    if profile.status == "building":
+        raise HTTPException(
+            status_code=409,
+            detail="正在构建的向量索引不能删除，请等待构建结束",
+        )
+    await db.execute(
+        delete(ProcessingJob).where(
+            ProcessingJob.embedding_profile_id == profile_id
+        )
+    )
+    await db.execute(
+        delete(ChunkEmbedding).where(ChunkEmbedding.profile_id == profile_id)
+    )
+    await db.delete(profile)
+    await db.commit()
+    return {"ok": True, "message": "向量索引版本及其向量数据已删除"}

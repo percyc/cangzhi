@@ -70,9 +70,9 @@ this contract.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,7 +81,6 @@ from ..models.auth import AIRuntimeConfig
 from ..models.chunks import DocumentChunk
 from ..models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from ..models.processing import ProcessingJob
-
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +253,8 @@ def _available_actions(status: str, is_active: bool) -> tuple[str, ...]:
         actions.append("activate")
     if status == "retired" and not is_active:
         actions.append("rollback")
+    if not is_active and status != "building":
+        actions.append("delete")
     return tuple(actions)
 
 
@@ -782,22 +783,22 @@ async def get_profile_summaries(db: AsyncSession) -> list[ProfileSummary]:
 __all__ = [
     "ACTIVATABLE_STATUSES",
     "BUILDABLE_STATUSES",
+    "EMBEDDING_IDEMPOTENCY_PREFIX",
+    "EMBEDDING_STAGE",
+    "RETRYABLE_STATUSES",
+    "ActivationResult",
     "BuildResult",
     "BuildServiceError",
     "ConfigLocked",
-    "EMBEDDING_IDEMPOTENCY_PREFIX",
-    "EMBEDDING_STAGE",
     "ProfileNotActivatable",
     "ProfileNotBuildable",
     "ProfileNotFound",
     "ProfileNotReady",
     "ProfileSummary",
-    "RETRYABLE_STATUSES",
-    "ActivationResult",
     "activate_profile",
     "enqueue_embedding_jobs_for_chunk",
     "get_profile_summaries",
-    "rollback_profile",
     "retry_profile",
+    "rollback_profile",
     "start_build",
 ]

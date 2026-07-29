@@ -90,7 +90,7 @@ export type EmbeddingProfileStatus = {
   completed_chunks: number | null;
   failed_chunks: number | null;
   is_active: boolean;
-  available_actions: Array<'build' | 'retry' | 'activate' | 'rollback'>;
+  available_actions: Array<'build' | 'retry' | 'activate' | 'rollback' | 'delete'>;
 };
 
 export type EmbeddingLifecycleResult = {
@@ -239,10 +239,14 @@ export async function fetchEmbeddingStatus(): Promise<EmbeddingStatus> {
 
 export async function runEmbeddingProfileAction(
   profileId: number,
-  action: 'build' | 'retry' | 'activate' | 'rollback',
+  action: 'build' | 'retry' | 'activate' | 'rollback' | 'delete',
 ): Promise<EmbeddingLifecycleResult> {
-  const response = await fetch(`/api/embeddings/profiles/${profileId}/${action}`, {
-    method: 'POST',
+  const target =
+    action === 'delete'
+      ? `/api/embeddings/profiles/${profileId}`
+      : `/api/embeddings/profiles/${profileId}/${action}`;
+  const response = await fetch(target, {
+    method: action === 'delete' ? 'DELETE' : 'POST',
     credentials: 'include',
   });
   if (!response.ok) {

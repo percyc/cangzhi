@@ -292,8 +292,12 @@ export default function SettingsPage() {
 
   const handleEmbeddingAction = async (
     profileId: number,
-    action: 'build' | 'retry' | 'activate' | 'rollback',
+    action: 'build' | 'retry' | 'activate' | 'rollback' | 'delete',
   ) => {
+    if (
+      action === 'delete' &&
+      !window.confirm('确定删除这个向量索引版本吗？对应向量数据将被永久清理。')
+    ) return;
     setEmbeddingActionId(profileId);
     setEmbeddingActionMessage(null);
     try {
@@ -303,6 +307,7 @@ export default function SettingsPage() {
         retry: `已重新提交 ${result.enqueued ?? 0} 个失败任务`,
         activate: '新向量索引已启用',
         rollback: '已切回历史向量索引',
+        delete: '向量索引版本已删除',
       };
       setEmbeddingActionMessage(labels[action]);
       setEmbeddingStatus(await fetchEmbeddingStatus());
@@ -616,6 +621,7 @@ export default function SettingsPage() {
                             retry: '重试失败任务',
                             activate: '启用此版本',
                             rollback: '回滚到此版本',
+                            delete: '删除版本',
                           };
                           return (
                             <button
@@ -623,7 +629,11 @@ export default function SettingsPage() {
                               type="button"
                               disabled={embeddingActionId !== null}
                               onClick={() => handleEmbeddingAction(profile.id, action)}
-                              className="rounded border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                              className={`rounded border px-3 py-1.5 text-xs disabled:opacity-50 ${
+                                action === 'delete'
+                                  ? 'border-red-200 text-red-700 hover:bg-red-50'
+                                  : 'border-slate-300 text-slate-700 hover:bg-slate-50'
+                              }`}
                             >
                               {embeddingActionId === profile.id ? '处理中…' : labels[action]}
                             </button>

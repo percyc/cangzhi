@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import pytest
 from sqlalchemy import select
 
 from apps.api.api.auth import require_admin, reset_auth_limiters_for_tests
@@ -31,9 +30,8 @@ from apps.api.main import app
 from apps.api.models.auth import AIRuntimeConfig
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
-from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
+from apps.api.models.embedding_profiles import EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
-
 
 # --- helpers --------------------------------------------------------------
 
@@ -128,6 +126,26 @@ def _fetch_profile(profile_id: int) -> EmbeddingProfile:
             ).scalars().first()
 
     return asyncio.run(_run())
+
+
+def test_delete_inactive_profile(client):
+    test_client, _storage = client
+    profile = _seed_profile(status="failed")
+    _seed(test_client, profile)
+
+    response = test_client.delete(f"/api/embeddings/profiles/{profile.id}")
+    assert response.status_code == 200
+    assert _fetch_profile(profile.id) is None
+
+
+def test_delete_active_profile_is_rejected(client):
+    test_client, _storage = client
+    profile = _seed_profile(status="active")
+    _seed(test_client, profile)
+
+    response = test_client.delete(f"/api/embeddings/profiles/{profile.id}")
+    assert response.status_code == 409
+    assert _fetch_profile(profile.id) is not None
 
 
 def _fetch_jobs(profile_id: int) -> list[ProcessingJob]:
