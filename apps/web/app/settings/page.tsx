@@ -338,14 +338,28 @@ export default function SettingsPage() {
     <main className="mx-auto max-w-3xl px-6 py-12">
       <h1 className="text-2xl font-semibold text-slate-900">模型设置</h1>
       <p className="mt-2 text-sm text-slate-500">
-        这里的设置会立即生效，覆盖环境变量里的默认值。密钥加密保存在服务器上，页面只显示是否已保存。
+        对话模型负责整理和回答，向量模型负责语义检索。两套配置完全独立。
       </p>
 
       <form className="mt-8 space-y-8" onSubmit={handleSave}>
-        <section>
-          <h2 className="text-base font-semibold text-slate-800">模型来源</h2>
-          <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            {(['disabled', 'openai', 'ollama'] as const).map((value) => {
+        <section className="space-y-5 rounded-2xl border-2 border-blue-200 bg-white p-5 shadow-sm">
+          <header className="border-b border-blue-100 pb-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+              第一部分
+            </p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-900">
+              对话模型
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              用于自动分类、摘要、整理笔记和知识库问答。
+            </p>
+          </header>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">
+              1. 选择对话模型来源
+            </h3>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              {(['disabled', 'openai', 'ollama'] as const).map((value) => {
               const labels: Record<Provider, { title: string; hint: string }> =
                 {
                   disabled: {
@@ -384,15 +398,15 @@ export default function SettingsPage() {
                   </p>
                 </button>
               );
-            })}
+              })}
+            </div>
           </div>
-        </section>
 
-        {provider === 'openai' && (
-          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-base font-semibold text-slate-800">
-              OpenAI 兼容配置
-            </h2>
+          {provider === 'openai' && (
+            <section className="space-y-4 rounded-xl bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-800">
+                2. 填写对话模型参数
+              </h3>
             <Field
               id="openai-base-url"
               label="API 地址"
@@ -449,14 +463,14 @@ export default function SettingsPage() {
                 明确清除已保存的密钥
               </label>
             </div>
-          </section>
-        )}
+            </section>
+          )}
 
-        {provider === 'ollama' && (
-          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-base font-semibold text-slate-800">
-              Ollama 配置
-            </h2>
+          {provider === 'ollama' && (
+            <section className="space-y-4 rounded-xl bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-800">
+                2. 填写对话模型参数
+              </h3>
             <Field
               id="ollama-base-url"
               label="服务地址"
@@ -475,14 +489,14 @@ export default function SettingsPage() {
               onChange={setOllamaModel}
               models={models}
             />
-          </section>
-        )}
+            </section>
+          )}
 
-        {provider !== 'disabled' && (
-          <section className="space-y-4 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
+          {provider !== 'disabled' && (
+            <section className="space-y-4 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
             <div>
               <h2 className="text-base font-semibold text-slate-800">
-                对话模型操作
+                3. 获取并验证对话模型
               </h2>
               <p className="mt-1 text-xs text-slate-500">
                 以下操作只针对上面的对话模型，不会影响向量模型。
@@ -543,25 +557,31 @@ export default function SettingsPage() {
                   : `对话模型连接失败：${testResult.message}`}
               </p>
             )}
-          </section>
-        )}
+            </section>
+          )}
+        </section>
 
-        <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
-          <h2 className="text-base font-semibold text-slate-800">
-            Embedding 渠道
-          </h2>
-          <p className="text-xs text-slate-500">
-            可选：Embedding 渠道与上面的对话渠道相互独立，可以独立设置
-            模型来源、地址、密钥和超时。关闭后仍按关键词/全文匹配工作。
-          </p>
-          <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+        <section className="flex flex-col gap-4 rounded-2xl border-2 border-violet-200 bg-white p-5 shadow-sm">
+          <header className="border-b border-violet-100 pb-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-violet-600">
+              第二部分
+            </p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-900">
+              向量模型
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              仅用于语义检索和向量索引，不参与摘要或回答生成；关闭后仍可使用关键词检索。
+            </p>
+          </header>
+          <div className="order-4 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <p className="mb-1 font-semibold text-slate-800">当前生效状态</p>
             {embeddingStatus?.active_profile.id
               ? `当前服务索引：${embeddingStatus.active_profile.model} · ${embeddingStatus.active_profile.dim} 维`
               : '当前尚未启用向量索引，检索继续使用关键词。'}
           </div>
           {embeddingStatus?.profiles?.length ? (
-            <div className="space-y-2 rounded-lg border border-slate-200 p-3">
-              <h3 className="text-sm font-medium text-slate-800">向量索引版本</h3>
+            <div className="order-5 space-y-2 rounded-lg border border-slate-200 p-3">
+              <h3 className="text-sm font-medium text-slate-800">4. 向量索引版本</h3>
               {embeddingStatus.profiles.map((profile) => {
                 const total = profile.total_chunks ?? 0;
                 const completed = profile.completed_chunks ?? 0;
@@ -619,8 +639,12 @@ export default function SettingsPage() {
               )}
             </div>
           ) : null}
-          <div className="grid gap-3 sm:grid-cols-3">
-            {(['disabled', 'openai', 'ollama'] as const).map((value) => {
+          <div className="order-1">
+            <h3 className="mb-3 text-sm font-semibold text-slate-800">
+              1. 选择向量模型来源
+            </h3>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {(['disabled', 'openai', 'ollama'] as const).map((value) => {
               const labels: Record<
                 EmbeddingProvider,
                 { title: string; hint: string }
@@ -660,11 +684,15 @@ export default function SettingsPage() {
                   </p>
                 </button>
               );
-            })}
+              })}
+            </div>
           </div>
 
           {embeddingProvider !== 'disabled' && (
-            <>
+            <div className="order-2 space-y-4 rounded-xl bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-800">
+                2. 填写向量模型参数
+              </h3>
               <Field
                 id="embedding-base-url"
                 label="Embedding 服务地址"
@@ -732,27 +760,6 @@ export default function SettingsPage() {
                 allowEmpty
                 emptyOptionLabel="（不启用 Embedding）"
               />
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleFetchEmbeddingModels}
-                  disabled={
-                    embeddingModelsState === 'fetching' ||
-                    embeddingConnectionChanged ||
-                    embeddingTimeoutChanged
-                  }
-                  className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  {embeddingModelsState === 'fetching'
-                    ? '正在获取…'
-                    : embeddingModels.length
-                      ? '刷新向量模型列表'
-                      : '获取向量模型列表'}
-                </button>
-                {embeddingModelsError && (
-                  <p className="text-sm text-red-700">{embeddingModelsError}</p>
-                )}
-              </div>
               <Field
                 id="embedding-timeout"
                 label="Embedding 请求超时（秒）"
@@ -762,31 +769,60 @@ export default function SettingsPage() {
                 }
                 type="number"
               />
-              <div className="flex flex-wrap items-center gap-3">
-        <button
-                  type="button"
-                  onClick={handleEmbeddingTest}
-                  disabled={
-                    embeddingTesting ||
-                    embeddingConnectionChanged ||
-                    embeddingModelChanged ||
-                    embeddingTimeoutChanged ||
-                    !config.embedding_model
-                  }
-                  className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-        >
-          {embeddingTesting ? '正在测试…' : '测试连接与兼容性'}
-        </button>
+              <div className="rounded-xl border border-violet-100 bg-violet-50/50 p-4">
+                <h3 className="text-sm font-semibold text-slate-800">
+                  3. 获取并验证向量模型
+                </h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  模型列表和兼容性测试仅针对向量模型，不会调用或更改对话模型。
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleFetchEmbeddingModels}
+                    disabled={
+                      embeddingModelsState === 'fetching' ||
+                      embeddingConnectionChanged ||
+                      embeddingTimeoutChanged
+                    }
+                    className="rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {embeddingModelsState === 'fetching'
+                      ? '正在获取…'
+                      : embeddingModels.length
+                        ? '刷新向量模型列表'
+                        : '获取向量模型列表'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEmbeddingTest}
+                    disabled={
+                      embeddingTesting ||
+                      embeddingConnectionChanged ||
+                      embeddingModelChanged ||
+                      embeddingTimeoutChanged ||
+                      !config.embedding_model
+                    }
+                    className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {embeddingTesting ? '正在测试…' : '测试连接与兼容性'}
+                  </button>
+                </div>
+                {embeddingModelsError && (
+                  <p className="mt-3 text-sm text-red-700">
+                    {embeddingModelsError}
+                  </p>
+                )}
                 {(embeddingConnectionChanged ||
                   embeddingModelChanged ||
                   embeddingTimeoutChanged) && (
-                  <p className="text-sm text-amber-700">
-                    请先保存 Embedding 渠道的改动
+                  <p className="mt-3 text-sm text-amber-700">
+                    请先保存向量模型参数的改动，再执行获取或测试。
                   </p>
                 )}
                 {embeddingTestResult && (
                   <p
-                    className={`text-sm ${
+                    className={`mt-3 text-sm ${
                       embeddingTestResult.ok
                         ? 'text-emerald-700'
                         : 'text-red-700'
@@ -803,31 +839,36 @@ export default function SettingsPage() {
                       : `测试失败：${embeddingTestResult.reason}`}
                   </p>
                 )}
-      </div>
-      <p className="text-xs text-slate-500">
-        保存和测试候选渠道不会重新生成文档向量；系统会在兼容性判定后再让你选择是否重建。
-      </p>
-            </>
+                <p className="mt-3 text-xs text-slate-500">
+                  获取列表或测试不会重新生成文档向量；确认兼容性后，再在下方决定是否构建或切换索引。
+                </p>
+              </div>
+            </div>
           )}
         </section>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="submit"
-            disabled={saveState === 'saving'}
-            className="rounded bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-400"
-          >
-            {saveState === 'saving' ? '正在保存…' : '保存设置'}
-          </button>
-          {saveMessage && (
-            <p
-              className={`text-sm ${
-                saveState === 'error' ? 'text-red-700' : 'text-slate-600'
-              }`}
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <p className="mb-3 text-xs text-slate-500">
+            同时保存上面的对话模型和向量模型配置。
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="submit"
+              disabled={saveState === 'saving'}
+              className="rounded bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-400"
             >
-              {saveMessage}
-            </p>
-          )}
+              {saveState === 'saving' ? '正在保存…' : '保存本页全部设置'}
+            </button>
+            {saveMessage && (
+              <p
+                className={`text-sm ${
+                  saveState === 'error' ? 'text-red-700' : 'text-slate-600'
+                }`}
+              >
+                {saveMessage}
+              </p>
+            )}
+          </div>
         </div>
       </form>
     </main>
