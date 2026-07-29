@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-from typing import Any
 
 import structlog
 from sqlalchemy import delete, select
@@ -10,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from apps.api.ai import (
     AIProvider,
-    AIProviderError,
     UnderstandingResult,
     build_provider_from_session,
 )
@@ -42,7 +40,9 @@ from apps.api.parsers.base import StructuredContent
 from apps.api.security import (
     URLFetchError,
     URLSecurityError,
+    browser_profiles_for_url,
     fetch_url,
+    looks_like_access_block,
 )
 from apps.api.services import build_chunk_specs
 from apps.api.storage.local import LocalBlobStorage
@@ -181,12 +181,39 @@ def _fetch_and_store_url(
 ) -> tuple[bytes, str]:
     assert document.source_url, "URL document must have a source_url"
     try:
-        page = fetch_url(
-            document.source_url,
-            max_bytes=settings.url_fetch_max_bytes,
-            timeout_seconds=settings.url_fetch_timeout_seconds,
-            max_redirects=settings.url_fetch_max_redirects,
-        )
+        page = None
+        attempted_profiles: list[str] = []
+        last_fetch_error: URLFetchError | None = None
+        for profile in browser_profiles_for_url(document.source_url):
+            attempted_profiles.append(profile.name)
+            try:
+                candidate = fetch_url(
+                    document.source_url,
+                    max_bytes=settings.url_fetch_max_bytes,
+                    timeout_seconds=settings.url_fetch_timeout_seconds,
+                    max_redirects=settings.url_fetch_max_redirects,
+                    user_agent=profile.user_agent,
+                    request_headers=profile.headers,
+                    accept=profile.headers["Accept"],
+                )
+            except URLFetchError as exc:
+                last_fetch_error = exc
+                continue
+            if not looks_like_access_block(candidate.raw_bytes):
+                page = candidate
+                break
+            logger.warning(
+                "url_access_challenge",
+                document_id=document.id,
+                browser_profile=profile.name,
+            )
+        if page is None:
+            profiles = "、".join(attempted_profiles)
+            if last_fetch_error is not None:
+                raise URLFetchError(
+                    f"浏览器模式抓取失败（{profiles}）：{last_fetch_error}"
+                )
+            raise URLFetchError(f"网站返回访问验证页面（已尝试浏览器模式：{profiles}）")
     except URLSecurityError as exc:
         raise _FatalFetchError(str(exc)) from None
     except URLFetchError as exc:
@@ -197,10 +224,10 @@ def _fetch_and_store_url(
     storage = LocalBlobStorage(settings.storage_path)
     from io import BytesIO
 
-    stored = storage.save(BytesIO(page.raw_bytes), max_bytes=settings.url_fetch_max_bytes)
-    blob = (
-        session.query(Blob).filter(Blob.sha256 == stored.sha256).one_or_none()
+    stored = storage.save(
+        BytesIO(page.raw_bytes), max_bytes=settings.url_fetch_max_bytes
     )
+    blob = session.query(Blob).filter(Blob.sha256 == stored.sha256).one_or_none()
     if blob is None:
         blob = Blob(
             sha256=stored.sha256,
@@ -312,9 +339,7 @@ def _process_understanding(
 
     # If understanding already exists for this version, do not redo it.
     existing_summary = session.scalar(
-        select(DocumentSummary).where(
-            DocumentSummary.document_version_id == version.id
-        )
+        select(DocumentSummary).where(DocumentSummary.document_version_id == version.id)
     )
     existing_categories = list(
         session.scalars(
@@ -325,16 +350,20 @@ def _process_understanding(
     )
     existing_tags = list(
         session.scalars(
-            select(DocumentTag).where(
-                DocumentTag.document_version_id == version.id
-            )
+            select(DocumentTag).where(DocumentTag.document_version_id == version.id)
         ).all()
     )
     if existing_summary is not None or existing_categories or existing_tags:
         return _complete_understanding_job(session, job, document, version)
 
-    metadata = (structured.get("metadata") or {}) if isinstance(structured, dict) else {}
-    title = document.title or (metadata.get("title") if isinstance(metadata, dict) else None) or ""
+    metadata = (
+        (structured.get("metadata") or {}) if isinstance(structured, dict) else {}
+    )
+    title = (
+        document.title
+        or (metadata.get("title") if isinstance(metadata, dict) else None)
+        or ""
+    )
     content_for_ai = _build_ai_input(title, raw_text, metadata)
 
     provider = build_provider_from_session(session)
@@ -386,7 +415,9 @@ def _process_understanding(
         )
         return _complete_understanding_job(session, job, document, version)
 
-    _persist_understanding_result(session, version, document, result, categories, provider)
+    _persist_understanding_result(
+        session, version, document, result, categories, provider
+    )
     return _complete_understanding_job(session, job, document, version)
 
 
@@ -437,7 +468,7 @@ def _process_chunking(
 
     try:
         structured = _structured_content_from_payload(structured_payload)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception(
             "chunking_invalid_payload",
             document_id=document.id,
@@ -525,7 +556,7 @@ def _process_chunking(
             child_hard_max_chars=chunking_config.child_hard_max_chars,
             child_min_chars=chunking_config.child_target_min_chars,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception(
             "chunking_failed",
             document_id=document.id,
@@ -620,7 +651,9 @@ def _enqueue_embedding_jobs_for_new_chunks(
 
     profiles = list(
         session.scalars(
-            select(EmbeddingProfile).where(EmbeddingProfile.status.in_(("active", "building")))
+            select(EmbeddingProfile).where(
+                EmbeddingProfile.status.in_(("active", "building"))
+            )
         ).all()
     )
     if not profiles:
@@ -628,8 +661,7 @@ def _enqueue_embedding_jobs_for_new_chunks(
 
     child_chunks = list(
         session.scalars(
-            select(DocumentChunk)
-            .where(
+            select(DocumentChunk).where(
                 DocumentChunk.document_version_id == version.id,
                 DocumentChunk.role == "child",
                 DocumentChunk.is_current.is_(True),
@@ -683,15 +715,11 @@ def _replace_version_chunks(
 
     existing_chunks = list(
         session.scalars(
-            select(DocumentChunk).where(
-                DocumentChunk.document_version_id == version.id
-            )
+            select(DocumentChunk).where(DocumentChunk.document_version_id == version.id)
         ).all()
     )
     session.execute(
-        delete(DocumentChunk).where(
-            DocumentChunk.document_version_id == version.id
-        ),
+        delete(DocumentChunk).where(DocumentChunk.document_version_id == version.id),
         execution_options={"synchronize_session": False},
     )
     session.flush()
@@ -821,9 +849,7 @@ def _apply_inbox_fallback(
     reason: str,
     details: dict | None = None,
 ) -> None:
-    inbox = session.scalar(
-        select(Category).where(Category.slug == INBOX_CATEGORY_SLUG)
-    )
+    inbox = session.scalar(select(Category).where(Category.slug == INBOX_CATEGORY_SLUG))
     if inbox is None:
         inbox = Category(
             slug=INBOX_CATEGORY_SLUG,
@@ -952,9 +978,7 @@ def _clear_understanding_results(
         )
     )
     session.execute(
-        delete(DocumentSummary).where(
-            DocumentSummary.document_version_id == version_id
-        )
+        delete(DocumentSummary).where(DocumentSummary.document_version_id == version_id)
     )
     _reset_understanding_job(session, version_id)
     _reset_chunking_job(session, version_id)
@@ -1085,12 +1109,18 @@ def _process_parsing(
                 )
             except _FatalFetchError as exc:
                 return _mark_terminal_failure(
-                    session, job, version, f"无法抓取网页：{exc}",
+                    session,
+                    job,
+                    version,
+                    f"无法抓取网页：{exc}",
                     details={"reason": "ssrf_or_fatal"},
                 )
             except _FetchAttemptError as exc:
                 return _mark_parse_failure(
-                    session, job, version, f"抓取失败：{exc}",
+                    session,
+                    job,
+                    version,
+                    f"抓取失败：{exc}",
                     {"exception": str(exc)},
                 )
             filename = document.source_url
@@ -1133,8 +1163,7 @@ def _process_parsing(
         structured_content = result.structured_content
         if (
             document.source_type == DocumentSourceType.url
-            and len(structured_content.full_text().strip())
-            < MIN_USEFUL_URL_TEXT_LENGTH
+            and len(structured_content.full_text().strip()) < MIN_USEFUL_URL_TEXT_LENGTH
         ):
             try:
                 adapted_html = extract_xinhua_html(
@@ -1167,8 +1196,7 @@ def _process_parsing(
             _clear_understanding_results(session, version.id)
         has_useful_text = bool(
             (version.raw_content or "").strip()
-            and len((version.raw_content or "").strip())
-            >= MIN_USEFUL_URL_TEXT_LENGTH
+            and len((version.raw_content or "").strip()) >= MIN_USEFUL_URL_TEXT_LENGTH
         )
         if document.source_type != DocumentSourceType.url or has_useful_text:
             _enqueue_chunking_job(
@@ -1198,7 +1226,7 @@ def _process_parsing(
             document_id=document.id,
         )
         return True
-    except Exception as exc:  # noqa: BLE001 — defensive
+    except Exception as exc:
         logger.exception("parse_unexpected_error", job_id=job.id)
         session.rollback()
         return _mark_parse_failure(
@@ -1232,7 +1260,9 @@ def _apply_parse_result(
             doc_meta = dict(document.meta or {})
             doc_meta["published_at"] = metadata.get("published_at")
             document.meta = doc_meta
-        if "canonical_url" in metadata and isinstance(metadata.get("canonical_url"), str):
+        if "canonical_url" in metadata and isinstance(
+            metadata.get("canonical_url"), str
+        ):
             doc_meta = dict(document.meta or {})
             doc_meta["canonical_url"] = metadata.get("canonical_url")
             document.meta = doc_meta
@@ -1240,9 +1270,10 @@ def _apply_parse_result(
             version.raw_content = metadata["raw_text"]
 
     version.processing_status = "ready"
-    version.content_hash = version.content_hash or hashlib.sha256(
-        (full_text or "").encode("utf-8")
-    ).hexdigest()
+    version.content_hash = (
+        version.content_hash
+        or hashlib.sha256((full_text or "").encode("utf-8")).hexdigest()
+    )
     session.add(version)
     session.add(document)
 
@@ -1293,9 +1324,7 @@ def process_pending_jobs(session: Session) -> int:
                     job.next_retry_at = None
                 else:
                     job.status = "retry"
-                    job.next_retry_at = calculate_next_retry_at(
-                        job.retry_count - 1
-                    )
+                    job.next_retry_at = calculate_next_retry_at(job.retry_count - 1)
                 session.add(job)
                 session.commit()
                 from apps.worker.services.embedding_processor import (
@@ -1303,9 +1332,7 @@ def process_pending_jobs(session: Session) -> int:
                 )
 
                 if job.embedding_profile_id is not None:
-                    reconcile_profile_progress(
-                        session, job.embedding_profile_id
-                    )
+                    reconcile_profile_progress(session, job.embedding_profile_id)
                     session.commit()
                 continue
             version = (

@@ -1,5 +1,5 @@
-import socket
 import json
+import socket
 
 import pytest
 
@@ -7,10 +7,14 @@ from apps.api.ai.provider import AIProviderError, _parse_and_validate
 from apps.api.extractors.xinhua import extract_xinhua_html
 from apps.api.parsers.html import HtmlParser
 from apps.api.security import (
+    DESKTOP_USER_AGENT,
+    WECHAT_USER_AGENT,
     FetchedPage,
     URLFetchError,
     URLSecurityError,
+    browser_profiles_for_url,
     fetch_url,
+    looks_like_access_block,
     normalize_url,
 )
 from apps.api.security.url_safety import AllowedAddress, resolve_allowed_addresses
@@ -69,9 +73,10 @@ class _FakeResponse:
 class _FakeConnection:
     def __init__(self, response):
         self.response = response
+        self.requests = []
 
     def request(self, *args, **kwargs):
-        return None
+        self.requests.append((args, kwargs))
 
     def getresponse(self):
         return self.response
@@ -115,6 +120,44 @@ def test_fetch_url_revalidates_redirect_target(monkeypatch):
         fetch_url("https://example.com/", max_bytes=1024)
 
 
+def test_fetch_url_uses_realistic_desktop_browser_headers(monkeypatch):
+    _patch_public_dns(monkeypatch)
+    connection = _FakeConnection(
+        _FakeResponse(
+            headers={"Content-Type": "text/html"},
+            body=b"<html><body>ok</body></html>",
+        )
+    )
+    monkeypatch.setattr(
+        "apps.api.security.url_fetch._open_connection",
+        lambda *args, **kwargs: connection,
+    )
+    fetch_url("https://example.com/article", max_bytes=1024)
+    headers = connection.requests[0][1]["headers"]
+    assert headers["User-Agent"] == DESKTOP_USER_AGENT
+    assert headers["Sec-Fetch-Mode"] == "navigate"
+    assert headers["Sec-CH-UA-Mobile"] == "?0"
+    assert headers["Upgrade-Insecure-Requests"] == "1"
+
+
+def test_wechat_url_prefers_embedded_mobile_browser_profile():
+    profiles = browser_profiles_for_url("https://mp.weixin.qq.com/s/article")
+    assert profiles[0].name == "wechat_android"
+    assert profiles[0].user_agent == WECHAT_USER_AGENT
+    assert profiles[0].headers["Sec-CH-UA-Mobile"] == "?1"
+    assert profiles[0].headers["Referer"] == "https://mp.weixin.qq.com/"
+    assert profiles[1].name == "desktop_chrome"
+
+
+def test_access_challenge_page_is_detected():
+    assert looks_like_access_block(
+        "环境异常\n当前环境异常，完成验证后即可继续访问。\n去验证".encode()
+    )
+    assert not looks_like_access_block(
+        "<article><h1>正常文章</h1><p>这是正文。</p></article>".encode()
+    )
+
+
 def test_html_parser_extracts_visible_article_metadata():
     html = b"""<!doctype html><html lang="zh-CN"><head>
     <title>Useful article</title>
@@ -147,7 +190,9 @@ def test_xinhua_adapter_fetches_signed_article_api(monkeypatch):
         captured["kwargs"] = kwargs
         payload = {
             "code": "0",
-            "data": "var XinhuammNews =" + json.dumps(article, ensure_ascii=False) + ";",
+            "data": "var XinhuammNews ="
+            + json.dumps(article, ensure_ascii=False)
+            + ";",
         }
         return FetchedPage(
             url=url,

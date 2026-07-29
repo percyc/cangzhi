@@ -3,15 +3,101 @@ from __future__ import annotations
 import http.client
 import socket
 import ssl
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 
 from .url_safety import URLSecurityError, normalize_url, resolve_allowed_addresses
 
-DEFAULT_USER_AGENT = "Cangzhi/0.2 (+personal knowledge base)"
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Mobile Safari/537.36"
+)
+WECHAT_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230805.001; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
+    "Chrome/116.0.0.0 Mobile Safari/537.36 "
+    "MicroMessenger/8.0.47.2560(0x28002F37) WeChat/arm64 "
+    "Weixin NetType/WIFI Language/zh_CN ABI/arm64"
+)
+DEFAULT_USER_AGENT = DESKTOP_USER_AGENT
 _CHUNK_SIZE = 64 * 1024
 _HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+
+_DESKTOP_BROWSER_HEADERS = {
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-CH-UA": '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="24"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+_MOBILE_BROWSER_HEADERS = {
+    **_DESKTOP_BROWSER_HEADERS,
+    "Sec-CH-UA-Mobile": "?1",
+    "Sec-CH-UA-Platform": '"Android"',
+}
+
+
+@dataclass(frozen=True)
+class BrowserProfile:
+    name: str
+    user_agent: str
+    headers: Mapping[str, str]
+
+
+def browser_profiles_for_url(url: str) -> tuple[BrowserProfile, ...]:
+    """Return realistic browser profiles in the order they should be tried."""
+
+    hostname = (urlsplit(url).hostname or "").lower()
+    desktop = BrowserProfile(
+        "desktop_chrome", DESKTOP_USER_AGENT, _DESKTOP_BROWSER_HEADERS
+    )
+    mobile = BrowserProfile("mobile_chrome", MOBILE_USER_AGENT, _MOBILE_BROWSER_HEADERS)
+    if hostname == "mp.weixin.qq.com" or hostname.endswith(".weixin.qq.com"):
+        return (
+            BrowserProfile(
+                "wechat_android",
+                WECHAT_USER_AGENT,
+                {**_MOBILE_BROWSER_HEADERS, "Referer": "https://mp.weixin.qq.com/"},
+            ),
+            desktop,
+        )
+    return (desktop, mobile)
+
+
+def looks_like_access_block(raw_bytes: bytes) -> bool:
+    """Detect common challenge pages so they are never indexed as articles."""
+
+    preview = raw_bytes[:256_000].decode("utf-8", errors="ignore").lower()
+    markers = (
+        "当前环境异常",
+        "完成验证后即可继续访问",
+        "访问过于频繁",
+        "请输入验证码",
+        "安全验证",
+        "verify you are human",
+        "checking your browser",
+        "cf-chl-",
+        "captcha",
+    )
+    return any(marker.lower() in preview for marker in markers)
 
 
 class URLFetchError(RuntimeError):
@@ -137,10 +223,10 @@ def fetch_url(
         )
         try:
             headers = {
+                **_DESKTOP_BROWSER_HEADERS,
                 "Host": host_header,
                 "User-Agent": user_agent,
                 "Accept": accept,
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
                 "Connection": "close",
             }
             if request_headers:

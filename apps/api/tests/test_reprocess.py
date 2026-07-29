@@ -61,6 +61,46 @@ def test_reprocess_nonexistent_document(client):
     assert response.json()["detail"] == "资料不存在"
 
 
+def test_reprocess_url_discards_old_snapshot(client):
+    test_client, _ = client
+    created = test_client.post(
+        "/api/sources/url",
+        json={"url": "https://example.com/article"},
+    ).json()
+    document_id = created["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def mark_snapshot():
+        dependency = db_dependency()
+        session = await anext(dependency)
+        try:
+            document = await session.get(Document, document_id)
+            version = await session.get(DocumentVersion, document.current_version_id)
+            version.blob_id = None
+            version.content_hash = "old-block-page"
+            version.processing_status = "ready"
+            await session.commit()
+        finally:
+            await dependency.aclose()
+
+    asyncio.run(mark_snapshot())
+    response = test_client.post(f"/api/documents/{document_id}/reprocess")
+    assert response.status_code == 200
+
+    async def load_version():
+        dependency = db_dependency()
+        session = await anext(dependency)
+        try:
+            document = await session.get(Document, document_id)
+            return await session.get(DocumentVersion, document.current_version_id)
+        finally:
+            await dependency.aclose()
+
+    version = asyncio.run(load_version())
+    assert version.blob_id is None
+    assert version.content_hash == ""
+
+
 def test_latest_job_returns_initial_job(client):
     test_client, _ = client
     created = test_client.post(

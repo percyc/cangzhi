@@ -3,9 +3,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
-from ..models.processing import ProcessingJob
 from ..models.blobs import Blob
-from ..models.documents import Document, DocumentVersion
+from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from ..models.processing import ProcessingJob
 from ..models.taxonomy import (
     Category,
     DocumentCategory,
@@ -50,14 +50,12 @@ async def _load_categories_for_versions(
             for _link, cat in sorted(links, key=lambda item: item[0].id)
         ]
         primary = next(
-            (
-                cat
-                for (link, cat) in links
-                if link.is_primary
-            ),
+            (cat for (link, cat) in links if link.is_primary),
             None,
         )
-        primary_dto = CategoryMini.model_validate(primary) if primary is not None else None
+        primary_dto = (
+            CategoryMini.model_validate(primary) if primary is not None else None
+        )
         output[version_id] = (primary_dto, cats)
     return output
 
@@ -203,9 +201,13 @@ async def reprocess_document(
         raise HTTPException(status_code=404, detail="当前版本不存在")
 
     idempotency_key = f"{document.id}:{document.current_version_id}:parsing:v1"
-    existing_job = (await db.execute(
-        select(ProcessingJob).where(ProcessingJob.idempotency_key == idempotency_key)
-    )).scalar_one_or_none()
+    existing_job = (
+        await db.execute(
+            select(ProcessingJob).where(
+                ProcessingJob.idempotency_key == idempotency_key
+            )
+        )
+    ).scalar_one_or_none()
 
     if existing_job is not None:
         if existing_job.status in ("created", "retry"):
@@ -241,6 +243,12 @@ async def reprocess_document(
         )
 
     version.processing_status = "created"
+    if document.source_type == DocumentSourceType.url:
+        # A manual reprocess of a URL means "fetch the page again".
+        # Reusing the old snapshot would preserve a challenge/error
+        # page forever after browser headers or site behaviour change.
+        version.blob_id = None
+        version.content_hash = ""
     db.add(job)
     db.add(version)
     await db.commit()
@@ -275,12 +283,16 @@ async def update_document_category(
         raise HTTPException(status_code=404, detail="分类不存在")
 
     existing = (
-        await db.execute(
-            select(DocumentCategory).where(
-                DocumentCategory.document_version_id == version.id
+        (
+            await db.execute(
+                select(DocumentCategory).where(
+                    DocumentCategory.document_version_id == version.id
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for link in existing:
         await db.delete(link)
     await db.flush()
