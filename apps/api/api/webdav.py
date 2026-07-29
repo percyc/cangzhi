@@ -70,8 +70,12 @@ async def _source_or_404(db: AsyncSession, source_id: int) -> WebDAVSource:
 @router.get("", response_model=list[dict[str, Any]])
 async def list_sources(db: AsyncSession = Depends(get_db)):
     rows = list(
-        await db.execute(select(WebDAVSource).order_by(WebDAVSource.id.desc()))
-    ).scalars()
+        (
+            await db.execute(
+                select(WebDAVSource).order_by(WebDAVSource.id.desc())
+            )
+        ).scalars()
+    )
     counts = {
         source_id: {
             "total": total,
