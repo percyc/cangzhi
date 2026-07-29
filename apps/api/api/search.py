@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,12 +16,11 @@ from ..services.search import (
     search_documents,
 )
 
-
 router = APIRouter(prefix="/search", tags=["search"])
 
 
 class SearchRequest(BaseModel):
-    query: Annotated[str, Field(min_length=1, max_length=512)]
+    query: Annotated[str, Field(max_length=512)] = ""
     limit: int = Field(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT)
     offset: int = Field(default=0, ge=0, le=10_000)
     category_ids: list[int] = Field(default_factory=list)
@@ -140,8 +139,9 @@ async def search_filters(
 
     category_rows = (
         await db.execute(
-            select(Category.id, Category.slug, Category.name)
-            .order_by(Category.sort_order, Category.id)
+            select(Category.id, Category.slug, Category.name).order_by(
+                Category.sort_order, Category.id
+            )
         )
     ).all()
     category_counts = dict(
@@ -165,10 +165,7 @@ async def search_filters(
     ]
 
     tag_rows = (
-        await db.execute(
-            select(Tag.id, Tag.slug, Tag.name)
-            .order_by(Tag.slug)
-        )
+        await db.execute(select(Tag.id, Tag.slug, Tag.name).order_by(Tag.slug))
     ).all()
     tag_counts = dict(
         (

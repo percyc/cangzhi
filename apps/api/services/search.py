@@ -24,7 +24,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import Integer, and_, case, func, or_, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
@@ -345,6 +345,13 @@ async def _search_documents_lexical(
     }
 
     if not cleaned:
+        if any(filters.values()):
+            return await _browse_filtered(
+                db,
+                limit=limit,
+                offset=offset,
+                filters=filters,
+            )
         return SearchResult(
             query="",
             backend=_detect_backend(db),
@@ -377,6 +384,67 @@ async def _search_documents_lexical(
         limit=limit,
         offset=offset,
         filters=filters,
+    )
+
+
+async def _browse_filtered(
+    db: AsyncSession,
+    *,
+    limit: int,
+    offset: int,
+    filters: dict,
+) -> SearchResult:
+    """Browse filtered documents without invoking lexical/vector search."""
+
+    stmt = (
+        select(
+            DocumentChunk.id.label("chunk_id"),
+            DocumentChunk.parent_id.label("parent_id"),
+            DocumentChunk.document_id.label("document_id"),
+            DocumentChunk.document_version_id.label("document_version_id"),
+            DocumentChunk.chunk_type.label("chunk_type"),
+            DocumentChunk.heading_path.label("heading_path"),
+            DocumentChunk.page.label("page"),
+            DocumentChunk.paragraph_index.label("paragraph_index"),
+            DocumentChunk.source_start.label("source_start"),
+            DocumentChunk.source_end.label("source_end"),
+            DocumentChunk.content.label("content"),
+            Document.title.label("title"),
+            Document.source_type.label("source_type"),
+            Document.source_url.label("source_url"),
+            Document.updated_at.label("updated_at"),
+            func.cast(0, Integer).label("rank"),
+        )
+        .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(
+            Document.is_deleted.is_(False),
+            DocumentChunk.role == "child",
+            DocumentChunk.is_current.is_(True),
+        )
+    )
+    stmt = _apply_filters(stmt, filters)
+    rows = (
+        await db.execute(
+            stmt.order_by(Document.updated_at.desc(), DocumentChunk.order_index.asc())
+        )
+    ).all()
+    best_rows = _best_document_rows(rows, limit=limit, offset=offset)
+    hits = await _build_hits(db, best_rows, [])
+    return SearchResult(
+        query="",
+        backend="filters",
+        total=len({row.document_id for row in rows}),
+        hits=hits,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+        retrieval={
+            "mode": "filters",
+            "vector_used": False,
+            "degraded_reason": None,
+            "active_profile_id": None,
+        },
     )
 
 

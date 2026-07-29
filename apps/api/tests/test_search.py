@@ -1,10 +1,10 @@
 """Tests for the /api/search endpoints."""
 
 import asyncio
-from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -22,7 +22,6 @@ from apps.api.models.taxonomy import (
 )
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
-from fastapi.testclient import TestClient
 
 
 @pytest.fixture
@@ -98,9 +97,7 @@ async def _seed_document(
             )
         )
 
-    structured = StructuredContent(
-        document_type="markdown", blocks=blocks
-    )
+    structured = StructuredContent(document_type="markdown", blocks=blocks)
     structured_dict = structured.to_dict()
     full_text = structured.full_text()
 
@@ -142,9 +139,7 @@ async def _seed_document(
             )
 
         if tag_slug:
-            tag = await session.scalar(
-                select(Tag).where(Tag.slug == tag_slug)
-            )
+            tag = await session.scalar(select(Tag).where(Tag.slug == tag_slug))
             if tag is None:
                 tag = Tag(slug=tag_slug, name=tag_slug)
                 session.add(tag)
@@ -327,9 +322,7 @@ def test_search_filters_by_source_type(search_db):
             body="网页摘录的关键内容。",
         )
         async with search_db() as session:
-            return await search_documents(
-                session, query="内容", source_types=["url"]
-            )
+            return await search_documents(session, query="内容", source_types=["url"])
 
     result = asyncio.run(_run())
     assert result.total == 1
@@ -373,9 +366,7 @@ def test_search_post_endpoint(search_db):
         )
     )
     client = TestClient(app)
-    response = client.post(
-        "/api/search", json={"query": "全文索引"}
-    )
+    response = client.post("/api/search", json={"query": "全文索引"})
     assert response.status_code == 200
     body = response.json()
     assert body["query"] == "全文索引"
@@ -422,6 +413,40 @@ def test_search_filters_endpoint(search_db):
     }
 
 
+def test_search_allows_filter_without_query(search_db):
+    asyncio.run(
+        _seed_document(
+            search_db,
+            title="仅筛选链接",
+            source_type=DocumentSourceType.url,
+            body="无需输入关键词也应该出现。",
+            category_slug="industry",
+        )
+    )
+    asyncio.run(
+        _seed_document(
+            search_db,
+            title="不应出现的笔记",
+            source_type=DocumentSourceType.note,
+            body="另一份资料。",
+        )
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/api/search",
+        json={
+            "query": "",
+            "source_types": ["url"],
+            "category_slugs": ["industry"],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["backend"] == "filters"
+    assert body["retrieval"]["mode"] == "filters"
+    assert [hit["title"] for hit in body["hits"]] == ["仅筛选链接"]
+
+
 def test_search_no_results(search_db):
     asyncio.run(
         _seed_document(
@@ -432,9 +457,7 @@ def test_search_no_results(search_db):
         )
     )
     client = TestClient(app)
-    response = client.get(
-        "/api/search", params={"q": "完全不存在的字符串"}
-    )
+    response = client.get("/api/search", params={"q": "完全不存在的字符串"})
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 0

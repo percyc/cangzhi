@@ -103,6 +103,8 @@ function SearchClient() {
   const [filtersError, setFiltersError] = useState<string | null>(null);
   const [state, setState] = useState<State>({ kind: 'idle' });
   const [retryNonce, setRetryNonce] = useState(0);
+  const hasAnyFilter =
+    categorySlugs.length > 0 || tagSlugs.length > 0 || sourceTypes.length > 0;
 
   useEffect(() => {
     fetch('/api/search/filters', { cache: 'no-store' })
@@ -123,15 +125,15 @@ function SearchClient() {
     const handle = window.setTimeout(() => {
       const trimmed = query.trim();
       setDebouncedQuery(trimmed);
-      if (!trimmed) {
+      if (!trimmed && !hasAnyFilter) {
         setState({ kind: 'idle' });
       }
     }, 250);
     return () => window.clearTimeout(handle);
-  }, [query]);
+  }, [query, hasAnyFilter]);
 
   useEffect(() => {
-    if (!debouncedQuery) {
+    if (!debouncedQuery && !hasAnyFilter) {
       return;
     }
     let cancelled = false;
@@ -163,8 +165,12 @@ function SearchClient() {
         }
         setState({ kind: 'ready', payload });
         const params = new URLSearchParams();
-        params.set('q', debouncedQuery);
-        window.history.replaceState(null, '', `/search?${params.toString()}`);
+        if (debouncedQuery) params.set('q', debouncedQuery);
+        window.history.replaceState(
+          null,
+          '',
+          params.size ? `/search?${params.toString()}` : '/search',
+        );
       } catch (err) {
         if (cancelled) {
           return;
@@ -179,7 +185,14 @@ function SearchClient() {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQuery, categorySlugs, tagSlugs, sourceTypes, retryNonce]);
+  }, [
+    debouncedQuery,
+    categorySlugs,
+    tagSlugs,
+    sourceTypes,
+    retryNonce,
+    hasAnyFilter,
+  ]);
 
   const toggleCategory = (slug: string) => {
     setCategorySlugs((prev) =>
@@ -196,9 +209,6 @@ function SearchClient() {
       prev.includes(value) ? prev.filter((s) => s !== value) : [...prev, value],
     );
   };
-
-  const hasAnyFilter =
-    categorySlugs.length > 0 || tagSlugs.length > 0 || sourceTypes.length > 0;
 
   return (
     <main className="container mx-auto max-w-5xl p-4">
@@ -269,22 +279,22 @@ function SearchClient() {
       />
 
       <section className="mt-6">
-        {!debouncedQuery && (
+        {!debouncedQuery && !hasAnyFilter && (
           <EmptyState
             heading="开始一次搜索"
             description="支持中文、英文和数字。可以同时选择分类、标签、来源类型来缩小范围。"
           />
         )}
-        {debouncedQuery && state.kind === 'loading' && (
+        {(debouncedQuery || hasAnyFilter) && state.kind === 'loading' && (
           <p className="text-sm text-slate-500">正在搜索…</p>
         )}
-        {debouncedQuery && state.kind === 'error' && (
+        {(debouncedQuery || hasAnyFilter) && state.kind === 'error' && (
           <ErrorState
             message={state.message}
             onRetry={() => setRetryNonce((value) => value + 1)}
           />
         )}
-        {debouncedQuery && state.kind === 'ready' &&
+        {(debouncedQuery || hasAnyFilter) && state.kind === 'ready' &&
           (state.payload.hits.length === 0 ? (
             <EmptyState
               heading="没有找到匹配的资料"
@@ -417,7 +427,12 @@ function Results({ payload }: { payload: SearchResponse }) {
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
         命中 {payload.total} 条 ·{' '}
-        {payload.retrieval?.vector_used ? '关键词 + 向量混合排序' : '关键词排序'} ·
+        {payload.retrieval?.mode === 'filters'
+          ? '按更新时间展示筛选结果'
+          : payload.retrieval?.vector_used
+            ? '关键词 + 向量混合排序'
+            : '关键词排序'}{' '}
+        ·
         显示 {payload.hits.length} 条
       </p>
       {payload.retrieval?.degraded_reason && (
