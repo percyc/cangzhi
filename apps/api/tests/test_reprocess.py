@@ -198,3 +198,48 @@ def test_processing_status_reports_completed_vector_pipeline(client):
     assert body["stages"]["chunking"]["child_chunks"] == 1
     assert body["stages"]["embedding"]["completed"] == 1
     assert body["stages"]["embedding"]["total"] == 1
+
+
+def test_processing_status_infers_legacy_note_artifacts(client):
+    test_client, _ = client
+    created = test_client.post(
+        "/api/notes",
+        json={"title": "旧随手记", "content": "已有正文但没有历史解析任务。"},
+    ).json()
+    document_id = created["id"]
+    version_id = created["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def seed_artifacts():
+        dependency = db_dependency()
+        session = await anext(dependency)
+        try:
+            version = await session.get(DocumentVersion, version_id)
+            version.processing_status = "ready"
+            version.meta = {"ai_status": "not_configured"}
+            session.add(
+                DocumentChunk(
+                    document_id=document_id,
+                    document_version_id=version_id,
+                    external_id="legacy-child",
+                    role="child",
+                    chunk_type="paragraph",
+                    order_index=0,
+                    content="已有正文但没有历史解析任务。",
+                    search_text="旧随手记 已有正文但没有历史解析任务。",
+                    content_hash="l" * 64,
+                    char_count=14,
+                    token_estimate=7,
+                    is_current=True,
+                )
+            )
+            await session.commit()
+        finally:
+            await dependency.aclose()
+
+    asyncio.run(seed_artifacts())
+    body = test_client.get(f"/api/documents/{document_id}/processing-status").json()
+    assert body["stages"]["parsing"]["status"] == "completed"
+    assert body["stages"]["chunking"]["status"] == "completed"
+    assert body["stages"]["understanding"]["status"] == "skipped"
+    assert "等待前一阶段" not in body["stages"]["parsing"]["message"]

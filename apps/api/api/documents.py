@@ -223,7 +223,6 @@ async def reprocess_document(
 
     if document.current_version_id is None:
         raise HTTPException(status_code=400, detail="资料没有当前版本")
-
     version = await db.get(DocumentVersion, document.current_version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="当前版本不存在")
@@ -374,6 +373,9 @@ async def get_processing_status(
         raise HTTPException(status_code=404, detail="资料不存在")
     if document.current_version_id is None:
         raise HTTPException(status_code=400, detail="资料没有当前版本")
+    version = await db.get(DocumentVersion, document.current_version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="当前版本不存在")
 
     jobs = (
         (
@@ -462,8 +464,43 @@ async def get_processing_status(
         )
 
     parsing = _stage_payload(latest_by_stage.get("parsing"))
+    if (
+        latest_by_stage.get("parsing") is None
+        and version.processing_status in {"ready", "unsupported"}
+        and (version.raw_content or version.structured_content)
+    ):
+        parsing = {
+            "status": "completed",
+            "message": "已提取正文",
+            "last_error": None,
+        }
+
     chunking = _stage_payload(latest_by_stage.get("chunking"))
+    if chunk_count > 0:
+        chunking = {
+            "status": "completed",
+            "message": "已生成知识切片",
+            "last_error": None,
+        }
+
     understanding = _stage_payload(latest_by_stage.get("understanding"))
+    ai_status = (version.meta or {}).get("ai_status")
+    if ai_status in {"completed", "not_configured"}:
+        understanding = {
+            "status": "completed" if ai_status == "completed" else "skipped",
+            "message": (
+                "AI 整理已完成"
+                if ai_status == "completed"
+                else "未配置对话模型，已按默认规则整理"
+            ),
+            "last_error": None,
+        }
+    elif latest_by_stage.get("understanding") is None and chunk_count > 0:
+        understanding = {
+            "status": "skipped",
+            "message": "历史资料无 AI 整理任务记录",
+            "last_error": None,
+        }
     if active_profile is None:
         embedding = {
             "status": "disabled",
