@@ -3,6 +3,9 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
+import remarkGfm from 'remark-gfm';
 
 type DocumentCategory = {
   id: number;
@@ -33,6 +36,7 @@ type DocumentVersion = {
     extraction_message?: string;
   };
   structured_content: {
+    document_type?: string;
     metadata?: {
       author?: string | null;
       published_at?: string | null;
@@ -235,6 +239,10 @@ export default function DocumentDetailPage() {
   const status = version?.processing_status || 'created';
   const canRetry = ['failed', 'unsupported'].includes(status);
   const metadata = version?.structured_content?.metadata;
+  const rendersAsMarkdown =
+    document.source_type === 'note' ||
+    version?.structured_content?.document_type === 'markdown' ||
+    Boolean(version?.blob?.original_filename?.toLowerCase().endsWith('.md'));
 
   return (
     <main className="container mx-auto p-4">
@@ -369,9 +377,13 @@ export default function DocumentDetailPage() {
       )}
 
       {version?.raw_content ? (
-        <article className="mt-6 whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 p-4 leading-relaxed text-slate-800">
-          {version.raw_content}
-        </article>
+        rendersAsMarkdown ? (
+          <MarkdownBody content={version.raw_content} />
+        ) : (
+          <article className="mt-6 whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 p-4 leading-relaxed text-slate-800">
+            {version.raw_content}
+          </article>
+        )
       ) : (
         <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-slate-600">
           {['created', 'processing', 'retry'].includes(status)
@@ -404,6 +416,82 @@ export default function DocumentDetailPage() {
         )}
       </div>
     </main>
+  );
+}
+
+function MarkdownBody({ content }: { content: string }) {
+  return (
+    <article className="mt-6 rounded-xl border border-slate-200 bg-white p-5 text-slate-800 shadow-sm">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={{
+          h1: ({ children }) => (
+            <h1 className="mb-4 mt-1 border-b border-slate-200 pb-2 text-2xl font-bold">
+              {children}
+            </h1>
+          ),
+          h2: ({ children }) => (
+            <h2 className="mb-3 mt-7 text-xl font-semibold">{children}</h2>
+          ),
+          h3: ({ children }) => (
+            <h3 className="mb-2 mt-5 text-lg font-semibold">{children}</h3>
+          ),
+          p: ({ children }) => (
+            <p className="my-3 leading-7 text-slate-700">{children}</p>
+          ),
+          ul: ({ children }) => (
+            <ul className="my-3 list-disc space-y-1 pl-6">{children}</ul>
+          ),
+          ol: ({ children }) => (
+            <ol className="my-3 list-decimal space-y-1 pl-6">{children}</ol>
+          ),
+          blockquote: ({ children }) => (
+            <blockquote className="my-4 border-l-4 border-slate-300 bg-slate-50 px-4 py-1 text-slate-600">
+              {children}
+            </blockquote>
+          ),
+          a: ({ href, children }) => (
+            <a
+              href={href}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="text-blue-600 underline decoration-blue-300 underline-offset-2"
+            >
+              {children}
+            </a>
+          ),
+          code: ({ className, children }) =>
+            className ? (
+              <code className={`${className} text-sm`}>{children}</code>
+            ) : (
+              <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-sm text-rose-700">
+                {children}
+              </code>
+            ),
+          pre: ({ children }) => (
+            <pre className="my-4 overflow-x-auto rounded-lg bg-slate-900 p-4 text-sm leading-6 text-slate-100">
+              {children}
+            </pre>
+          ),
+          table: ({ children }) => (
+            <div className="my-4 overflow-x-auto">
+              <table className="min-w-full border-collapse text-sm">{children}</table>
+            </div>
+          ),
+          th: ({ children }) => (
+            <th className="border border-slate-300 bg-slate-100 px-3 py-2 text-left font-semibold">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="border border-slate-300 px-3 py-2 align-top">{children}</td>
+          ),
+          hr: () => <hr className="my-6 border-slate-200" />,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </article>
   );
 }
 
