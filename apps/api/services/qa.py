@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from types import SimpleNamespace
+from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import ProgrammingError
@@ -37,7 +39,6 @@ from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from .search import extract_cjk_ngrams, normalize_query
-
 
 # ---- Limits ---------------------------------------------------------------
 # These constants cap what a single ask call can do. The point is to
@@ -153,6 +154,7 @@ class AskResult:
     evidence: list[Evidence]
     provider: str
     model: str | None
+    retrieval: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -163,6 +165,7 @@ class AskResult:
             "evidence": [ev.to_citation() for ev in self.evidence],
             "provider": self.provider,
             "model": self.model,
+            "retrieval": dict(self.retrieval),
         }
 
 
@@ -220,7 +223,7 @@ class QAService:
                 "尚未配置问答模型，请先完成模型设置",
             )
 
-        evidence = await self._collect_evidence(
+        evidence, retrieval = await self._collect_evidence(
             db,
             question=question,
             category_ids=request.category_ids,
@@ -241,6 +244,7 @@ class QAService:
                 evidence=[],
                 provider=self._provider.name if self._provider else "",
                 model=_model_name(self._provider),
+                retrieval=retrieval,
             )
 
         provider_payload = [ev.to_provider_dict() for ev in evidence]
@@ -259,9 +263,7 @@ class QAService:
         # rejects fabricated ids, but we double-check here so a future
         # provider that forgets the whitelist still cannot smuggle
         # bogus references to the user.
-        unknown_ids = [
-            cid for cid in answer.citation_ids if cid not in evidence_by_id
-        ]
+        unknown_ids = [cid for cid in answer.citation_ids if cid not in evidence_by_id]
         if unknown_ids:
             raise AskError(
                 "provider_failed",
@@ -279,6 +281,7 @@ class QAService:
                 evidence=[ev for ev in evidence],
                 provider=self._provider.name if self._provider else "",
                 model=_model_name(self._provider),
+                retrieval=retrieval,
             )
 
         citations: list[dict] = [
@@ -293,6 +296,7 @@ class QAService:
             evidence=evidence,
             provider=self._provider.name if self._provider else "",
             model=_model_name(self._provider),
+            retrieval=retrieval,
         )
 
     # ---- evidence retrieval ------------------------------------------------
@@ -307,7 +311,7 @@ class QAService:
         tag_ids: Sequence[int],
         tag_slugs: Sequence[str],
         source_types: Sequence[str],
-    ) -> list[Evidence]:
+    ) -> tuple[list[Evidence], dict]:
         filters = {
             "category_ids": list(category_ids),
             "category_slugs": list(category_slugs),
@@ -323,28 +327,57 @@ class QAService:
                 limit=CJK_RECALL_LIMIT,
             )
             if not rows:
-                rows = await self._recall_postgres(
+                rows = (
+                    await self._recall_postgres(
+                        db,
+                        question=question,
+                        filters=filters,
+                        limit=MAX_EVIDENCE_ITEMS,
+                    )
+                    if _detect_backend(db) == "postgresql"
+                    else []
+                )
+        else:
+            rows = (
+                await self._recall_postgres(
                     db,
                     question=question,
                     filters=filters,
                     limit=MAX_EVIDENCE_ITEMS,
-                ) if _detect_backend(db) == "postgresql" else []
-        else:
-            rows = await self._recall_postgres(
-                db,
-                question=question,
-                filters=filters,
-                limit=MAX_EVIDENCE_ITEMS,
-            ) if _detect_backend(db) == "postgresql" else await self._recall_like(
-                db,
-                question=question,
-                filters=filters,
-                limit=MAX_EVIDENCE_ITEMS,
+                )
+                if _detect_backend(db) == "postgresql"
+                else await self._recall_like(
+                    db,
+                    question=question,
+                    filters=filters,
+                    limit=MAX_EVIDENCE_ITEMS,
+                )
             )
+        from .hybrid_retrieval import recall_vector_chunks, rrf_scores
+
+        vector = await recall_vector_chunks(
+            db,
+            query=question,
+            filters=filters,
+            limit=CJK_RECALL_LIMIT,
+        )
+        if vector.status.vector_used:
+            lexical_ids = [row.chunk_id for row in rows]
+            vector_ids = [row.chunk_id for row in vector.rows]
+            scores = rrf_scores(lexical_ids, vector_ids)
+            row_by_chunk = {row.chunk_id: row for row in [*rows, *vector.rows]}
+            ordered_ids = sorted(
+                row_by_chunk,
+                key=lambda chunk_id: (-scores.get(chunk_id, 0.0), chunk_id),
+            )
+            rows = [
+                _row_with_rank(row_by_chunk[chunk_id], scores[chunk_id])
+                for chunk_id in ordered_ids
+            ]
         if not rows:
-            return []
+            return [], vector.status.to_dict()
         evidence = await self._rows_to_evidence(db, rows)
-        return evidence[:MAX_EVIDENCE_ITEMS]
+        return evidence[:MAX_EVIDENCE_ITEMS], vector.status.to_dict()
 
     async def _recall_postgres(
         self,
@@ -354,7 +387,6 @@ class QAService:
         filters: dict,
         limit: int,
     ) -> list:
-        backend = "postgresql"
         ts_query = func.websearch_to_tsquery("simple", question)
         ts_vector: ColumnElement[Any] = func.to_tsvector(
             "simple",
@@ -368,8 +400,7 @@ class QAService:
             or_(fts_match, exact_match) if _contains_cjk(question) else fts_match
         )
         rank = (
-            func.ts_rank_cd(ts_vector, ts_query)
-            + case((exact_match, 1.0), else_=0.0)
+            func.ts_rank_cd(ts_vector, ts_query) + case((exact_match, 1.0), else_=0.0)
         ).label("rank")
         stmt = (
             select(
@@ -387,7 +418,9 @@ class QAService:
                 Document.source_url.label("source_url"),
                 rank,
             )
-            .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
+            .join(
+                DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id
+            )
             .join(Document, Document.id == DocumentChunk.document_id)
             .where(
                 Document.is_deleted.is_(False),
@@ -443,7 +476,9 @@ class QAService:
                     func.length(func.coalesce(DocumentChunk.content, "")), 0
                 ).label("rank"),
             )
-            .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
+            .join(
+                DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id
+            )
             .join(Document, Document.id == DocumentChunk.document_id)
             .where(
                 Document.is_deleted.is_(False),
@@ -478,12 +513,8 @@ class QAService:
         """
 
         terms = normalize_query(question)
-        trigrams = extract_cjk_ngrams(
-            question, min_gram=3, max_gram=3, max_ngrams=12
-        )
-        bigrams = extract_cjk_ngrams(
-            question, min_gram=2, max_gram=2, max_ngrams=12
-        )
+        trigrams = extract_cjk_ngrams(question, min_gram=3, max_gram=3, max_ngrams=12)
+        bigrams = extract_cjk_ngrams(question, min_gram=2, max_gram=2, max_ngrams=12)
         patterns: list[tuple[str, int]] = []
         seen: set[str] = set()
         weighted_terms = (
@@ -552,7 +583,9 @@ class QAService:
                 Document.source_url.label("source_url"),
                 score_expr,
             )
-            .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
+            .join(
+                DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id
+            )
             .join(Document, Document.id == DocumentChunk.document_id)
             .where(
                 Document.is_deleted.is_(False),
@@ -623,6 +656,18 @@ class QAService:
 # ---- helpers --------------------------------------------------------------
 
 
+def _row_with_rank(row, rank: float):
+    """Copy a SQLAlchemy row while replacing its retrieval score."""
+
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        values = dict(mapping)
+    else:
+        values = dict(vars(row))
+    values["rank"] = rank
+    return SimpleNamespace(**values)
+
+
 def _build_snippet(content: str, *, terms: list[str] | None) -> str:
     if not content:
         return ""
@@ -658,11 +703,7 @@ def _detect_backend(db: AsyncSession) -> str:
 
 
 def _escape_like(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _like_pattern(value: str) -> str:
@@ -685,9 +726,9 @@ def _apply_filters(stmt, filters: dict):
         if category_ids:
             sub = sub.where(DocumentCategory.category_id.in_(category_ids))
         if category_slugs:
-            sub = sub.join(
-                Category, Category.id == DocumentCategory.category_id
-            ).where(Category.slug.in_(category_slugs))
+            sub = sub.join(Category, Category.id == DocumentCategory.category_id).where(
+                Category.slug.in_(category_slugs)
+            )
         conditions.append(Document.id.in_(sub))
     tag_ids = filters.get("tag_ids") or []
     tag_slugs = filters.get("tag_slugs") or []
@@ -722,7 +763,9 @@ async def _load_taxonomy(
 
     category_rows = (
         await db.execute(
-            select(DocumentCategory.document_id, Category.id, Category.slug, Category.name)
+            select(
+                DocumentCategory.document_id, Category.id, Category.slug, Category.name
+            )
             .join(Category, Category.id == DocumentCategory.category_id)
             .where(DocumentCategory.document_id.in_(document_ids))
             .order_by(DocumentCategory.id)

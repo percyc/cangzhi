@@ -55,6 +55,12 @@ type AskResponse = {
   evidence: AskCitation[];
   provider: string;
   model: string | null;
+  retrieval?: {
+    mode: string;
+    vector_used: boolean;
+    degraded_reason: string | null;
+    active_profile_id: number | null;
+  };
 };
 
 type AskStatus = {
@@ -430,6 +436,15 @@ function AskResult({ payload }: { payload: AskResponse }) {
           <p className="mt-3 text-xs text-slate-400">
             模型：{payload.provider}
             {payload.model ? ` · ${payload.model}` : ''}
+          </p>
+        )}
+        <p className="mt-2 text-xs text-slate-400">
+          资料召回：
+          {payload.retrieval?.vector_used ? '关键词 + 向量混合检索' : '关键词检索'}
+        </p>
+        {payload.retrieval?.degraded_reason && (
+          <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            {payload.retrieval.degraded_reason}
           </p>
         )}
       </article>

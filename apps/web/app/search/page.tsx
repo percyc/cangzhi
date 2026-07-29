@@ -61,6 +61,12 @@ type SearchResponse = {
   limit: number;
   offset: number;
   hits: SearchHit[];
+  retrieval?: {
+    mode: string;
+    vector_used: boolean;
+    degraded_reason: string | null;
+    active_profile_id: number | null;
+  };
 };
 
 type State =
@@ -410,8 +416,15 @@ function Results({ payload }: { payload: SearchResponse }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        命中 {payload.total} 条 · 排序按相关性（{payload.backend}） · 显示 {payload.hits.length} 条
+        命中 {payload.total} 条 ·{' '}
+        {payload.retrieval?.vector_used ? '关键词 + 向量混合排序' : '关键词排序'} ·
+        显示 {payload.hits.length} 条
       </p>
+      {payload.retrieval?.degraded_reason && (
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {payload.retrieval.degraded_reason}
+        </p>
+      )}
       <ol className="space-y-3">
         {payload.hits.map((hit) => (
           <li

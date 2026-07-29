@@ -20,8 +20,9 @@ out of scope here (see ``docs/ROADMAP.md`` M3 later items).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import ProgrammingError
@@ -36,7 +37,6 @@ from ..models.taxonomy import (
     DocumentTag,
     Tag,
 )
-
 
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
@@ -107,9 +107,10 @@ class SearchResult:
     limit: int
     offset: int
     filters: dict
+    retrieval: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "query": self.query,
             "backend": self.backend,
             "total": self.total,
@@ -118,6 +119,9 @@ class SearchResult:
             "filters": self.filters,
             "hits": [hit.to_dict() for hit in self.hits],
         }
+        if self.retrieval is not None:
+            payload["retrieval"] = self.retrieval
+        return payload
 
 
 def normalize_query(query: str) -> list[str]:
@@ -200,9 +204,7 @@ def extract_cjk_ngrams(
             _ngrams_from_run(run, min_gram=min_gram, max_gram=max_gram, seen=seen)
         )
         run = []
-    grams.extend(
-        _ngrams_from_run(run, min_gram=min_gram, max_gram=max_gram, seen=seen)
-    )
+    grams.extend(_ngrams_from_run(run, min_gram=min_gram, max_gram=max_gram, seen=seen))
     if len(grams) > max_ngrams:
         grams = grams[:max_ngrams]
     return grams
@@ -220,7 +222,7 @@ def _ngrams_from_run(
     for size in range(min_gram, max_gram + 1):
         if length < size:
             break
-        for start in range(0, length - size + 1):
+        for start in range(length - size + 1):
             gram = "".join(run[start : start + size])
             if gram in seen:
                 continue
@@ -230,6 +232,84 @@ def _ngrams_from_run(
 
 
 async def search_documents(
+    db: AsyncSession,
+    *,
+    query: str,
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+    category_ids: Sequence[int] | None = None,
+    category_slugs: Sequence[str] | None = None,
+    tag_ids: Sequence[int] | None = None,
+    tag_slugs: Sequence[str] | None = None,
+    source_types: Sequence[str] | None = None,
+) -> SearchResult:
+    """Run hybrid retrieval, transparently degrading to lexical search."""
+
+    requested_limit = max(1, min(limit, MAX_LIMIT))
+    requested_offset = max(0, offset)
+    candidate_limit = min(
+        MAX_LIMIT,
+        max(requested_limit + requested_offset, requested_limit * 4),
+    )
+    lexical = await _search_documents_lexical(
+        db,
+        query=query,
+        limit=candidate_limit,
+        offset=0,
+        category_ids=category_ids,
+        category_slugs=category_slugs,
+        tag_ids=tag_ids,
+        tag_slugs=tag_slugs,
+        source_types=source_types,
+    )
+    if not (query or "").strip():
+        return lexical
+
+    from .hybrid_retrieval import recall_vector_chunks, rrf_scores
+
+    vector = await recall_vector_chunks(
+        db,
+        query=query,
+        filters=lexical.filters,
+        limit=candidate_limit,
+    )
+    lexical.retrieval = vector.status.to_dict()
+    if not vector.status.vector_used:
+        lexical.limit = requested_limit
+        lexical.offset = requested_offset
+        lexical.hits = lexical.hits[
+            requested_offset : requested_offset + requested_limit
+        ]
+        return lexical
+
+    vector_hits = await _build_hits(db, vector.rows, normalize_query(query))
+    lexical_ids = [hit.chunk_id for hit in lexical.hits]
+    vector_ids = [hit.chunk_id for hit in vector_hits]
+    scores = rrf_scores(lexical_ids, vector_ids)
+    hit_by_chunk = {hit.chunk_id: hit for hit in [*lexical.hits, *vector_hits]}
+    ordered = sorted(
+        hit_by_chunk.values(),
+        key=lambda hit: (-scores.get(hit.chunk_id, 0.0), hit.chunk_id),
+    )
+    # Search results are documents, not chunks. Keep the best fused
+    # chunk for each document before applying pagination.
+    best_documents: list[SearchHit] = []
+    seen_documents: set[int] = set()
+    for hit in ordered:
+        if hit.document_id in seen_documents:
+            continue
+        seen_documents.add(hit.document_id)
+        hit.score = scores.get(hit.chunk_id, 0.0)
+        best_documents.append(hit)
+    lexical.backend = "hybrid"
+    lexical.total = max(lexical.total, len(best_documents))
+    lexical.limit = requested_limit
+    lexical.offset = requested_offset
+    lexical.hits = best_documents[requested_offset : requested_offset + requested_limit]
+    return lexical
+
+
+async def _search_documents_lexical(
     db: AsyncSession,
     *,
     query: str,
@@ -345,9 +425,7 @@ async def _search_postgres(
         func.coalesce(DocumentChunk.search_text, ""),
     )
     fts_match: ColumnElement[Any] = ts_vector.op("@@")(ts_query)
-    exact_match = DocumentChunk.search_text.ilike(
-        _like_pattern(query), escape="\\"
-    )
+    exact_match = DocumentChunk.search_text.ilike(_like_pattern(query), escape="\\")
     # PostgreSQL's built-in ``simple`` dictionary does not segment
     # continuous Chinese text. Keep FTS for Latin terms and ranking,
     # and add exact substring matching for CJK queries.
@@ -355,8 +433,7 @@ async def _search_postgres(
         or_(fts_match, exact_match) if _contains_cjk(query) else fts_match
     )
     rank = (
-        func.ts_rank_cd(ts_vector, ts_query)
-        + case((exact_match, 1.0), else_=0.0)
+        func.ts_rank_cd(ts_vector, ts_query) + case((exact_match, 1.0), else_=0.0)
     ).label("rank")
 
     base = (
@@ -436,11 +513,7 @@ async def _search_like(
     match_clause = or_(*like_clauses)
 
     score_expr = func.coalesce(
-        func.sum(
-            func.length(
-                func.coalesce(DocumentChunk.content, "")
-            )
-        ),
+        func.sum(func.length(func.coalesce(DocumentChunk.content, ""))),
         0,
     )
 
@@ -510,9 +583,9 @@ def _apply_filters(stmt, filters: dict):
         if category_ids:
             sub = sub.where(DocumentCategory.category_id.in_(category_ids))
         if category_slugs:
-            sub = sub.join(
-                Category, Category.id == DocumentCategory.category_id
-            ).where(Category.slug.in_(category_slugs))
+            sub = sub.join(Category, Category.id == DocumentCategory.category_id).where(
+                Category.slug.in_(category_slugs)
+            )
         conditions.append(Document.id.in_(sub))
     tag_ids = filters.get("tag_ids") or []
     tag_slugs = filters.get("tag_slugs") or []
@@ -618,7 +691,9 @@ async def _load_taxonomy(
         return {}, {}
     category_rows = (
         await db.execute(
-            select(DocumentCategory.document_id, Category.id, Category.slug, Category.name)
+            select(
+                DocumentCategory.document_id, Category.id, Category.slug, Category.name
+            )
             .join(Category, Category.id == DocumentCategory.category_id)
             .where(DocumentCategory.document_id.in_(document_ids))
             .order_by(DocumentCategory.id)
@@ -662,9 +737,7 @@ def _source_type_label(value) -> str:
     return str(value or "")
 
 
-def _render_snippet(
-    content: str, terms: list[str]
-) -> tuple[str, list[dict]]:
+def _render_snippet(content: str, terms: list[str]) -> tuple[str, list[dict]]:
     """Build a short snippet plus highlight offsets for the UI."""
 
     if not content:
