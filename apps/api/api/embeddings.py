@@ -1,23 +1,21 @@
-"""Embedding configuration compatibility test endpoints (ADR-015).
+"""Embedding endpoints: test, status, build, retry, activate, rollback.
 
-The router exposes two operations:
+The router bundles the M3-6b phase 1 endpoints (``/test`` and
+``/status``) together with the phase 2 lifecycle endpoints
+(``/profiles/{id}/build``, ``/profiles/{id}/retry``,
+``/profiles/{id}/activate`` and ``/profiles/{id}/rollback``).
+The two halves share the same prefix, the same admin gate and
+the same JSON hygiene (no keys, no vectors, no canary data) so
+the front-end only has to know one URL family.
 
-* ``POST /api/embeddings/test`` runs the canary probe against the
-  embedding channel saved in :class:`AIRuntimeConfig`, compares
-  the result to the active :class:`EmbeddingProfile` (if any) and
-  returns a JSON-safe verdict plus the per-canary cosine scores.
-  The endpoint never returns the API key, the ciphertext, or the
-  raw vectors.
-
-* ``GET /api/embeddings/status`` returns the active profile and
-  the most recent tested profile, also JSON-safe. It is the
-  read-only companion used by the front-end to render "what index
-  is currently active?" and "what is the operator's last tested
-  candidate?".
-
-The router is intentionally narrow. It does not own any state
-machine transitions, build, or activation — those live in the
-service layer and are out of scope for M3-6b phase 1.
+The lifecycle endpoints are deliberately thin: every state
+transition and database lock is implemented in
+:mod:`apps.api.embeddings.build_service`. The router's job is
+limited to translating HTTP into the service call and turning
+the service's ``BuildServiceError`` subclasses into the right
+HTTP status. The rule of thumb is: any business rule that
+would make sense to unit-test belongs in the service, not the
+router.
 """
 
 from __future__ import annotations
@@ -25,12 +23,28 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
 from ..embeddings import CANARY_VERSION
+from ..embeddings.build_service import (
+    ACTIVATABLE_STATUSES,
+    BUILDABLE_STATUSES,
+    BuildServiceError,
+    ConfigLocked,
+    ProfileNotActivatable,
+    ProfileNotBuildable,
+    ProfileNotFound,
+    ProfileNotReady,
+    RETRYABLE_STATUSES,
+    activate_profile,
+    get_profile_summaries,
+    rollback_profile,
+    retry_profile,
+    start_build,
+)
 from ..embeddings.service import test_candidate_embedding
 from ..models.auth import AIRuntimeConfig
 from ..models.embedding_profiles import EmbeddingProfile
@@ -89,16 +103,15 @@ async def embedding_status(
     db: AsyncSession = Depends(get_db),
     admin=Depends(require_admin),
 ) -> dict[str, Any]:
-    """Return the current embedding configuration and profile state.
+    """Return the embedding configuration and the full profile list.
 
-    The endpoint is read-only and never probes the upstream. It
-    answers three questions:
+    The endpoint answers three questions for the front-end:
 
-    * Is there an active profile, and if so, which one?
-    * What is the most recent tested profile (may equal the
-      active one)?
-    * What does the operator's saved ``ai_runtime_configs`` row
-      look like in terms of the embedding channel?
+    * What is the operator's current ``ai_runtime_configs`` row?
+    * Which profile is the active one (``active_embedding_profile_id``)?
+    * What does every profile in the system look like right now
+      (status, progress counters, and the set of POST endpoints
+      the operator can call next)?
     """
 
     config_row = (
@@ -142,9 +155,100 @@ async def embedding_status(
             "timeout_seconds": config_row.embedding_timeout_seconds,
         }
 
+    profiles = [summary.to_public_dict() for summary in await get_profile_summaries(db)]
     return {
         "canary_version": CANARY_VERSION,
         "config": config_summary,
         "active_profile": _active_profile_summary(active_profile),
         "last_tested": _active_profile_summary(last_tested),
+        "profiles": profiles,
+        "status_legend": {
+            "buildable": list(BUILDABLE_STATUSES),
+            "retryable": list(RETRYABLE_STATUSES),
+            "activatable": list(ACTIVATABLE_STATUSES),
+        },
     }
+
+
+# --- /profiles/{id}/... ---------------------------------------------------
+
+
+def _translate_build_error(exc: BuildServiceError) -> HTTPException:
+    """Turn a :class:`BuildServiceError` into a structured 4xx response."""
+
+    return HTTPException(
+        status_code=exc.http_status,
+        detail={"code": exc.code, "message": exc.message},
+    )
+
+
+@router.post(
+    "/profiles/{profile_id}/build",
+    response_model=dict[str, Any],
+)
+async def post_build_profile(
+    profile_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+) -> dict[str, Any]:
+    """Start a fresh build for ``profile_id``."""
+
+    try:
+        result = await start_build(db, profile_id)
+    except BuildServiceError as exc:
+        raise _translate_build_error(exc) from None
+    return result.to_public_dict()
+
+
+@router.post(
+    "/profiles/{profile_id}/retry",
+    response_model=dict[str, Any],
+)
+async def post_retry_profile(
+    profile_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+) -> dict[str, Any]:
+    """Reset failed embedding jobs and resume the build."""
+
+    try:
+        result = await retry_profile(db, profile_id)
+    except BuildServiceError as exc:
+        raise _translate_build_error(exc) from None
+    return result.to_public_dict()
+
+
+@router.post(
+    "/profiles/{profile_id}/activate",
+    response_model=dict[str, Any],
+)
+async def post_activate_profile(
+    profile_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+) -> dict[str, Any]:
+    """Swap ``profile_id`` to ``active`` and demote the previous one."""
+
+    try:
+        result = await activate_profile(db, profile_id)
+    except BuildServiceError as exc:
+        raise _translate_build_error(exc) from None
+    return result.to_public_dict()
+
+
+@router.post(
+    "/profiles/{profile_id}/rollback",
+    response_model=dict[str, Any],
+)
+async def post_rollback_profile(
+    profile_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+) -> dict[str, Any]:
+    """Restore ``profile_id`` as the active profile."""
+
+    try:
+        result = await rollback_profile(db, profile_id)
+    except BuildServiceError as exc:
+        raise _translate_build_error(exc) from None
+    return result.to_public_dict()

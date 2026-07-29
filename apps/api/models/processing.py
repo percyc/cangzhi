@@ -24,3 +24,28 @@ class ProcessingJob(BaseModel):
     config_version = Column(String(64), nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
+    # --- M3-6b phase 2: explicit embedding-profile association.
+    # Set on jobs whose ``stage`` is ``embedding`` so the worker
+    # can claim "next pending job for this profile" with a single
+    # indexed read. Nullable for every legacy stage that does not
+    # belong to a profile.
+    embedding_profile_id = Column(
+        Integer,
+        ForeignKey(
+            "embedding_profiles.id",
+            name="fk_processing_jobs_embedding_profile_embedding_profiles",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+        index=True,
+    )
+    embedding_chunk_id = Column(
+        Integer,
+        ForeignKey(
+            "document_chunks.id",
+            name="fk_processing_jobs_embedding_chunk_document_chunks",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+        index=True,
+    )

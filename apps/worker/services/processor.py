@@ -571,6 +571,17 @@ def _process_chunking(
     session.add(version)
 
     session.commit()
+
+    # Auto-enqueue embedding work for the freshly-materialised
+    # child chunks. The enqueue is a no-op when no profile is
+    # currently ``active`` or ``building``; otherwise every
+    # new child chunk becomes a pending embedding job per
+    # profile. The helper is imported lazily because the
+    # ``build_service`` module already pulls in the rest of
+    # the embedding pipeline.
+    _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+
+    session.commit()
     logger.info(
         "chunking_completed",
         document_id=document.id,
@@ -581,6 +592,76 @@ def _process_chunking(
         anomaly=structure_anomaly,
     )
     return True
+
+
+def _enqueue_embedding_jobs_for_new_chunks(
+    session: Session,
+    document: Document,
+    version: DocumentVersion,
+) -> None:
+    """For each new child chunk, enqueue work for active/building profiles.
+
+    The enqueue is a no-op when no profile is currently
+    ``active`` or ``building`` (e.g. before the operator has
+    ever run a build, or after a failed build the operator has
+    not retried). Otherwise every new child chunk becomes a
+    pending embedding job per profile.
+
+    The helper is intentionally local to the worker: the API
+    side has its own ``enqueue_embedding_jobs_for_chunk`` for
+    tests that do not need the rest of the worker pipeline.
+    """
+
+    try:
+        from apps.api.embeddings.build_service import EMBEDDING_STAGE
+    except ImportError:  # pragma: no cover - defensive
+        return
+    from apps.api.models.embedding_profiles import EmbeddingProfile
+
+    profiles = list(
+        session.scalars(
+            select(EmbeddingProfile).where(EmbeddingProfile.status.in_(("active", "building")))
+        ).all()
+    )
+    if not profiles:
+        return
+
+    child_chunks = list(
+        session.scalars(
+            select(DocumentChunk)
+            .where(
+                DocumentChunk.document_version_id == version.id,
+                DocumentChunk.role == "child",
+                DocumentChunk.is_current.is_(True),
+            )
+        ).all()
+    )
+    if not child_chunks:
+        return
+
+    for chunk in child_chunks:
+        for profile in profiles:
+            key = (
+                f"{profile.id}:{chunk.id}:{EMBEDDING_STAGE}:"
+                f"embedding:v1:{profile.config_fingerprint}"
+            )
+            existing = session.scalar(
+                select(ProcessingJob).where(ProcessingJob.idempotency_key == key)
+            )
+            if existing is not None:
+                continue
+            session.add(
+                ProcessingJob(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    stage=EMBEDDING_STAGE,
+                    status="created",
+                    idempotency_key=key,
+                    config_version=profile.config_fingerprint,
+                    embedding_profile_id=profile.id,
+                    embedding_chunk_id=chunk.id,
+                )
+            )
 
 
 def _replace_version_chunks(
@@ -963,6 +1044,26 @@ def process_single_job(session: Session, job_id: int) -> bool:
     if stage == CHUNKING_STAGE:
         return _process_chunking(session, job, document, version)
 
+    if stage == "embedding":
+        # Lazy import: ``embedding_processor`` imports
+        # ``calculate_next_retry_at`` from this module, so a
+        # top-level import would create a cycle.
+        from apps.worker.services.embedding_processor import (
+            process_embedding_job,
+            reconcile_profile_progress,
+        )
+
+        outcome = process_embedding_job(session, job)
+        if outcome.status == "completed":
+            reconcile_profile_progress(session, outcome.profile_id)
+            session.commit()
+            return True
+        if outcome.status == "skipped":
+            session.commit()
+            return True
+        session.commit()
+        return False
+
     return _process_parsing(session, job, document, version)
 
 
@@ -1182,6 +1283,31 @@ def process_pending_jobs(session: Session) -> int:
             logger.exception("unexpected_job_error", job_id=job_id)
             session.rollback()
             job = session.get(ProcessingJob, job_id)
+            if job is not None and job.stage == "embedding":
+                job.retry_count += 1
+                job.finished_at = utc_now()
+                job.last_error = "向量任务发生异常"
+                job.error_details = {"exception": str(exc)}
+                if job.retry_count >= (job.max_retries or MAX_RETRIES):
+                    job.status = "failed"
+                    job.next_retry_at = None
+                else:
+                    job.status = "retry"
+                    job.next_retry_at = calculate_next_retry_at(
+                        job.retry_count - 1
+                    )
+                session.add(job)
+                session.commit()
+                from apps.worker.services.embedding_processor import (
+                    reconcile_profile_progress,
+                )
+
+                if job.embedding_profile_id is not None:
+                    reconcile_profile_progress(
+                        session, job.embedding_profile_id
+                    )
+                    session.commit()
+                continue
             version = (
                 session.get(DocumentVersion, job.document_version_id)
                 if job is not None

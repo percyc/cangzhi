@@ -131,6 +131,18 @@ class EmbeddingProfile(BaseModel):
     last_tested_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
 
+    # --- M3-6b phase 2: build progress (ADR-015 §"构建/激活/回滚")
+    # The counters are NULL for profiles that never entered the
+    # build pipeline (tested / failed). The constraints in
+    # migration 0009 enforce ``all three NULL or all three NOT
+    # NULL`` so a buggy client cannot poison the progress view.
+    total_chunks = Column(Integer, nullable=True)
+    completed_chunks = Column(Integer, nullable=True)
+    failed_chunks = Column(Integer, nullable=True)
+    build_started_at = Column(DateTime(timezone=True), nullable=True)
+    build_finished_at = Column(DateTime(timezone=True), nullable=True)
+    activated_at = Column(DateTime(timezone=True), nullable=True)
+
     __table_args__ = (
         CheckConstraint(
             "dim > 0",
@@ -144,8 +156,26 @@ class EmbeddingProfile(BaseModel):
             "provider in ('openai', 'ollama')",
             name="ck_embedding_profiles_provider",
         ),
+        CheckConstraint(
+            "total_chunks IS NULL OR total_chunks >= 0",
+            name="ck_embedding_profiles_counters_nonneg",
+        ),
+        CheckConstraint(
+            "build_started_at IS NULL OR build_finished_at IS NULL "
+            "OR build_finished_at >= build_started_at",
+            name="ck_embedding_profiles_build_order",
+        ),
         Index("ix_embedding_profiles_status", "status"),
+        Index("ix_embedding_profiles_build_started", "build_started_at"),
     )
+
+    # The set of statuses that count as "ready to activate". The
+    # activate / rollback endpoints only accept profiles in this
+    # set so a half-built profile can never become the production
+    # index. The values are mirrored in
+    # :data:`apps.api.embeddings.build_service.BUILDABLE_STATUSES`
+    # / :data:`ACTIVATABLE_STATUSES` for runtime assertions.
+    READY_STATUSES = ("ready", "active", "retired")
 
     def to_public_dict(self) -> dict:
         """Return a JSON-safe view that never leaks configuration secrets.
@@ -190,6 +220,18 @@ class EmbeddingProfile(BaseModel):
                 self.last_tested_at.isoformat() if self.last_tested_at else None
             ),
             "last_error": self.last_error,
+            "total_chunks": self.total_chunks,
+            "completed_chunks": self.completed_chunks,
+            "failed_chunks": self.failed_chunks,
+            "build_started_at": (
+                self.build_started_at.isoformat() if self.build_started_at else None
+            ),
+            "build_finished_at": (
+                self.build_finished_at.isoformat() if self.build_finished_at else None
+            ),
+            "activated_at": (
+                self.activated_at.isoformat() if self.activated_at else None
+            ),
         }
 
 

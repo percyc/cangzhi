@@ -77,6 +77,29 @@ export type EmbeddingStatus = {
     dim: number | null;
     provider: string | null;
   };
+  profiles: EmbeddingProfileStatus[];
+};
+
+export type EmbeddingProfileStatus = {
+  id: number;
+  status: 'draft' | 'tested' | 'building' | 'ready' | 'active' | 'retired' | 'failed';
+  provider: string;
+  model: string;
+  dim: number;
+  total_chunks: number | null;
+  completed_chunks: number | null;
+  failed_chunks: number | null;
+  is_active: boolean;
+  available_actions: Array<'build' | 'retry' | 'activate' | 'rollback'>;
+};
+
+export type EmbeddingLifecycleResult = {
+  profile_id?: number;
+  active_profile_id?: number;
+  previous_profile_id?: number | null;
+  status?: string;
+  enqueued?: number;
+  total_chunks?: number;
 };
 
 export type AIModelsResponse = {
@@ -212,6 +235,20 @@ export async function fetchEmbeddingStatus(): Promise<EmbeddingStatus> {
     throw new Error(await extractErrorMessage(response, '读取向量索引状态失败'));
   }
   return parseJson<EmbeddingStatus>(response);
+}
+
+export async function runEmbeddingProfileAction(
+  profileId: number,
+  action: 'build' | 'retry' | 'activate' | 'rollback',
+): Promise<EmbeddingLifecycleResult> {
+  const response = await fetch(`/api/embeddings/profiles/${profileId}/${action}`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '向量索引操作失败'));
+  }
+  return parseJson<EmbeddingLifecycleResult>(response);
 }
 
 export async function askStatus(): Promise<{

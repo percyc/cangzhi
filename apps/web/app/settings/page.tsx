@@ -8,6 +8,7 @@ import {
   fetchAIModels,
   fetchEmbeddingModels,
   fetchEmbeddingStatus,
+  runEmbeddingProfileAction,
   testAIConfig,
   testEmbeddingCompatibility,
   updateAIConfig,
@@ -54,6 +55,9 @@ export default function SettingsPage() {
     useState<EmbeddingCompatibilityResult | null>(null);
   const [embeddingStatus, setEmbeddingStatus] =
     useState<EmbeddingStatus | null>(null);
+  const [embeddingActionId, setEmbeddingActionId] = useState<number | null>(null);
+  const [embeddingActionMessage, setEmbeddingActionMessage] =
+    useState<string | null>(null);
   const [embeddingTesting, setEmbeddingTesting] = useState(false);
   const [embeddingModels, setEmbeddingModels] =
     useState<AIModelsResponse['models']>([]);
@@ -96,6 +100,18 @@ export default function SettingsPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!embeddingStatus?.profiles.some((profile) => profile.status === 'building')) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      fetchEmbeddingStatus()
+        .then(setEmbeddingStatus)
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [embeddingStatus]);
 
   const invalidateModels = () => {
     setModels([]);
@@ -274,6 +290,31 @@ export default function SettingsPage() {
     }
   };
 
+  const handleEmbeddingAction = async (
+    profileId: number,
+    action: 'build' | 'retry' | 'activate' | 'rollback',
+  ) => {
+    setEmbeddingActionId(profileId);
+    setEmbeddingActionMessage(null);
+    try {
+      const result = await runEmbeddingProfileAction(profileId, action);
+      const labels = {
+        build: `已开始构建，共 ${result.total_chunks ?? 0} 个切片`,
+        retry: `已重新提交 ${result.enqueued ?? 0} 个失败任务`,
+        activate: '新向量索引已启用',
+        rollback: '已切回历史向量索引',
+      };
+      setEmbeddingActionMessage(labels[action]);
+      setEmbeddingStatus(await fetchEmbeddingStatus());
+    } catch (err) {
+      setEmbeddingActionMessage(
+        err instanceof Error ? err.message : '向量索引操作失败',
+      );
+    } finally {
+      setEmbeddingActionId(null);
+    }
+  };
+
   if (loadError) {
     return (
       <main className="mx-auto max-w-3xl px-6 py-12">
@@ -437,6 +478,74 @@ export default function SettingsPage() {
           </section>
         )}
 
+        {provider !== 'disabled' && (
+          <section className="space-y-4 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
+            <div>
+              <h2 className="text-base font-semibold text-slate-800">
+                对话模型操作
+              </h2>
+              <p className="mt-1 text-xs text-slate-500">
+                以下操作只针对上面的对话模型，不会影响向量模型。
+              </p>
+            </div>
+            <Field
+              id="timeout"
+              label="对话模型请求超时（秒）"
+              value={String(timeoutSeconds)}
+              onChange={(value) => setTimeoutSeconds(Number(value) || 30)}
+              type="number"
+            />
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleFetchModels}
+                disabled={modelsFetchState === 'fetching' || connectionChanged}
+                className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {modelsFetchState === 'fetching'
+                  ? '正在获取对话模型…'
+                  : models.length
+                    ? '刷新对话模型列表'
+                    : '获取对话模型列表'}
+              </button>
+              <button
+                type="button"
+                onClick={handleTest}
+                disabled={testing || connectionChanged || modelChanged}
+                className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {testing ? '正在测试…' : '测试对话模型连接'}
+              </button>
+            </div>
+            {connectionChanged && (
+              <p className="text-sm text-amber-700">
+                请先保存对话模型的地址、密钥或来源改动
+              </p>
+            )}
+            {modelsFetchError && (
+              <p className="text-sm text-red-700">
+                获取对话模型失败：{modelsFetchError}
+              </p>
+            )}
+            {modelsFetchState === 'success' && (
+              <p className="text-sm text-emerald-700">
+                已获取 {models.length} 个对话模型，可在上方模型名称中选择
+              </p>
+            )}
+            {testResult && (
+              <p
+                className={`text-sm ${
+                  testResult.ok ? 'text-emerald-700' : 'text-red-700'
+                }`}
+              >
+                {testResult.ok
+                  ? '对话模型连接正常'
+                  : `对话模型连接失败：${testResult.message}`}
+              </p>
+            )}
+          </section>
+        )}
+
         <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
           <h2 className="text-base font-semibold text-slate-800">
             Embedding 渠道
@@ -450,6 +559,66 @@ export default function SettingsPage() {
               ? `当前服务索引：${embeddingStatus.active_profile.model} · ${embeddingStatus.active_profile.dim} 维`
               : '当前尚未启用向量索引，检索继续使用关键词。'}
           </div>
+          {embeddingStatus?.profiles?.length ? (
+            <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+              <h3 className="text-sm font-medium text-slate-800">向量索引版本</h3>
+              {embeddingStatus.profiles.map((profile) => {
+                const total = profile.total_chunks ?? 0;
+                const completed = profile.completed_chunks ?? 0;
+                const failed = profile.failed_chunks ?? 0;
+                const progress = total ? Math.round((completed / total) * 100) : 0;
+                const statusLabels: Record<string, string> = {
+                  tested: '已测试，等待构建',
+                  building: '正在构建',
+                  ready: '构建完成，等待启用',
+                  active: '当前使用',
+                  retired: '历史版本',
+                  failed: '构建失败',
+                  draft: '草稿',
+                };
+                return (
+                  <div key={profile.id} className="rounded border border-slate-200 bg-white p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium text-slate-800">
+                          {profile.model} · {profile.dim} 维
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {statusLabels[profile.status] ?? profile.status}
+                          {total > 0 && ` · ${completed}/${total}（${progress}%）`}
+                          {failed > 0 && ` · ${failed} 个失败`}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {profile.available_actions.map((action) => {
+                          const labels = {
+                            build: '构建索引',
+                            retry: '重试失败任务',
+                            activate: '启用此版本',
+                            rollback: '回滚到此版本',
+                          };
+                          return (
+                            <button
+                              key={action}
+                              type="button"
+                              disabled={embeddingActionId !== null}
+                              onClick={() => handleEmbeddingAction(profile.id, action)}
+                              className="rounded border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              {embeddingActionId === profile.id ? '处理中…' : labels[action]}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {embeddingActionMessage && (
+                <p className="text-sm text-slate-700">{embeddingActionMessage}</p>
+              )}
+            </div>
+          ) : null}
           <div className="grid gap-3 sm:grid-cols-3">
             {(['disabled', 'openai', 'ollama'] as const).map((value) => {
               const labels: Record<
@@ -642,53 +811,6 @@ export default function SettingsPage() {
           )}
         </section>
 
-        <section>
-          <Field
-            id="timeout"
-            label="请求超时（秒）"
-            value={String(timeoutSeconds)}
-            onChange={(value) => setTimeoutSeconds(Number(value) || 30)}
-            type="number"
-          />
-        </section>
-
-        {provider !== 'disabled' && (
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleFetchModels}
-              disabled={modelsFetchState === 'fetching' || connectionChanged}
-              className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-            >
-              {modelsFetchState === 'fetching'
-                ? '正在获取模型列表…'
-                : models.length
-                  ? '刷新模型列表'
-                  : '获取模型列表'}
-            </button>
-            {connectionChanged && (
-              <p className="text-sm text-amber-700">
-                请先保存地址、密钥或模型来源的改动
-              </p>
-            )}
-            {modelsFetchError && (
-              <p className="text-sm text-red-700">
-                获取失败：{modelsFetchError}
-              </p>
-            )}
-            {modelsFetchState === 'success' && models.length > 0 && (
-              <p className="text-sm text-emerald-700">
-                已获取 {models.length} 个模型，可在模型名称输入框中选择
-              </p>
-            )}
-            {modelsFetchState === 'success' && models.length === 0 && (
-              <p className="text-sm text-slate-600">
-                服务返回空列表，请手动输入模型名称
-              </p>
-            )}
-          </div>
-        )}
-
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="submit"
@@ -697,19 +819,6 @@ export default function SettingsPage() {
           >
             {saveState === 'saving' ? '正在保存…' : '保存设置'}
           </button>
-          <button
-            type="button"
-            onClick={handleTest}
-            disabled={
-              testing ||
-              provider === 'disabled' ||
-              connectionChanged ||
-              modelChanged
-            }
-            className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-          >
-            {testing ? '正在测试…' : '测试连接'}
-          </button>
           {saveMessage && (
             <p
               className={`text-sm ${
@@ -717,15 +826,6 @@ export default function SettingsPage() {
               }`}
             >
               {saveMessage}
-            </p>
-          )}
-          {testResult && (
-            <p
-              className={`text-sm ${
-                testResult.ok ? 'text-emerald-700' : 'text-red-700'
-              }`}
-            >
-              {testResult.ok ? '连接正常' : `连接失败：${testResult.message}`}
             </p>
           )}
         </div>

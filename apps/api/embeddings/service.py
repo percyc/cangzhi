@@ -496,9 +496,8 @@ async def _upsert_tested_profile(
     ``config_fingerprint``: re-testing the exact same
     configuration overwrites the previous row's
     ``last_tested_at`` and ``canary_vectors`` rather than creating
-    duplicates. The status always lands on ``tested``; the
-    activation flag lives on
-    :class:`AIRuntimeConfig.active_embedding_profile_id`.
+    duplicates. Re-testing refreshes canary data but never demotes
+    a profile that is already building, ready, active or retired.
     """
 
     existing = (
@@ -533,7 +532,8 @@ async def _upsert_tested_profile(
         existing.has_api_key = descriptor.has_api_key
         existing.key_fingerprint = descriptor.key_fingerprint
         existing.canary_vectors = list(canary_vectors)
-        existing.status = "tested"
+        if existing.status in {"draft", "tested", "failed"}:
+            existing.status = "tested"
         existing.last_tested_at = now
         existing.last_error = None
         profile = existing
