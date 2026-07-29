@@ -50,6 +50,35 @@ export type AITestResult = {
   message: string;
 };
 
+export type EmbeddingCompatibilityResult = {
+  ok: boolean;
+  decision: 'same' | 'compatible' | 'rebuild_required' | 'unknown';
+  reason: string;
+  profile: {
+    id: number | null;
+    status: string | null;
+  };
+  scores: number[];
+};
+
+export type EmbeddingStatus = {
+  canary_version: string;
+  active_profile: {
+    id: number | null;
+    status: string | null;
+    model: string | null;
+    dim: number | null;
+    provider: string | null;
+  };
+  last_tested: {
+    id: number | null;
+    status: string | null;
+    model: string | null;
+    dim: number | null;
+    provider: string | null;
+  };
+};
+
 export type AIModelsResponse = {
   models: Array<{ id: string; label?: string }>;
   provider: string;
@@ -161,6 +190,28 @@ export async function testEmbeddingConfig(): Promise<AITestResult> {
     throw new Error(await extractErrorMessage(response, '测试 Embedding 连接失败'));
   }
   return parseJson<AITestResult>(response);
+}
+
+export async function testEmbeddingCompatibility(): Promise<EmbeddingCompatibilityResult> {
+  const response = await fetch('/api/embeddings/test', {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '测试向量兼容性失败'));
+  }
+  return parseJson<EmbeddingCompatibilityResult>(response);
+}
+
+export async function fetchEmbeddingStatus(): Promise<EmbeddingStatus> {
+  const response = await fetch('/api/embeddings/status', {
+    cache: 'no-store',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '读取向量索引状态失败'));
+  }
+  return parseJson<EmbeddingStatus>(response);
 }
 
 export async function askStatus(): Promise<{

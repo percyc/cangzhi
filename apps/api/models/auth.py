@@ -89,6 +89,22 @@ class AIRuntimeConfig(BaseModel):
     embedding_timeout_seconds = Column(
         Integer, nullable=False, server_default=text("30")
     )
+    # --- Active embedding profile pointer (ADR-015 phase 2) ---------------
+    # The profile is owned by ``embedding_profiles``; this column
+    # only points at the row that currently serves retrieval. The
+    # column is nullable: an empty deployment has no active profile.
+    # The migration that introduced this column also installs the
+    # matching foreign key with ``ON DELETE SET NULL`` so a
+    # accidentally-deleted profile row cannot crash reads.
+    active_embedding_profile_id = Column(
+        Integer,
+        ForeignKey(
+            "embedding_profiles.id",
+            name="fk_ai_runtime_configs_active_profile_embedding_profiles",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     updated_by = Column(
         Integer,
         ForeignKey(
@@ -136,6 +152,7 @@ class AIRuntimeConfig(BaseModel):
             "embedding_base_url": self.embedding_base_url,
             "has_embedding_api_key": bool(self.has_embedding_api_key),
             "embedding_timeout_seconds": self.embedding_timeout_seconds,
+            "active_embedding_profile_id": self.active_embedding_profile_id,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 

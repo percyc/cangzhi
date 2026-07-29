@@ -18,7 +18,7 @@ import logging
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import ask, auth, categories, documents, files, health, notes, search, settings_ai, sources
+from .api import ask, auth, categories, documents, embeddings, files, health, notes, search, settings_ai, sources
 from .api.auth import require_admin
 from .core.config import settings
 
@@ -74,6 +74,7 @@ app.include_router(categories.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(categories.tags_router, prefix="/api", dependencies=_admin_dep)
 app.include_router(search.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(ask.router, prefix="/api", dependencies=_admin_dep)
+app.include_router(embeddings.router, prefix="/api", dependencies=_admin_dep)
 
 
 @app.get("/")

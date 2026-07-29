@@ -7,12 +7,15 @@ import {
   fetchAIConfig,
   fetchAIModels,
   fetchEmbeddingModels,
+  fetchEmbeddingStatus,
   testAIConfig,
-  testEmbeddingConfig,
+  testEmbeddingCompatibility,
   updateAIConfig,
   type AIConfig,
   type AIModelsResponse,
   type AITestResult,
+  type EmbeddingCompatibilityResult,
+  type EmbeddingStatus,
 } from '@/lib/api';
 
 type Provider = AIConfig['provider'];
@@ -48,7 +51,9 @@ export default function SettingsPage() {
   const [clearEmbeddingApiKey, setClearEmbeddingApiKey] = useState(false);
   const [embeddingTimeoutSeconds, setEmbeddingTimeoutSeconds] = useState(30);
   const [embeddingTestResult, setEmbeddingTestResult] =
-    useState<AITestResult | null>(null);
+    useState<EmbeddingCompatibilityResult | null>(null);
+  const [embeddingStatus, setEmbeddingStatus] =
+    useState<EmbeddingStatus | null>(null);
   const [embeddingTesting, setEmbeddingTesting] = useState(false);
   const [embeddingModels, setEmbeddingModels] =
     useState<AIModelsResponse['models']>([]);
@@ -79,6 +84,13 @@ export default function SettingsPage() {
       .catch((err) => {
         if (cancelled) return;
         setLoadError(err instanceof Error ? err.message : '读取设置失败');
+      });
+    fetchEmbeddingStatus()
+      .then((data) => {
+        if (!cancelled) setEmbeddingStatus(data);
+      })
+      .catch(() => {
+        // 兼容状态不应阻断基础设置页；测试时仍会显示具体错误。
       });
     return () => {
       cancelled = true;
@@ -222,13 +234,17 @@ export default function SettingsPage() {
     setEmbeddingTesting(true);
     setEmbeddingTestResult(null);
     try {
-      const result = await testEmbeddingConfig();
+      const result = await testEmbeddingCompatibility();
       setEmbeddingTestResult(result);
+      setEmbeddingStatus(await fetchEmbeddingStatus());
     } catch (err) {
       setEmbeddingTestResult({
         ok: false,
-        message: err instanceof Error ? err.message : '测试 Embedding 连接失败',
-      });
+        decision: 'rebuild_required',
+        reason: err instanceof Error ? err.message : '测试向量兼容性失败',
+        profile: { id: null, status: null },
+        scores: [],
+      } as EmbeddingCompatibilityResult);
     } finally {
       setEmbeddingTesting(false);
     }
@@ -429,6 +445,11 @@ export default function SettingsPage() {
             可选：Embedding 渠道与上面的对话渠道相互独立，可以独立设置
             模型来源、地址、密钥和超时。关闭后仍按关键词/全文匹配工作。
           </p>
+          <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            {embeddingStatus?.active_profile.id
+              ? `当前服务索引：${embeddingStatus.active_profile.model} · ${embeddingStatus.active_profile.dim} 维`
+              : '当前尚未启用向量索引，检索继续使用关键词。'}
+          </div>
           <div className="grid gap-3 sm:grid-cols-3">
             {(['disabled', 'openai', 'ollama'] as const).map((value) => {
               const labels: Record<
@@ -585,7 +606,7 @@ export default function SettingsPage() {
                   }
                   className="rounded border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
         >
-          {embeddingTesting ? '正在测试…' : '测试 Embedding 连接'}
+          {embeddingTesting ? '正在测试…' : '测试连接与兼容性'}
         </button>
                 {(embeddingConnectionChanged ||
                   embeddingModelChanged ||
@@ -603,8 +624,14 @@ export default function SettingsPage() {
                     }`}
                   >
                     {embeddingTestResult.ok
-                      ? 'Embedding 连接正常'
-                      : `Embedding 连接失败：${embeddingTestResult.message}`}
+                      ? embeddingTestResult.decision === 'same'
+                        ? `无需重建：${embeddingTestResult.reason}`
+                        : embeddingTestResult.decision === 'compatible'
+                          ? `高度兼容：${embeddingTestResult.reason}`
+                          : embeddingTestResult.decision === 'unknown'
+                            ? `首次使用：连接正常，后续需要创建首个向量索引`
+                            : `需要重建：${embeddingTestResult.reason}`
+                      : `测试失败：${embeddingTestResult.reason}`}
                   </p>
                 )}
       </div>

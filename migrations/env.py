@@ -25,6 +25,7 @@ from apps.api.models.auth import Admin, AIRuntimeConfig, AuthSession
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentVersion
+from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.taxonomy import (
     Category,
