@@ -12,6 +12,7 @@ from .taxonomy import (
     Tag,
     DEFAULT_CATEGORY_SLUGS,
 )
+from .webdav import WebDAVEntry, WebDAVSource
 
 __all__ = [
     "Admin",
@@ -31,4 +32,6 @@ __all__ = [
     "EmbeddingProfile",
     "ProcessingJob",
     "Tag",
+    "WebDAVEntry",
+    "WebDAVSource",
 ]

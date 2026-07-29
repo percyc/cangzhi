@@ -18,10 +18,22 @@ import logging
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import ask, auth, categories, documents, embeddings, files, health, notes, search, settings_ai, sources
+from .api import (
+    ask,
+    auth,
+    categories,
+    documents,
+    embeddings,
+    files,
+    health,
+    notes,
+    search,
+    settings_ai,
+    sources,
+    webdav,
+)
 from .api.auth import require_admin
 from .core.config import settings
-
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +77,9 @@ app.include_router(auth.router, prefix="/api", tags=["auth"])
 # ``require_admin`` symbol via ``app.dependency_overrides`` to
 # inject a stub admin without going through the cookie flow.
 _admin_dep = [Depends(require_admin)]
-app.include_router(settings_ai.router, prefix="/api", dependencies=_admin_dep, tags=["settings"])
+app.include_router(
+    settings_ai.router, prefix="/api", dependencies=_admin_dep, tags=["settings"]
+)
 app.include_router(notes.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(files.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(documents.router, prefix="/api", dependencies=_admin_dep)
@@ -75,6 +89,7 @@ app.include_router(categories.tags_router, prefix="/api", dependencies=_admin_de
 app.include_router(search.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(ask.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(embeddings.router, prefix="/api", dependencies=_admin_dep)
+app.include_router(webdav.router, prefix="/api", dependencies=_admin_dep)
 
 
 @app.get("/")
