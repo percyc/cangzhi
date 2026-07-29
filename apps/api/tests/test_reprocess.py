@@ -4,7 +4,10 @@ from sqlalchemy import select
 
 from apps.api.core.db import get_db
 from apps.api.main import app
+from apps.api.models.auth import AIRuntimeConfig
+from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentVersion
+from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
 
 
@@ -110,3 +113,88 @@ def test_latest_job_returns_initial_job(client):
     response = test_client.get(f"/api/documents/{created['id']}/latest-job")
     assert response.status_code == 200
     assert response.json()["status"] == "created"
+
+
+def test_processing_status_reports_completed_vector_pipeline(client):
+    test_client, _ = client
+    created = test_client.post(
+        "/api/notes",
+        json={"title": "向量状态", "content": "用于检查向量处理状态。"},
+    ).json()
+    document_id = created["id"]
+    version_id = created["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def complete_pipeline():
+        dependency = db_dependency()
+        session = await anext(dependency)
+        try:
+            for stage in ("parsing", "chunking", "understanding"):
+                session.add(
+                    ProcessingJob(
+                        document_id=document_id,
+                        document_version_id=version_id,
+                        stage=stage,
+                        status="completed",
+                        idempotency_key=f"status:{version_id}:{stage}",
+                        config_version="test",
+                    )
+                )
+            chunk = DocumentChunk(
+                document_id=document_id,
+                document_version_id=version_id,
+                external_id="child-1",
+                role="child",
+                chunk_type="paragraph",
+                order_index=0,
+                content="用于检查向量处理状态。",
+                search_text="向量状态 用于检查向量处理状态。",
+                content_hash="c" * 64,
+                char_count=12,
+                token_estimate=6,
+                is_current=True,
+            )
+            session.add(chunk)
+            await session.flush()
+            profile = EmbeddingProfile(
+                provider="ollama",
+                base_url="http://ollama:11434",
+                model="bge-m3",
+                dim=3,
+                config_fingerprint="f" * 64,
+                status="active",
+            )
+            session.add(profile)
+            await session.flush()
+            session.add(
+                AIRuntimeConfig(
+                    singleton_key="singleton",
+                    provider="disabled",
+                    embedding_provider="ollama",
+                    embedding_base_url="http://ollama:11434",
+                    embedding_model="bge-m3",
+                    active_embedding_profile_id=profile.id,
+                )
+            )
+            session.add(
+                ChunkEmbedding(
+                    profile_id=profile.id,
+                    chunk_id=chunk.id,
+                    content_hash=chunk.content_hash,
+                    vector=[1.0, 0.0, 0.0],
+                )
+            )
+            await session.commit()
+        finally:
+            await dependency.aclose()
+
+    asyncio.run(complete_pipeline())
+    response = test_client.get(f"/api/documents/{document_id}/processing-status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["overall_status"] == "completed"
+    assert body["keyword_searchable"] is True
+    assert body["vector_searchable"] is True
+    assert body["stages"]["chunking"]["child_chunks"] == 1
+    assert body["stages"]["embedding"]["completed"] == 1
+    assert body["stages"]["embedding"]["total"] == 1

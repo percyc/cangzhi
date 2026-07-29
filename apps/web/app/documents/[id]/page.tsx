@@ -53,6 +53,30 @@ type ProcessingJob = {
   last_error: string | null;
 };
 
+type PipelineStage = {
+  status: string;
+  message: string;
+  last_error?: string | null;
+};
+
+type ProcessingPipeline = {
+  overall_status: 'processing' | 'completed' | 'failed';
+  keyword_searchable: boolean;
+  vector_searchable: boolean;
+  stages: {
+    parsing: PipelineStage;
+    understanding: PipelineStage;
+    chunking: PipelineStage & { child_chunks: number };
+    embedding: PipelineStage & {
+      profile_id: number | null;
+      model: string | null;
+      completed: number;
+      total: number;
+      failed: number;
+    };
+  };
+};
+
 type CategoryOption = {
   id: number;
   slug: string;
@@ -101,6 +125,7 @@ export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
   const [document, setDocument] = useState<Document | null>(null);
   const [latestJob, setLatestJob] = useState<ProcessingJob | null>(null);
+  const [pipeline, setPipeline] = useState<ProcessingPipeline | null>(null);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | ''>('');
   const [loading, setLoading] = useState(true);
@@ -111,19 +136,25 @@ export default function DocumentDetailPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [documentResponse, jobResponse, categoriesResponse] = await Promise.all([
-        fetch(`/api/documents/${params.id}`, { cache: 'no-store' }),
-        fetch(`/api/documents/${params.id}/latest-job`, { cache: 'no-store' }),
-        fetch(`/api/categories`, { cache: 'no-store' }),
-      ]);
+      const [documentResponse, jobResponse, pipelineResponse, categoriesResponse] =
+        await Promise.all([
+          fetch(`/api/documents/${params.id}`, { cache: 'no-store' }),
+          fetch(`/api/documents/${params.id}/latest-job`, { cache: 'no-store' }),
+          fetch(`/api/documents/${params.id}/processing-status`, {
+            cache: 'no-store',
+          }),
+          fetch(`/api/categories`, { cache: 'no-store' }),
+        ]);
       if (!documentResponse.ok) {
         throw new Error(documentResponse.status === 404 ? '资料不存在' : '读取失败');
       }
       if (!jobResponse.ok) throw new Error('读取处理状态失败');
+      if (!pipelineResponse.ok) throw new Error('读取处理进度失败');
       if (!categoriesResponse.ok) throw new Error('读取分类失败');
       const documentBody = (await documentResponse.json()) as Document;
       setDocument(documentBody);
       setLatestJob(await jobResponse.json());
+      setPipeline((await pipelineResponse.json()) as ProcessingPipeline);
       const categoryBody = (await categoriesResponse.json()) as CategoryOption[];
       setCategories(categoryBody);
       setSelectedCategoryId(documentBody.primary_category?.id ?? '');
@@ -141,11 +172,10 @@ export default function DocumentDetailPage() {
   }, [loadData]);
 
   useEffect(() => {
-    const status = document?.current_version?.processing_status;
-    if (!status || !['created', 'processing', 'retry'].includes(status)) return;
+    if (pipeline?.overall_status !== 'processing') return;
     const timer = window.setInterval(() => void loadData(), 3000);
     return () => window.clearInterval(timer);
-  }, [document?.current_version?.processing_status, loadData]);
+  }, [pipeline?.overall_status, loadData]);
 
   const handleRetry = async () => {
     setRetrying(true);
@@ -215,8 +245,26 @@ export default function DocumentDetailPage() {
         <span>类型：{sourceTypeLabels[document.source_type] || document.source_type}</span>
         <span>创建：{new Date(document.created_at).toLocaleString('zh-CN')}</span>
         <span className={statusColors[status] || 'text-slate-700'}>
-          状态：{statusLabels[status] || status}
+          正文：{statusLabels[status] || status}
         </span>
+        {pipeline && (
+          <span
+            className={
+              pipeline.overall_status === 'completed'
+                ? 'text-green-700'
+                : pipeline.overall_status === 'failed'
+                  ? 'text-red-700'
+                  : 'text-blue-700'
+            }
+          >
+            知识库：
+            {pipeline.overall_status === 'completed'
+              ? '已就绪'
+              : pipeline.overall_status === 'failed'
+                ? '部分失败'
+                : '处理中'}
+          </span>
+        )}
       </div>
 
       {document.source_url && (
@@ -232,6 +280,8 @@ export default function DocumentDetailPage() {
           </a>
         </div>
       )}
+
+      {pipeline && <PipelineStatus pipeline={pipeline} />}
 
       {document.primary_category && (
         <div className="mt-3 text-sm text-slate-700">
@@ -354,5 +404,110 @@ export default function DocumentDetailPage() {
         )}
       </div>
     </main>
+  );
+}
+
+function PipelineStatus({ pipeline }: { pipeline: ProcessingPipeline }) {
+  const stages = [
+    {
+      key: 'parsing',
+      title: '正文提取',
+      stage: pipeline.stages.parsing,
+      detail: '下载并提取可阅读正文',
+    },
+    {
+      key: 'understanding',
+      title: 'AI 整理',
+      stage: pipeline.stages.understanding,
+      detail: '摘要、分类和标签',
+    },
+    {
+      key: 'chunking',
+      title: '知识切片',
+      stage: pipeline.stages.chunking,
+      detail: `已生成 ${pipeline.stages.chunking.child_chunks} 个可检索切片`,
+    },
+    {
+      key: 'embedding',
+      title: '向量解析',
+      stage: pipeline.stages.embedding,
+      detail:
+        pipeline.stages.embedding.status === 'disabled'
+          ? '未启用向量模型'
+          : `${pipeline.stages.embedding.completed}/${pipeline.stages.embedding.total} 个切片${
+              pipeline.stages.embedding.model
+                ? ` · ${pipeline.stages.embedding.model}`
+                : ''
+            }`,
+    },
+  ];
+
+  return (
+    <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">知识库处理进度</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            正文完成后，系统还会继续进行 AI 整理、切片和向量解析。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span
+            className={`rounded-full px-2 py-1 ${
+              pipeline.keyword_searchable
+                ? 'bg-emerald-100 text-emerald-800'
+                : 'bg-slate-100 text-slate-500'
+            }`}
+          >
+            {pipeline.keyword_searchable ? '可关键词检索' : '尚不可检索'}
+          </span>
+          <span
+            className={`rounded-full px-2 py-1 ${
+              pipeline.vector_searchable
+                ? 'bg-violet-100 text-violet-800'
+                : 'bg-slate-100 text-slate-500'
+            }`}
+          >
+            {pipeline.vector_searchable ? '可语义检索' : '语义检索未就绪'}
+          </span>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {stages.map(({ key, title, stage, detail }) => (
+          <div key={key} className="rounded-lg border border-slate-200 p-3">
+            <div className="flex items-center gap-2">
+              <StageIndicator status={stage.status} />
+              <h3 className="text-sm font-medium text-slate-800">{title}</h3>
+            </div>
+            <p className="mt-2 text-xs text-slate-600">{stage.message}</p>
+            <p className="mt-1 text-xs text-slate-400">{detail}</p>
+            {stage.last_error && (
+              <p className="mt-2 text-xs text-red-700">{stage.last_error}</p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function StageIndicator({ status }: { status: string }) {
+  const styles: Record<string, string> = {
+    completed: 'bg-emerald-500',
+    disabled: 'bg-slate-300',
+    skipped: 'bg-slate-300',
+    failed: 'bg-red-500',
+    processing: 'animate-pulse bg-blue-500',
+    created: 'bg-amber-400',
+    retry: 'bg-amber-400',
+    pending: 'bg-slate-300',
+  };
+  return (
+    <span
+      className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+        styles[status] ?? 'bg-slate-300'
+      }`}
+      aria-hidden="true"
+    />
   );
 }

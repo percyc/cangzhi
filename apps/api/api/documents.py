@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
+from ..models.auth import AIRuntimeConfig
 from ..models.blobs import Blob
+from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from ..models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from ..models.processing import ProcessingJob
 from ..models.taxonomy import (
     Category,
@@ -26,6 +29,31 @@ from .schemas import (
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+_RUNNING_JOB_STATUSES = {"created", "processing", "retry"}
+
+
+def _stage_payload(
+    job: ProcessingJob | None, *, skipped_reason: str | None = None
+) -> dict:
+    if job is None:
+        return {
+            "status": "skipped" if skipped_reason else "pending",
+            "message": skipped_reason or "等待前一阶段完成",
+            "last_error": None,
+        }
+    labels = {
+        "created": "等待处理",
+        "processing": "正在处理",
+        "retry": "等待重试",
+        "completed": "已完成",
+        "failed": "处理失败",
+    }
+    return {
+        "status": job.status,
+        "message": labels.get(job.status, job.status),
+        "last_error": job.last_error,
+    }
 
 
 async def _load_categories_for_versions(
@@ -332,3 +360,184 @@ async def get_latest_job(
         return None
 
     return ProcessingJobResponse.model_validate(job)
+
+
+@router.get("/{document_id}/processing-status", response_model=dict)
+async def get_processing_status(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the full ingestion pipeline status for the current version."""
+
+    document = await db.get(Document, document_id)
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    if document.current_version_id is None:
+        raise HTTPException(status_code=400, detail="资料没有当前版本")
+
+    jobs = (
+        (
+            await db.execute(
+                select(ProcessingJob)
+                .where(
+                    ProcessingJob.document_id == document_id,
+                    ProcessingJob.document_version_id == document.current_version_id,
+                    ProcessingJob.stage.in_(("parsing", "chunking", "understanding")),
+                )
+                .order_by(ProcessingJob.id.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    latest_by_stage: dict[str, ProcessingJob] = {}
+    for job in jobs:
+        latest_by_stage.setdefault(job.stage, job)
+
+    chunk_count = int(
+        (
+            await db.execute(
+                select(func.count(DocumentChunk.id)).where(
+                    DocumentChunk.document_version_id == document.current_version_id,
+                    DocumentChunk.role == "child",
+                    DocumentChunk.is_current.is_(True),
+                )
+            )
+        ).scalar_one()
+        or 0
+    )
+    config = (
+        (
+            await db.execute(
+                select(AIRuntimeConfig).order_by(AIRuntimeConfig.id.desc()).limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    active_profile: EmbeddingProfile | None = None
+    if config is not None and config.active_embedding_profile_id is not None:
+        active_profile = await db.get(
+            EmbeddingProfile, config.active_embedding_profile_id
+        )
+
+    embedded_count = 0
+    failed_embedding_jobs = 0
+    running_embedding_jobs = 0
+    if active_profile is not None:
+        embedded_count = int(
+            (
+                await db.execute(
+                    select(func.count(ChunkEmbedding.id))
+                    .join(
+                        DocumentChunk,
+                        DocumentChunk.id == ChunkEmbedding.chunk_id,
+                    )
+                    .where(
+                        ChunkEmbedding.profile_id == active_profile.id,
+                        DocumentChunk.document_version_id
+                        == document.current_version_id,
+                        DocumentChunk.role == "child",
+                        DocumentChunk.is_current.is_(True),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        embedding_status_rows = (
+            await db.execute(
+                select(ProcessingJob.status, func.count(ProcessingJob.id))
+                .where(
+                    ProcessingJob.document_version_id == document.current_version_id,
+                    ProcessingJob.stage == "embedding",
+                    ProcessingJob.embedding_profile_id == active_profile.id,
+                )
+                .group_by(ProcessingJob.status)
+            )
+        ).all()
+        status_counts = {status: int(count) for status, count in embedding_status_rows}
+        failed_embedding_jobs = status_counts.get("failed", 0)
+        running_embedding_jobs = sum(
+            status_counts.get(status, 0) for status in _RUNNING_JOB_STATUSES
+        )
+
+    parsing = _stage_payload(latest_by_stage.get("parsing"))
+    chunking = _stage_payload(latest_by_stage.get("chunking"))
+    understanding = _stage_payload(latest_by_stage.get("understanding"))
+    if active_profile is None:
+        embedding = {
+            "status": "disabled",
+            "message": "未启用向量索引，仍可使用关键词检索",
+            "profile_id": None,
+            "model": None,
+            "completed": 0,
+            "total": chunk_count,
+            "failed": 0,
+        }
+    elif failed_embedding_jobs:
+        embedding_status = "failed"
+        embedding_message = f"{failed_embedding_jobs} 个向量任务失败"
+        embedding = {
+            "status": embedding_status,
+            "message": embedding_message,
+            "profile_id": active_profile.id,
+            "model": active_profile.model,
+            "completed": embedded_count,
+            "total": chunk_count,
+            "failed": failed_embedding_jobs,
+        }
+    elif chunk_count > 0 and embedded_count >= chunk_count:
+        embedding = {
+            "status": "completed",
+            "message": "向量已完成，可进行语义检索",
+            "profile_id": active_profile.id,
+            "model": active_profile.model,
+            "completed": embedded_count,
+            "total": chunk_count,
+            "failed": 0,
+        }
+    else:
+        embedding = {
+            "status": "processing" if running_embedding_jobs else "pending",
+            "message": (
+                "正在生成向量" if running_embedding_jobs else "等待切片完成后生成向量"
+            ),
+            "profile_id": active_profile.id,
+            "model": active_profile.model,
+            "completed": embedded_count,
+            "total": chunk_count,
+            "failed": 0,
+        }
+
+    stage_statuses = [
+        parsing["status"],
+        chunking["status"],
+        understanding["status"],
+        embedding["status"],
+    ]
+    if "failed" in stage_statuses:
+        overall = "failed"
+    elif any(
+        status in _RUNNING_JOB_STATUSES or status == "pending"
+        for status in stage_statuses
+    ):
+        overall = "processing"
+    else:
+        overall = "completed"
+
+    return {
+        "document_id": document.id,
+        "document_version_id": document.current_version_id,
+        "overall_status": overall,
+        "keyword_searchable": chunk_count > 0,
+        "vector_searchable": embedding["status"] == "completed",
+        "stages": {
+            "parsing": parsing,
+            "understanding": understanding,
+            "chunking": {
+                **chunking,
+                "child_chunks": chunk_count,
+            },
+            "embedding": embedding,
+        },
+    }
