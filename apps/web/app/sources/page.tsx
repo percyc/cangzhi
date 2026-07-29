@@ -129,6 +129,33 @@ export default function SourcesPage() {
     }));
   };
 
+  const remove = async (source: Source) => {
+    if (
+      !window.confirm(
+        `确定删除连接器“${source.name}”吗？已解析入库的资料会保留，远端文件不会被删除。`,
+      )
+    ) return;
+    setBusy(`${source.id}:delete`);
+    setError('');
+    try {
+      const response = await fetch(`/api/webdav/${source.id}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) throw new Error(await readError(response, '删除连接器失败'));
+      setMessage(`连接器“${source.name}”已删除，已入库资料仍然保留。`);
+      setEntries((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '删除连接器失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
   return (
     <main className="container mx-auto max-w-6xl p-4">
       <h1 className="text-2xl font-bold">知识源</h1>
@@ -180,6 +207,9 @@ export default function SourcesPage() {
               ))}
               <button type="button" onClick={() => void showEntries(source.id).catch((caught) => setError(caught instanceof Error ? caught.message : '读取失败'))} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100">
                 {entries[source.id] ? '收起清单' : '查看文件'}
+              </button>
+              <button type="button" disabled={Boolean(busy)} onClick={() => void remove(source)} className="rounded px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
+                {busy === `${source.id}:delete` ? '删除中…' : '删除连接器'}
               </button>
             </div>
             {source.last_error && <p className="mt-3 text-sm text-red-700">{source.last_error}</p>}

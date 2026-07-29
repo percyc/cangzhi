@@ -54,3 +54,7 @@ def test_created_webdav_source_is_returned_in_connector_list(client):
         "failed": 0,
         "synced": 0,
     }
+
+    deleted = test_client.delete(f"/api/webdav/{body[0]['id']}")
+    assert deleted.status_code == 200
+    assert test_client.get("/api/webdav").json() == []

@@ -163,6 +163,19 @@ async def create_source(payload: SourceCreate, db: AsyncSession = Depends(get_db
     return source.to_public_dict()
 
 
+@router.delete("/{source_id}", response_model=dict[str, Any])
+async def delete_source(source_id: int, db: AsyncSession = Depends(get_db)):
+    """Remove a connector without deleting documents already indexed from it."""
+
+    source = await _source_or_404(db, source_id)
+    await db.delete(source)
+    await db.commit()
+    return {
+        "ok": True,
+        "message": "WebDAV 连接器已删除，已入库资料予以保留",
+    }
+
+
 @router.post("/{source_id}/test", response_model=dict[str, Any])
 async def test_source(source_id: int, db: AsyncSession = Depends(get_db)):
     source = await _source_or_404(db, source_id)
