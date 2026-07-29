@@ -1,7 +1,7 @@
-'use client'
+'use client';
 
-import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useCallback, useEffect, useState } from 'react';
 
 type DocumentSummary = {
   summary: string;
@@ -69,30 +69,73 @@ const sourceTypeLabels: Record<string, string> = {
 
 export default function DocumentsListPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [view, setView] = useState<'active' | 'trash'>('active');
+  const [selected, setSelected] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [acting, setActing] = useState(false);
 
-  useEffect(() => {
-    fetch('/api/documents')
+  const load = useCallback(() => {
+    setLoading(true);
+    return fetch(`/api/documents?limit=200&deleted=${view === 'trash'}`)
       .then(res => {
         if (!res.ok) throw new Error('暂时无法读取资料');
         return res.json();
       })
       .then(data => {
         setDocuments(data);
+        setSelected([]);
+        setError('');
         setLoading(false);
       })
       .catch(err => {
         setError(err.message);
         setLoading(false);
       });
-  }, []);
+  }, [view]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+
+  const runBatchAction = async () => {
+    if (!selected.length) return;
+    const action = view === 'trash' ? 'restore' : 'trash';
+    if (
+      action === 'trash' &&
+      !window.confirm(`确定将选中的 ${selected.length} 条资料移入回收站吗？`)
+    ) return;
+    setActing(true);
+    try {
+      const response = await fetch(`/api/documents/batch/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document_ids: selected }),
+      });
+      if (!response.ok) throw new Error(action === 'trash' ? '删除失败' : '恢复失败');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '操作失败');
+    } finally {
+      setActing(false);
+    }
+  };
 
   return (
     <main className="container mx-auto p-4">
-      <h1 className="text-2xl font-bold mb-4">资料库</h1>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold">资料库</h1>
+          <p className="mt-1 text-sm text-slate-500">选择资料可批量管理；删除后先进入回收站。</p>
+        </div>
+        <div className="flex rounded-lg border border-slate-300 bg-white p-1 text-sm">
+          <button type="button" onClick={() => setView('active')} className={`rounded px-3 py-1.5 ${view === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>全部资料</button>
+          <button type="button" onClick={() => setView('trash')} className={`rounded px-3 py-1.5 ${view === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>回收站</button>
+        </div>
+      </div>
 
-      <div className="flex flex-wrap gap-3 mb-6">
+      {view === 'active' && <div className="flex flex-wrap gap-3 mb-6">
         <Link
           href="/ask"
           className="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800"
@@ -129,7 +172,20 @@ export default function DocumentsListPage() {
         >
           分类管理
         </Link>
-      </div>
+      </div>}
+
+      {documents.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm">
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={selected.length === documents.length} onChange={(event) => setSelected(event.target.checked ? documents.map((item) => item.id) : [])} />
+            全选
+          </label>
+          <span className="text-slate-500">已选 {selected.length} 条</span>
+          <button type="button" disabled={!selected.length || acting} onClick={runBatchAction} className={`rounded px-3 py-1.5 text-white disabled:opacity-40 ${view === 'trash' ? 'bg-emerald-700' : 'bg-red-700'}`}>
+            {acting ? '处理中…' : view === 'trash' ? '恢复选中资料' : '删除选中资料'}
+          </button>
+        </div>
+      )}
 
       {loading && <p className="text-slate-500">加载中…</p>}
       {error && <p className="text-red-600">错误：{error}</p>}
@@ -137,8 +193,8 @@ export default function DocumentsListPage() {
       {!loading && !error && (
         documents.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
-            <p className="text-lg font-medium text-slate-800">还没有资料</p>
-            <p className="mt-2 text-sm text-slate-500">从一条随手记、一篇文章链接或一个文件开始建立你的知识库。</p>
+            <p className="text-lg font-medium text-slate-800">{view === 'trash' ? '回收站为空' : '还没有资料'}</p>
+            <p className="mt-2 text-sm text-slate-500">{view === 'trash' ? '删除的资料会暂存在这里，可以随时恢复。' : '从一条随手记、一篇文章链接或一个文件开始建立你的知识库。'}</p>
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -150,6 +206,10 @@ export default function DocumentsListPage() {
                   key={doc.id}
                   className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow transition-shadow"
                 >
+                  <label className="mb-2 flex items-center gap-2 text-xs text-slate-500">
+                    <input type="checkbox" checked={selected.includes(doc.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, doc.id] : current.filter((id) => id !== doc.id))} />
+                    选择
+                  </label>
                   <h2 className="text-lg font-semibold text-slate-900">
                     <Link href={`/documents/${doc.id}`} className="hover:underline">
                       {doc.title}

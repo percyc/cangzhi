@@ -109,3 +109,7 @@ class DocumentReprocessResponse(BaseModel):
 
 class DocumentCategoryUpdateRequest(BaseModel):
     category_id: int
+
+
+class DocumentBatchActionRequest(BaseModel):
+    document_ids: list[int] = Field(min_length=1, max_length=200)

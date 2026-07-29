@@ -20,6 +20,7 @@ from ..models.webdav import WebDAVSource
 from .schemas import (
     BlobResponse,
     CategoryMini,
+    DocumentBatchActionRequest,
     DocumentCategoryUpdateRequest,
     DocumentReprocessResponse,
     DocumentResponse,
@@ -205,11 +206,12 @@ async def build_document_response(
 async def list_documents(
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    deleted: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
         select(Document)
-        .where(Document.is_deleted.is_(False))
+        .where(Document.is_deleted.is_(deleted))
         .order_by(Document.updated_at.desc(), Document.id.desc())
         .offset(offset)
         .limit(limit)
@@ -218,6 +220,46 @@ async def list_documents(
         await build_document_response(db, document)
         for document in result.scalars().all()
     ]
+
+
+@router.post("/batch/trash", response_model=dict)
+async def trash_documents(
+    payload: DocumentBatchActionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    documents = (
+        (
+            await db.execute(
+                select(Document).where(Document.id.in_(payload.document_ids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for document in documents:
+        document.is_deleted = True
+    await db.commit()
+    return {"ok": True, "affected": len(documents)}
+
+
+@router.post("/batch/restore", response_model=dict)
+async def restore_documents(
+    payload: DocumentBatchActionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    documents = (
+        (
+            await db.execute(
+                select(Document).where(Document.id.in_(payload.document_ids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for document in documents:
+        document.is_deleted = False
+    await db.commit()
+    return {"ok": True, "affected": len(documents)}
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
@@ -229,6 +271,32 @@ async def get_document(
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="资料不存在")
     return await build_document_response(db, document)
+
+
+@router.delete("/{document_id}", response_model=dict)
+async def trash_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    document = await db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    document.is_deleted = True
+    await db.commit()
+    return {"ok": True, "message": "资料已移入回收站"}
+
+
+@router.post("/{document_id}/restore", response_model=dict)
+async def restore_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    document = await db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    document.is_deleted = False
+    await db.commit()
+    return {"ok": True, "message": "资料已恢复"}
 
 
 @router.post("/{document_id}/reprocess", response_model=DocumentReprocessResponse)

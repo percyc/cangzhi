@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
@@ -134,6 +134,7 @@ const sourceTypeLabels: Record<string, string> = {
 
 export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const [document, setDocument] = useState<Document | null>(null);
   const [latestJob, setLatestJob] = useState<ProcessingJob | null>(null);
   const [pipeline, setPipeline] = useState<ProcessingPipeline | null>(null);
@@ -144,6 +145,23 @@ export default function DocumentDetailPage() {
   const [retrying, setRetrying] = useState(false);
   const [savingCategory, setSavingCategory] = useState(false);
   const [categoryMessage, setCategoryMessage] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    if (!window.confirm('确定删除这条资料吗？资料将进入回收站，可以恢复。')) return;
+    setDeleting(true);
+    try {
+      const response = await fetch(`/api/documents/${params.id}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) throw new Error('删除资料失败');
+      router.push('/documents');
+      router.refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '删除资料失败');
+      setDeleting(false);
+    }
+  };
 
   const loadData = useCallback(async () => {
     try {
@@ -442,6 +460,14 @@ export default function DocumentDetailPage() {
             {retrying ? '正在提交…' : '重新处理'}
           </button>
         )}
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={deleting}
+          className="rounded border border-red-300 px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
+        >
+          {deleting ? '正在删除…' : '删除资料'}
+        </button>
       </div>
     </main>
   );
