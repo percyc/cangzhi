@@ -7,11 +7,9 @@ import { useEffect, useState } from 'react';
 import { fetchAuthStatus, type AuthStatus } from '@/lib/api';
 
 const NAV_ITEMS = [
-  { href: '/documents', label: '资料库' },
-  { href: '/sources', label: '知识源' },
-  { href: '/processing', label: '处理中心' },
+  { href: '/documents', label: '知识库' },
+  { href: '/inbox', label: '收件箱' },
   { href: '/search', label: '搜索' },
-  { href: '/ask', label: '问知识库' },
   { href: '/settings', label: '设置' },
 ] as const;
 
@@ -79,7 +77,10 @@ export function TopNav() {
         </Link>
         <nav className="flex flex-1 flex-wrap items-center gap-2 text-sm">
           {NAV_ITEMS.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+            const active =
+              pathname === item.href ||
+              pathname.startsWith(`${item.href}/`) ||
+              (item.href === '/search' && pathname.startsWith('/ask'));
             const style = active
               ? 'rounded-full bg-slate-900 px-3 py-1 text-white'
               : 'rounded-full px-3 py-1 text-slate-700 hover:bg-slate-100';
@@ -90,6 +91,22 @@ export function TopNav() {
             );
           })}
         </nav>
+        <details className="relative">
+          <summary className="cursor-pointer list-none rounded-full bg-slate-900 px-3 py-1.5 text-sm text-white hover:bg-slate-700">
+            ＋ 添加
+          </summary>
+          <div className="absolute right-0 z-20 mt-2 w-44 rounded-xl border border-slate-200 bg-white p-2 text-sm shadow-lg">
+            <Link href="/notes/new" className="block rounded-lg px-3 py-2 text-slate-700 hover:bg-slate-100">
+              记录想法
+            </Link>
+            <Link href="/links/new" className="block rounded-lg px-3 py-2 text-slate-700 hover:bg-slate-100">
+              收藏链接
+            </Link>
+            <Link href="/files/upload" className="block rounded-lg px-3 py-2 text-slate-700 hover:bg-slate-100">
+              上传文件
+            </Link>
+          </div>
+        </details>
         <div className="flex items-center gap-3 text-xs text-slate-500">
           {state.kind === 'pending' && <span>登录状态加载中…</span>}
           {state.kind === 'ready' && status?.authenticated && status.admin && (

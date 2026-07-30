@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import {
@@ -341,12 +342,22 @@ export default function SettingsPage() {
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-12">
-      <h1 className="text-2xl font-semibold text-slate-900">模型设置</h1>
+      <h1 className="text-2xl font-semibold text-slate-900">设置</h1>
       <p className="mt-2 text-sm text-slate-500">
-        对话模型负责整理和回答，向量模型负责语义检索。两套配置完全独立。
+        管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
       </p>
+      <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        <Link href="/settings/sources" className="rounded-xl border border-slate-200 bg-white p-4 hover:border-slate-400">
+          <p className="font-medium text-slate-900">知识源</p>
+          <p className="mt-1 text-xs text-slate-500">WebDAV 连接、扫描与同步设置</p>
+        </Link>
+        <Link href="/inbox" className="rounded-xl border border-slate-200 bg-white p-4 hover:border-slate-400">
+          <p className="font-medium text-slate-900">系统任务</p>
+          <p className="mt-1 text-xs text-slate-500">查看解析、切片和向量任务状态</p>
+        </Link>
+      </div>
 
-      <form className="mt-8 space-y-8" onSubmit={handleSave}>
+      <form className="mt-6 space-y-8" onSubmit={handleSave}>
         <section className="space-y-5 rounded-2xl border-2 border-blue-200 bg-white p-5 shadow-sm">
           <header className="border-b border-blue-100 pb-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">

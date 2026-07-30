@@ -70,7 +70,9 @@ const sourceTypeLabels: Record<string, string> = {
 export default function DocumentsListPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [view, setView] = useState<'active' | 'trash'>('active');
+  const [manageMode, setManageMode] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
+  const [categoryId, setCategoryId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [acting, setActing] = useState(false);
@@ -121,6 +123,18 @@ export default function DocumentsListPage() {
       setActing(false);
     }
   };
+
+  const categories = Array.from(
+    new Map(
+      documents.flatMap((document) => document.categories).map((item) => [item.id, item]),
+    ).values(),
+  );
+  const visibleDocuments =
+    categoryId === null
+      ? documents
+      : documents.filter((document) =>
+          document.categories.some((category) => category.id === categoryId),
+        );
 
   return (
     <main className="container mx-auto p-4">
@@ -174,16 +188,34 @@ export default function DocumentsListPage() {
         </Link>
       </div>}
 
-      {documents.length > 0 && (
+      {view === 'active' && categories.length > 0 && (
+        <div className="mb-4 flex flex-wrap gap-2">
+          <button type="button" onClick={() => setCategoryId(null)} className={`rounded-full px-3 py-1.5 text-sm ${categoryId === null ? 'bg-slate-900 text-white' : 'border border-slate-300 bg-white text-slate-600'}`}>全部分类</button>
+          {categories.map((category) => (
+            <button key={category.id} type="button" onClick={() => setCategoryId(category.id)} className={`rounded-full px-3 py-1.5 text-sm ${categoryId === category.id ? 'bg-slate-900 text-white' : 'border border-slate-300 bg-white text-slate-600'}`}>{category.name}</button>
+          ))}
+        </div>
+      )}
+
+      {visibleDocuments.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm">
-          <label className="flex items-center gap-2">
-            <input type="checkbox" checked={selected.length === documents.length} onChange={(event) => setSelected(event.target.checked ? documents.map((item) => item.id) : [])} />
-            全选
-          </label>
-          <span className="text-slate-500">已选 {selected.length} 条</span>
-          <button type="button" disabled={!selected.length || acting} onClick={runBatchAction} className={`rounded px-3 py-1.5 text-white disabled:opacity-40 ${view === 'trash' ? 'bg-emerald-700' : 'bg-red-700'}`}>
-            {acting ? '处理中…' : view === 'trash' ? '恢复选中资料' : '删除选中资料'}
-          </button>
+          {!manageMode ? (
+            <button type="button" onClick={() => setManageMode(true)} className="rounded border border-slate-300 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
+              批量管理
+            </button>
+          ) : (
+            <>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={selected.length === visibleDocuments.length} onChange={(event) => setSelected(event.target.checked ? visibleDocuments.map((item) => item.id) : [])} />
+                全选当前结果
+              </label>
+              <span className="text-slate-500">已选 {selected.length} 条</span>
+              <button type="button" disabled={!selected.length || acting} onClick={runBatchAction} className={`rounded px-3 py-1.5 text-white disabled:opacity-40 ${view === 'trash' ? 'bg-emerald-700' : 'bg-red-700'}`}>
+                {acting ? '处理中…' : view === 'trash' ? '恢复选中资料' : '移入回收站'}
+              </button>
+              <button type="button" onClick={() => { setManageMode(false); setSelected([]); }} className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100">完成</button>
+            </>
+          )}
         </div>
       )}
 
@@ -191,14 +223,14 @@ export default function DocumentsListPage() {
       {error && <p className="text-red-600">错误：{error}</p>}
 
       {!loading && !error && (
-        documents.length === 0 ? (
+        visibleDocuments.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
             <p className="text-lg font-medium text-slate-800">{view === 'trash' ? '回收站为空' : '还没有资料'}</p>
             <p className="mt-2 text-sm text-slate-500">{view === 'trash' ? '删除的资料会暂存在这里，可以随时恢复。' : '从一条随手记、一篇文章链接或一个文件开始建立你的知识库。'}</p>
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {documents.map(doc => {
+            {visibleDocuments.map(doc => {
               const version = doc.current_version;
               const status = version?.processing_status || 'created';
               return (
@@ -206,10 +238,10 @@ export default function DocumentsListPage() {
                   key={doc.id}
                   className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow transition-shadow"
                 >
-                  <label className="mb-2 flex items-center gap-2 text-xs text-slate-500">
+                  {manageMode && <label className="mb-2 flex items-center gap-2 text-xs text-slate-500">
                     <input type="checkbox" checked={selected.includes(doc.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, doc.id] : current.filter((id) => id !== doc.id))} />
                     选择
-                  </label>
+                  </label>}
                   <h2 className="text-lg font-semibold text-slate-900">
                     <Link href={`/documents/${doc.id}`} className="hover:underline">
                       {doc.title}

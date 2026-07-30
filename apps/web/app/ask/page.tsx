@@ -194,6 +194,12 @@ function AskClient() {
       <Link href="/documents" className="text-blue-600 hover:underline">
         ← 返回资料列表
       </Link>
+      <div className="mt-4 flex w-fit rounded-lg border border-slate-300 bg-white p-1 text-sm">
+        <Link href={question ? `/search?q=${encodeURIComponent(question)}` : '/search'} className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100">
+          找资料
+        </Link>
+        <span className="rounded bg-slate-900 px-3 py-1.5 text-white">问知识库</span>
+      </div>
       <h1 className="mt-4 text-2xl font-bold text-slate-900">问知识库</h1>
       <p className="mt-1 text-sm text-slate-500">
         用自然语言提问，系统会从你保存的资料中找到相关片段并给出带出处的中文回答。

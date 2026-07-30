@@ -318,7 +318,7 @@ export default function DocumentDetailPage() {
           <div>
             <span className="text-slate-500">知识来源：</span>
             {document.origin.connector_available && document.origin.connector_id ? (
-              <Link href="/sources" className="font-medium text-violet-800 hover:underline">
+              <Link href="/settings/sources" className="font-medium text-violet-800 hover:underline">
                 WebDAV · {document.origin.label}
               </Link>
             ) : (
