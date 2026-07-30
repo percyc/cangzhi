@@ -24,10 +24,12 @@ type Provider = AIConfig['provider'];
 type EmbeddingProvider = AIConfig['embedding_provider'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type FetchState = 'idle' | 'fetching' | 'success' | 'error';
+type SettingsPanel = 'chat' | 'embedding';
 
 export default function SettingsPage() {
   const router = useRouter();
   const [config, setConfig] = useState<AIConfig | null>(null);
+  const [activePanel, setActivePanel] = useState<SettingsPanel>('chat');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [provider, setProvider] = useState<Provider>('disabled');
   const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
@@ -133,6 +135,10 @@ export default function SettingsPage() {
       openaiModel.trim() !== (config?.openai_model ?? '')) ||
     (provider === 'ollama' &&
       ollamaModel.trim() !== (config?.ollama_model ?? ''));
+  const chatDirty =
+    connectionChanged ||
+    modelChanged ||
+    timeoutSeconds !== (config?.timeout_seconds || 30);
 
   // The embedding channel has its own change tracking: changing
   // the base URL, model, key or timeout only invalidates the
@@ -147,6 +153,12 @@ export default function SettingsPage() {
     embeddingModel.trim() !== (config?.embedding_model ?? '');
   const embeddingTimeoutChanged =
     embeddingTimeoutSeconds !== (config?.embedding_timeout_seconds || 30);
+  const embeddingDirty =
+    embeddingConnectionChanged ||
+    embeddingModelChanged ||
+    embeddingTimeoutChanged;
+  const dirtyPanelCount = Number(chatDirty) + Number(embeddingDirty);
+  const anyDirty = dirtyPanelCount > 0;
 
   const handleFetchModels = async () => {
     if (connectionChanged) {
@@ -346,22 +358,43 @@ export default function SettingsPage() {
       <p className="mt-2 text-sm text-slate-500">
         管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
       </p>
-      <div className="mt-6 grid gap-3 sm:grid-cols-2">
-        <Link href="/settings/sources" className="rounded-xl border border-slate-200 bg-white p-4 hover:border-slate-400">
-          <p className="font-medium text-slate-900">知识源</p>
-          <p className="mt-1 text-xs text-slate-500">WebDAV 连接、扫描与同步设置</p>
-        </Link>
-        <Link href="/inbox" className="rounded-xl border border-slate-200 bg-white p-4 hover:border-slate-400">
-          <p className="font-medium text-slate-900">系统任务</p>
-          <p className="mt-1 text-xs text-slate-500">查看解析、切片和向量任务状态</p>
-        </Link>
+      <div className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 sm:grid-cols-4">
+        <SettingsPanelButton
+          title="对话模型"
+          hint={provider === 'disabled' ? '当前未启用' : currentChatModel(provider, openaiModel, ollamaModel)}
+          active={activePanel === 'chat'}
+          onClick={() => setActivePanel('chat')}
+          dirty={chatDirty}
+        />
+        <SettingsPanelButton
+          title="向量与索引"
+          hint={
+            embeddingStatus?.active_profile.id
+              ? `${embeddingStatus.active_profile.model} · ${embeddingStatus.active_profile.dim} 维`
+              : '当前未启用'
+          }
+          active={activePanel === 'embedding'}
+          onClick={() => setActivePanel('embedding')}
+          dirty={embeddingDirty}
+        />
+        <SettingsLink
+          href="/settings/sources"
+          title="知识源"
+          hint="WebDAV 连接与同步"
+        />
+        <SettingsLink
+          href="/inbox"
+          title="系统任务"
+          hint="解析和索引状态"
+        />
       </div>
 
-      <form className="mt-6 space-y-8" onSubmit={handleSave}>
+      <form className="mt-6 space-y-6" onSubmit={handleSave}>
+        {activePanel === 'chat' && (
         <section className="space-y-5 rounded-2xl border-2 border-blue-200 bg-white p-5 shadow-sm">
           <header className="border-b border-blue-100 pb-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
-              第一部分
+              对话与理解能力
             </p>
             <h2 className="mt-1 text-xl font-semibold text-slate-900">
               对话模型
@@ -512,10 +545,10 @@ export default function SettingsPage() {
             <section className="space-y-4 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
             <div>
               <h2 className="text-base font-semibold text-slate-800">
-                3. 获取并验证对话模型
+                3. 获取模型与请求设置
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                以下操作只针对上面的对话模型，不会影响向量模型。
+                模型列表在这里获取；连接测试统一在页面底部执行。
               </p>
             </div>
             <Field
@@ -538,14 +571,6 @@ export default function SettingsPage() {
                     ? '刷新对话模型列表'
                     : '获取对话模型列表'}
               </button>
-              <button
-                type="button"
-                onClick={handleTest}
-                disabled={testing || connectionChanged || modelChanged}
-                className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-              >
-                {testing ? '正在测试…' : '测试对话模型连接'}
-              </button>
             </div>
             {connectionChanged && (
               <p className="text-sm text-amber-700">
@@ -562,25 +587,16 @@ export default function SettingsPage() {
                 已获取 {models.length} 个对话模型，可在上方模型名称中选择
               </p>
             )}
-            {testResult && (
-              <p
-                className={`text-sm ${
-                  testResult.ok ? 'text-emerald-700' : 'text-red-700'
-                }`}
-              >
-                {testResult.ok
-                  ? '对话模型连接正常'
-                  : `对话模型连接失败：${testResult.message}`}
-              </p>
-            )}
             </section>
           )}
         </section>
+        )}
 
+        {activePanel === 'embedding' && (
         <section className="flex flex-col gap-4 rounded-2xl border-2 border-violet-200 bg-white p-5 shadow-sm">
           <header className="border-b border-violet-100 pb-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-violet-600">
-              第二部分
+              语义检索能力
             </p>
             <h2 className="mt-1 text-xl font-semibold text-slate-900">
               向量模型
@@ -792,10 +808,10 @@ export default function SettingsPage() {
               />
               <div className="rounded-xl border border-violet-100 bg-violet-50/50 p-4">
                 <h3 className="text-sm font-semibold text-slate-800">
-                  3. 获取并验证向量模型
+                  3. 获取向量模型
                 </h3>
                 <p className="mt-1 text-xs text-slate-500">
-                  模型列表和兼容性测试仅针对向量模型，不会调用或更改对话模型。
+                  模型列表在这里获取；连接和兼容性测试统一在页面底部执行。
                 </p>
                 <div className="mt-3 flex flex-wrap items-center gap-3">
                   <button
@@ -814,20 +830,6 @@ export default function SettingsPage() {
                         ? '刷新向量模型列表'
                         : '获取向量模型列表'}
                   </button>
-                  <button
-                    type="button"
-                    onClick={handleEmbeddingTest}
-                    disabled={
-                      embeddingTesting ||
-                      embeddingConnectionChanged ||
-                      embeddingModelChanged ||
-                      embeddingTimeoutChanged ||
-                      !config.embedding_model
-                    }
-                    className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                  >
-                    {embeddingTesting ? '正在测试…' : '测试连接与兼容性'}
-                  </button>
                 </div>
                 {embeddingModelsError && (
                   <p className="mt-3 text-sm text-red-700">
@@ -841,25 +843,6 @@ export default function SettingsPage() {
                     请先保存向量模型参数的改动，再执行获取或测试。
                   </p>
                 )}
-                {embeddingTestResult && (
-                  <p
-                    className={`mt-3 text-sm ${
-                      embeddingTestResult.ok
-                        ? 'text-emerald-700'
-                        : 'text-red-700'
-                    }`}
-                  >
-                    {embeddingTestResult.ok
-                      ? embeddingTestResult.decision === 'same'
-                        ? `无需重建：${embeddingTestResult.reason}`
-                        : embeddingTestResult.decision === 'compatible'
-                          ? `高度兼容：${embeddingTestResult.reason}`
-                          : embeddingTestResult.decision === 'unknown'
-                            ? `首次使用：连接正常，后续需要创建首个向量索引`
-                            : `需要重建：${embeddingTestResult.reason}`
-                      : `测试失败：${embeddingTestResult.reason}`}
-                  </p>
-                )}
                 <p className="mt-3 text-xs text-slate-500">
                   获取列表或测试不会重新生成文档向量；确认兼容性后，再在下方决定是否构建或切换索引。
                 </p>
@@ -867,19 +850,70 @@ export default function SettingsPage() {
             </div>
           )}
         </section>
+        )}
 
-        <div className="sticky bottom-4 z-20 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-xl shadow-slate-950/10 backdrop-blur">
-          <p className="mb-3 text-xs text-slate-500">
-            同时保存上面的对话模型和向量模型配置。
-          </p>
-          <div className="flex flex-wrap items-center gap-3">
+        <div className="sticky bottom-2 z-20 rounded-2xl border border-slate-200 bg-white/95 p-2.5 shadow-xl shadow-slate-950/10 backdrop-blur sm:bottom-4 sm:p-4">
+          <div className="flex flex-wrap items-center justify-end gap-3 sm:justify-between">
+            <div className="hidden sm:block">
+              <p className="text-sm font-medium text-slate-800">
+                {activePanel === 'chat' ? '对话模型操作' : '向量模型操作'}
+              </p>
+              <p className="mt-0.5 text-xs text-slate-500">
+                {(activePanel === 'chat' ? chatDirty : embeddingDirty)
+                  ? '有尚未保存的修改，保存后才能测试当前配置。'
+                  : anyDirty
+                    ? '另一个设置分区有尚未保存的修改。'
+                  : '当前页面没有待保存的修改，可以直接进行连接测试。'}
+              </p>
+            </div>
+            <div className="flex w-full items-center gap-2 sm:w-auto">
             <button
               type="submit"
-              disabled={saveState === 'saving'}
-              className="rounded bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-400"
+              disabled={
+                saveState === 'saving' ||
+                !anyDirty
+              }
+              className="flex-1 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-300 sm:flex-none"
             >
-              {saveState === 'saving' ? '正在保存…' : '保存本页全部设置'}
+              {saveState === 'saving'
+                ? '正在保存…'
+                : dirtyPanelCount > 1
+                  ? '保存全部修改'
+                  : chatDirty
+                    ? '保存对话模型'
+                    : embeddingDirty
+                      ? '保存向量模型'
+                      : activePanel === 'chat'
+                        ? '保存对话模型'
+                        : '保存向量模型'}
             </button>
+            {activePanel === 'chat' ? (
+              <button
+                type="button"
+                onClick={handleTest}
+                disabled={testing || chatDirty || provider === 'disabled'}
+                className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40 sm:flex-none"
+              >
+                {testing ? '正在测试…' : '测试对话连接'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleEmbeddingTest}
+                disabled={
+                  embeddingTesting ||
+                  embeddingDirty ||
+                  embeddingProvider === 'disabled' ||
+                  !config.embedding_model
+                }
+                className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40 sm:flex-none"
+              >
+                {embeddingTesting ? '正在测试…' : '测试向量兼容性'}
+              </button>
+            )}
+            </div>
+          </div>
+          <div className="mt-2">
             {saveMessage && (
               <p
                 className={`text-sm ${
@@ -889,11 +923,96 @@ export default function SettingsPage() {
                 {saveMessage}
               </p>
             )}
+            {activePanel === 'chat' && testResult && (
+              <p className={`text-sm ${testResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>
+                {testResult.ok ? '对话模型连接正常' : `对话模型连接失败：${testResult.message}`}
+              </p>
+            )}
+            {activePanel === 'embedding' && embeddingTestResult && (
+              <p className={`text-sm ${embeddingTestResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>
+                {embeddingTestResult.ok
+                  ? embeddingTestResult.decision === 'same'
+                    ? `无需重建：${embeddingTestResult.reason}`
+                    : embeddingTestResult.decision === 'compatible'
+                      ? `高度兼容：${embeddingTestResult.reason}`
+                      : embeddingTestResult.decision === 'unknown'
+                        ? '首次使用：连接正常，后续需要创建首个向量索引'
+                        : `需要重建：${embeddingTestResult.reason}`
+                  : `测试失败：${embeddingTestResult.reason}`}
+              </p>
+            )}
           </div>
         </div>
       </form>
     </main>
   );
+}
+
+function SettingsPanelButton({
+  title,
+  hint,
+  active,
+  dirty,
+  onClick,
+}: {
+  title: string;
+  hint: string;
+  active: boolean;
+  dirty: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={`rounded-xl p-3 text-left ${
+        active
+          ? 'bg-slate-950 text-white shadow-sm'
+          : 'text-slate-700 hover:bg-slate-50'
+      }`}
+    >
+      <span className="flex items-center justify-between gap-2">
+        <span className="text-sm font-semibold">{title}</span>
+        {dirty && (
+          <span className={`h-2 w-2 rounded-full ${active ? 'bg-amber-300' : 'bg-amber-500'}`} title="有未保存的修改" />
+        )}
+      </span>
+      <span className={`mt-1 block truncate text-xs ${active ? 'text-slate-300' : 'text-slate-400'}`}>
+        {hint}
+      </span>
+    </button>
+  );
+}
+
+function SettingsLink({
+  href,
+  title,
+  hint,
+}: {
+  href: string;
+  title: string;
+  hint: string;
+}) {
+  return (
+    <Link href={href} className="group rounded-xl p-3 text-left text-slate-700 hover:bg-slate-50">
+      <span className="flex items-center justify-between gap-2 text-sm font-semibold">
+        {title}
+        <span className="text-slate-300 transition-transform group-hover:translate-x-0.5">→</span>
+      </span>
+      <span className="mt-1 block truncate text-xs text-slate-400">{hint}</span>
+    </Link>
+  );
+}
+
+function currentChatModel(
+  provider: Provider,
+  openaiModel: string,
+  ollamaModel: string,
+) {
+  if (provider === 'openai') return openaiModel || 'OpenAI 兼容';
+  if (provider === 'ollama') return ollamaModel || 'Ollama / 本地';
+  return '当前未启用';
 }
 
 function Field({
