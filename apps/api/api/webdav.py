@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any
@@ -32,11 +33,10 @@ router = APIRouter(prefix="/webdav", tags=["webdav"])
 DEFAULT_EXTENSIONS = [".pdf", ".doc", ".docx", ".md", ".markdown", ".txt"]
 
 
-class SourceCreate(BaseModel):
+class SourceConfig(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     base_url: str = Field(min_length=1, max_length=1024)
     username: str = Field(default="", max_length=255)
-    password: str = Field(default="", max_length=1024)
     root_path: str = Field(default="/", max_length=2048)
     recursive: bool = True
     trusted_private_network: bool = False
@@ -57,7 +57,28 @@ class SourceCreate(BaseModel):
                 extension = "." + extension
             if extension and extension not in result:
                 result.append(extension)
+        if not result:
+            raise ValueError("至少需要配置一种纳入的文件类型")
         return result
+
+    @field_validator("ignore_patterns")
+    @classmethod
+    def normalize_ignore_patterns(cls, value: list[str]) -> list[str]:
+        result = []
+        for item in value:
+            pattern = item.strip()
+            if pattern and pattern not in result:
+                result.append(pattern)
+        return result
+
+
+class SourceCreate(SourceConfig):
+    password: str = Field(default="", max_length=1024)
+
+
+class SourceUpdate(SourceConfig):
+    password: str = Field(default="", max_length=1024)
+    clear_password: bool = False
 
 
 async def _source_or_404(db: AsyncSession, source_id: int) -> WebDAVSource:
@@ -163,6 +184,66 @@ async def create_source(payload: SourceCreate, db: AsyncSession = Depends(get_db
     return source.to_public_dict()
 
 
+@router.patch("/{source_id}", response_model=dict[str, Any])
+async def update_source(
+    source_id: int,
+    payload: SourceUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a connector while preserving its imported documents and password."""
+
+    source = await _source_or_404(db, source_id)
+    if payload.clear_password and payload.password:
+        raise HTTPException(
+            status_code=400,
+            detail="不能同时填写新密码和选择清除密码",
+        )
+    try:
+        base_url = validate_webdav_url(
+            payload.base_url,
+            trusted_private_network=payload.trusted_private_network,
+        )
+    except URLSecurityError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    previous_scan_config = (
+        source.base_url,
+        source.root_path,
+        bool(source.recursive),
+        tuple(source.include_extensions or []),
+        tuple(source.ignore_patterns or []),
+    )
+    source.name = payload.name.strip()
+    source.base_url = base_url
+    source.username = payload.username
+    source.root_path = "/" + payload.root_path.strip("/")
+    source.recursive = payload.recursive
+    source.trusted_private_network = payload.trusted_private_network
+    source.include_extensions = payload.include_extensions
+    source.ignore_patterns = payload.ignore_patterns
+    if payload.clear_password:
+        source.password_cipher = encrypt_secret("")
+        source.has_password = False
+    elif payload.password:
+        source.password_cipher = encrypt_secret(payload.password)
+        source.has_password = True
+    source.sync_status = "idle"
+    source.last_error = None
+
+    current_scan_config = (
+        source.base_url,
+        source.root_path,
+        bool(source.recursive),
+        tuple(source.include_extensions or []),
+        tuple(source.ignore_patterns or []),
+    )
+    await db.commit()
+    await db.refresh(source)
+    result = source.to_public_dict()
+    result["requires_rescan"] = previous_scan_config != current_scan_config
+    return result
+
+
 @router.delete("/{source_id}", response_model=dict[str, Any])
 async def delete_source(source_id: int, db: AsyncSession = Depends(get_db)):
     """Remove a connector without deleting documents already indexed from it."""
@@ -223,6 +304,7 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         for entry in remote
         if not entry.is_collection
         and PurePosixPath(entry.path).suffix.lower() in extensions
+        and not _matches_ignore_pattern(entry.path, source.ignore_patterns or [])
     ]
     existing = {
         entry.remote_path: entry
@@ -278,6 +360,17 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         "missing": missing,
         "eligible_files": len(files),
     }
+
+
+def _matches_ignore_pattern(path: str, patterns: list[str]) -> bool:
+    """Match WebDAV ignore globs against the full path and each path segment."""
+
+    parts = PurePosixPath(path).parts
+    return any(
+        fnmatchcase(path, pattern)
+        or any(fnmatchcase(part, pattern) for part in parts)
+        for pattern in patterns
+    )
 
 
 @router.post("/{source_id}/sync", response_model=dict[str, Any])
