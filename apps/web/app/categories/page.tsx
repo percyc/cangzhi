@@ -18,7 +18,7 @@ export default function CategoriesPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [newCategory, setNewCategory] = useState({ slug: '', name: '', description: '' });
+  const [newCategory, setNewCategory] = useState({ name: '', description: '' });
   const [submitting, setSubmitting] = useState(false);
 
   const loadCategories = useCallback(async () => {
@@ -55,8 +55,8 @@ export default function CategoriesPage() {
 
   const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!newCategory.slug.trim() || !newCategory.name.trim()) {
-      setError('slug 和名称不能为空');
+    if (!newCategory.name.trim()) {
+      setError('分类名称不能为空');
       return;
     }
     setSubmitting(true);
@@ -66,7 +66,6 @@ export default function CategoriesPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          slug: newCategory.slug.trim().toLowerCase(),
           name: newCategory.name.trim(),
           description: newCategory.description.trim() || null,
         }),
@@ -75,7 +74,7 @@ export default function CategoriesPage() {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || '创建分类失败');
       }
-      setNewCategory({ slug: '', name: '', description: '' });
+      setNewCategory({ name: '', description: '' });
       await loadCategories();
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建分类失败');
@@ -103,6 +102,23 @@ export default function CategoriesPage() {
     }
   };
 
+  const handleRename = async (category: Category) => {
+    const name = window.prompt('新的分类名称', category.name)?.trim();
+    if (!name || name === category.name) return;
+    setError('');
+    try {
+      const res = await fetch(`/api/categories/${category.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error('重命名失败');
+      await loadCategories();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重命名失败');
+    }
+  };
+
   return (
     <main className="container mx-auto p-4">
       <Link href="/documents" className="text-blue-600 hover:underline">← 返回资料列表</Link>
@@ -116,16 +132,7 @@ export default function CategoriesPage() {
 
       <section className="mt-6 rounded-xl border border-slate-200 bg-white p-4">
         <h2 className="text-lg font-semibold">新增分类</h2>
-        <form onSubmit={handleCreate} className="mt-3 grid gap-3 sm:grid-cols-2">
-          <input
-            type="text"
-            placeholder="slug（英文小写）"
-            value={newCategory.slug}
-            onChange={e => setNewCategory(prev => ({ ...prev, slug: e.target.value }))}
-            className="rounded border border-slate-300 px-3 py-2 text-sm font-mono"
-            required
-            disabled={submitting}
-          />
+        <form onSubmit={handleCreate} className="mt-3 grid gap-3">
           <input
             type="text"
             placeholder="分类名称"
@@ -140,13 +147,13 @@ export default function CategoriesPage() {
             placeholder="描述（可选）"
             value={newCategory.description}
             onChange={e => setNewCategory(prev => ({ ...prev, description: e.target.value }))}
-            className="rounded border border-slate-300 px-3 py-2 text-sm sm:col-span-2"
+            className="rounded border border-slate-300 px-3 py-2 text-sm"
             disabled={submitting}
           />
           <button
             type="submit"
             disabled={submitting}
-            className="rounded bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50 sm:col-span-2"
+            className="rounded bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
           >
             {submitting ? '保存中…' : '保存分类'}
           </button>
@@ -161,7 +168,6 @@ export default function CategoriesPage() {
             <thead>
               <tr className="border-b border-slate-200 text-left text-slate-500">
                 <th className="py-2 pr-2">分类</th>
-                <th className="py-2 pr-2">slug</th>
                 <th className="py-2 pr-2">资料数</th>
                 <th className="py-2 pr-2">操作</th>
               </tr>
@@ -175,9 +181,15 @@ export default function CategoriesPage() {
                       <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">默认</span>
                     )}
                   </td>
-                  <td className="py-2 pr-2 font-mono text-xs text-slate-500">{category.slug}</td>
                   <td className="py-2 pr-2 text-slate-500">{category.document_count}</td>
                   <td className="py-2 pr-2">
+                    <button
+                      type="button"
+                      onClick={() => handleRename(category)}
+                      className="mr-2 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                    >
+                      重命名
+                    </button>
                     <button
                       type="button"
                       onClick={() => handleDelete(category)}

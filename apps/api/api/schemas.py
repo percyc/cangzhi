@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BlobResponse(BaseModel):
@@ -113,3 +113,24 @@ class DocumentCategoryUpdateRequest(BaseModel):
 
 class DocumentBatchActionRequest(BaseModel):
     document_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class DocumentBatchOrganizeRequest(DocumentBatchActionRequest):
+    category_id: int | None = None
+    add_tag_ids: list[int] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def require_an_action(self):
+        if self.category_id is None and not self.add_tag_ids:
+            raise ValueError("请选择分类或标签")
+        return self
+
+
+class DocumentMetadataUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=1024)
+    description: str | None = Field(default=None, max_length=5000)
+    summary: str | None = Field(default=None, max_length=20000)
+
+
+class DocumentTagsUpdateRequest(BaseModel):
+    tag_ids: list[int] = Field(default_factory=list, max_length=100)

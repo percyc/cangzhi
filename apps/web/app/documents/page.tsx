@@ -19,6 +19,7 @@ type DocumentTag = {
   slug: string;
   name: string;
 };
+type OrganizeOption = { id: number; name: string };
 
 type DocumentVersion = {
   id: number;
@@ -73,6 +74,10 @@ export default function DocumentsListPage() {
   const [manageMode, setManageMode] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
   const [categoryId, setCategoryId] = useState<number | null>(null);
+  const [categoryOptions, setCategoryOptions] = useState<OrganizeOption[]>([]);
+  const [tagOptions, setTagOptions] = useState<OrganizeOption[]>([]);
+  const [batchCategoryId, setBatchCategoryId] = useState('');
+  const [batchTagId, setBatchTagId] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [acting, setActing] = useState(false);
@@ -101,6 +106,27 @@ export default function DocumentsListPage() {
     return () => window.clearTimeout(timer);
   }, [load]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all([
+      fetch('/api/categories', { signal: controller.signal }).then((response) =>
+        response.ok ? response.json() : Promise.reject(new Error('分类读取失败')),
+      ),
+      fetch('/api/tags', { signal: controller.signal }).then((response) =>
+        response.ok ? response.json() : Promise.reject(new Error('标签读取失败')),
+      ),
+    ])
+      .then(([categories, tags]) => {
+        setCategoryOptions(categories as OrganizeOption[]);
+        setTagOptions(tags as OrganizeOption[]);
+      })
+      .catch((caught) => {
+        if (!controller.signal.aborted)
+          setError(caught instanceof Error ? caught.message : '整理选项读取失败');
+      });
+    return () => controller.abort();
+  }, []);
+
   const runBatchAction = async () => {
     if (!selected.length) return;
     const action = view === 'trash' ? 'restore' : 'trash';
@@ -116,6 +142,53 @@ export default function DocumentsListPage() {
         body: JSON.stringify({ document_ids: selected }),
       });
       if (!response.ok) throw new Error(action === 'trash' ? '删除失败' : '恢复失败');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '操作失败');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const organizeSelected = async () => {
+    if (!selected.length || (!batchCategoryId && !batchTagId)) return;
+    setActing(true);
+    try {
+      const response = await fetch('/api/documents/batch/organize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document_ids: selected,
+          category_id: batchCategoryId ? Number(batchCategoryId) : null,
+          add_tag_ids: batchTagId ? [Number(batchTagId)] : [],
+        }),
+      });
+      if (!response.ok) throw new Error('批量整理失败');
+      setBatchCategoryId('');
+      setBatchTagId('');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '批量整理失败');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const updateSingleState = async (document: Document) => {
+    const restoring = view === 'trash';
+    if (
+      !restoring &&
+      !window.confirm(`确定将“${document.title}”移入回收站吗？`)
+    ) return;
+    setActing(true);
+    try {
+      const response = await fetch(
+        restoring
+          ? `/api/documents/${document.id}/restore`
+          : `/api/documents/${document.id}`,
+        { method: restoring ? 'POST' : 'DELETE' },
+      );
+      if (!response.ok) throw new Error(restoring ? '恢复失败' : '删除失败');
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '操作失败');
@@ -140,7 +213,7 @@ export default function DocumentsListPage() {
     <main className="container mx-auto p-4">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">资料库</h1>
+          <h1 className="text-2xl font-bold">知识库</h1>
           <p className="mt-1 text-sm text-slate-500">选择资料可批量管理；删除后先进入回收站。</p>
         </div>
         <div className="flex rounded-lg border border-slate-300 bg-white p-1 text-sm">
@@ -163,28 +236,16 @@ export default function DocumentsListPage() {
           搜索资料
         </Link>
         <Link
-          href="/notes/new"
-          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
-        >
-          记录一个想法
-        </Link>
-        <Link
-          href="/files/upload"
-          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
-        >
-          上传文件
-        </Link>
-        <Link
-          href="/links/new"
-          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
-        >
-          收藏链接
-        </Link>
-        <Link
           href="/categories"
           className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
         >
           分类管理
+        </Link>
+        <Link
+          href="/tags"
+          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
+        >
+          标签管理
         </Link>
       </div>}
 
@@ -210,6 +271,21 @@ export default function DocumentsListPage() {
                 全选当前结果
               </label>
               <span className="text-slate-500">已选 {selected.length} 条</span>
+              {view === 'active' && (
+                <>
+                  <select value={batchCategoryId} onChange={(event) => setBatchCategoryId(event.target.value)} className="rounded border border-slate-300 px-2 py-1.5">
+                    <option value="">主分类不变</option>
+                    {categoryOptions.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+                  </select>
+                  <select value={batchTagId} onChange={(event) => setBatchTagId(event.target.value)} className="max-w-48 rounded border border-slate-300 px-2 py-1.5">
+                    <option value="">不添加标签</option>
+                    {tagOptions.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+                  </select>
+                  <button type="button" disabled={!selected.length || (!batchCategoryId && !batchTagId) || acting} onClick={organizeSelected} className="rounded bg-blue-700 px-3 py-1.5 text-white disabled:opacity-40">
+                    应用整理
+                  </button>
+                </>
+              )}
               <button type="button" disabled={!selected.length || acting} onClick={runBatchAction} className={`rounded px-3 py-1.5 text-white disabled:opacity-40 ${view === 'trash' ? 'bg-emerald-700' : 'bg-red-700'}`}>
                 {acting ? '处理中…' : view === 'trash' ? '恢复选中资料' : '移入回收站'}
               </button>
@@ -242,11 +318,24 @@ export default function DocumentsListPage() {
                     <input type="checkbox" checked={selected.includes(doc.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, doc.id] : current.filter((id) => id !== doc.id))} />
                     选择
                   </label>}
-                  <h2 className="text-lg font-semibold text-slate-900">
-                    <Link href={`/documents/${doc.id}`} className="hover:underline">
-                      {doc.title}
-                    </Link>
-                  </h2>
+                  <div className="flex items-start justify-between gap-2">
+                    <h2 className="text-lg font-semibold text-slate-900">
+                      <Link href={`/documents/${doc.id}`} className="hover:underline">
+                        {doc.title}
+                      </Link>
+                    </h2>
+                    {!manageMode && (
+                      <details className="relative">
+                        <summary className="cursor-pointer list-none rounded px-2 py-1 text-slate-500 hover:bg-slate-100">•••</summary>
+                        <div className="absolute right-0 z-10 mt-1 w-32 rounded-lg border border-slate-200 bg-white p-1 text-sm shadow-lg">
+                          {view === 'active' && <Link href={`/documents/${doc.id}`} className="block rounded px-2 py-1.5 hover:bg-slate-100">查看与编辑</Link>}
+                          <button type="button" disabled={acting} onClick={() => void updateSingleState(doc)} className={`block w-full rounded px-2 py-1.5 text-left hover:bg-slate-100 ${view === 'trash' ? 'text-emerald-700' : 'text-red-700'}`}>
+                            {view === 'trash' ? '恢复资料' : '移入回收站'}
+                          </button>
+                        </div>
+                      </details>
+                    )}
+                  </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                     <span className="rounded-full bg-slate-100 px-2 py-0.5">
                       {doc.origin?.kind === 'webdav'

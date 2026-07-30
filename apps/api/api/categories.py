@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Annotated
 
@@ -9,7 +10,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
-from ..models.documents import Document
 from ..models.taxonomy import (
     Category,
     DocumentCategory,
@@ -32,7 +32,7 @@ def _validate_slug(value: str) -> str:
 
 
 class CategoryCreate(BaseModel):
-    slug: Annotated[str, Field(min_length=1, max_length=64)]
+    slug: Annotated[str | None, Field(default=None, min_length=1, max_length=64)]
     name: Annotated[str, Field(min_length=1, max_length=255)]
     description: str | None = Field(default=None, max_length=2000)
     parent_id: int | None = None
@@ -40,7 +40,9 @@ class CategoryCreate(BaseModel):
 
     @field_validator("slug")
     @classmethod
-    def _slug_format(cls, value: str) -> str:
+    def _slug_format(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         cleaned = (value or "").strip().lower()
         return _validate_slug(cleaned)
 
@@ -123,7 +125,8 @@ async def create_category(
     data: CategoryCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    existing = await db.scalar(select(Category).where(Category.slug == data.slug))
+    slug = data.slug or f"category-{hashlib.sha1(data.name.strip().encode()).hexdigest()[:12]}"
+    existing = await db.scalar(select(Category).where(Category.slug == slug))
     if existing is not None:
         raise HTTPException(status_code=409, detail="分类 slug 已存在")
     if data.parent_id is not None:
@@ -131,7 +134,7 @@ async def create_category(
         if parent is None:
             raise HTTPException(status_code=400, detail="父分类不存在")
     category = Category(
-        slug=data.slug,
+        slug=slug,
         name=data.name.strip(),
         description=data.description,
         parent_id=data.parent_id,
@@ -215,7 +218,6 @@ async def delete_category(category_id: int, db: AsyncSession = Depends(get_db)):
 
     await db.delete(category)
     await db.commit()
-    return None
 
 
 @router.get("/{category_id}/documents", response_model=list[int])
@@ -240,15 +242,26 @@ async def list_category_documents(
 
 
 class TagCreate(BaseModel):
-    slug: Annotated[str, Field(min_length=1, max_length=64)]
+    slug: Annotated[str | None, Field(default=None, min_length=1, max_length=64)]
     name: Annotated[str, Field(min_length=1, max_length=255)]
     description: str | None = Field(default=None, max_length=2000)
 
     @field_validator("slug")
     @classmethod
-    def _slug_format(cls, value: str) -> str:
+    def _slug_format(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         cleaned = (value or "").strip().lower()
         return _validate_slug(cleaned)
+
+
+class TagUpdate(BaseModel):
+    name: Annotated[str | None, Field(default=None, min_length=1, max_length=255)]
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class TagMerge(BaseModel):
+    target_tag_id: int
 
 
 class TagResponse(BaseModel):
@@ -271,11 +284,12 @@ async def list_tags(db: AsyncSession = Depends(get_db)):
 
 @tags_router.post("", response_model=TagResponse, status_code=201)
 async def create_tag(data: TagCreate, db: AsyncSession = Depends(get_db)):
-    existing = await db.scalar(select(Tag).where(Tag.slug == data.slug))
+    slug = data.slug or f"tag-{hashlib.sha1(data.name.strip().encode()).hexdigest()[:12]}"
+    existing = await db.scalar(select(Tag).where(Tag.slug == slug))
     if existing is not None:
         raise HTTPException(status_code=409, detail="标签 slug 已存在")
     tag = Tag(
-        slug=data.slug,
+        slug=slug,
         name=data.name.strip(),
         description=data.description,
     )
@@ -283,6 +297,63 @@ async def create_tag(data: TagCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(tag)
     return TagResponse.model_validate(tag)
+
+
+@tags_router.patch("/{tag_id}", response_model=TagResponse)
+async def update_tag(
+    tag_id: int,
+    data: TagUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    tag = await db.get(Tag, tag_id)
+    if tag is None:
+        raise HTTPException(status_code=404, detail="标签不存在")
+    if data.name is not None:
+        tag.name = data.name.strip()
+    if "description" in data.model_fields_set:
+        tag.description = data.description
+    await db.commit()
+    await db.refresh(tag)
+    return TagResponse.model_validate(tag)
+
+
+@tags_router.post("/{tag_id}/merge", response_model=TagResponse)
+async def merge_tag(
+    tag_id: int,
+    data: TagMerge,
+    db: AsyncSession = Depends(get_db),
+):
+    if tag_id == data.target_tag_id:
+        raise HTTPException(status_code=400, detail="不能合并到自身")
+    source = await db.get(Tag, tag_id)
+    target = await db.get(Tag, data.target_tag_id)
+    if source is None or target is None:
+        raise HTTPException(status_code=404, detail="标签不存在")
+    links = (
+        (
+            await db.execute(
+                select(DocumentTag).where(DocumentTag.tag_id == source.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for link in links:
+        existing = await db.scalar(
+            select(DocumentTag.id).where(
+                DocumentTag.document_version_id == link.document_version_id,
+                DocumentTag.tag_id == target.id,
+            )
+        )
+        if existing is not None:
+            await db.delete(link)
+        else:
+            link.tag_id = target.id
+    await db.flush()
+    await db.delete(source)
+    await db.commit()
+    await db.refresh(target)
+    return TagResponse.model_validate(target)
 
 
 @tags_router.delete("/{tag_id}", status_code=204)
@@ -302,4 +373,3 @@ async def delete_tag(tag_id: int, db: AsyncSession = Depends(get_db)):
         )
     await db.delete(tag)
     await db.commit()
-    return None

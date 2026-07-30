@@ -86,6 +86,11 @@ type CategoryOption = {
   slug: string;
   name: string;
 };
+type TagOption = {
+  id: number;
+  slug: string;
+  name: string;
+};
 
 type Document = {
   id: number;
@@ -139,6 +144,7 @@ export default function DocumentDetailPage() {
   const [latestJob, setLatestJob] = useState<ProcessingJob | null>(null);
   const [pipeline, setPipeline] = useState<ProcessingPipeline | null>(null);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
+  const [tagOptions, setTagOptions] = useState<TagOption[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | ''>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -146,6 +152,11 @@ export default function DocumentDetailPage() {
   const [savingCategory, setSavingCategory] = useState(false);
   const [categoryMessage, setCategoryMessage] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [editingMetadata, setEditingMetadata] = useState(false);
+  const [savingMetadata, setSavingMetadata] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftSummary, setDraftSummary] = useState('');
+  const [draftTagIds, setDraftTagIds] = useState<number[]>([]);
 
   const handleDelete = async () => {
     if (!window.confirm('确定删除这条资料吗？资料将进入回收站，可以恢复。')) return;
@@ -165,7 +176,7 @@ export default function DocumentDetailPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [documentResponse, jobResponse, pipelineResponse, categoriesResponse] =
+      const [documentResponse, jobResponse, pipelineResponse, categoriesResponse, tagsResponse] =
         await Promise.all([
           fetch(`/api/documents/${params.id}`, { cache: 'no-store' }),
           fetch(`/api/documents/${params.id}/latest-job`, { cache: 'no-store' }),
@@ -173,6 +184,7 @@ export default function DocumentDetailPage() {
             cache: 'no-store',
           }),
           fetch(`/api/categories`, { cache: 'no-store' }),
+          fetch(`/api/tags`, { cache: 'no-store' }),
         ]);
       if (!documentResponse.ok) {
         throw new Error(documentResponse.status === 404 ? '资料不存在' : '读取失败');
@@ -180,13 +192,18 @@ export default function DocumentDetailPage() {
       if (!jobResponse.ok) throw new Error('读取处理状态失败');
       if (!pipelineResponse.ok) throw new Error('读取处理进度失败');
       if (!categoriesResponse.ok) throw new Error('读取分类失败');
+      if (!tagsResponse.ok) throw new Error('读取标签失败');
       const documentBody = (await documentResponse.json()) as Document;
       setDocument(documentBody);
       setLatestJob(await jobResponse.json());
       setPipeline((await pipelineResponse.json()) as ProcessingPipeline);
       const categoryBody = (await categoriesResponse.json()) as CategoryOption[];
       setCategories(categoryBody);
+      setTagOptions((await tagsResponse.json()) as TagOption[]);
       setSelectedCategoryId(documentBody.primary_category?.id ?? '');
+      setDraftTitle(documentBody.title);
+      setDraftSummary(documentBody.summary?.summary ?? '');
+      setDraftTagIds(documentBody.tags.map((tag) => tag.id));
       setError('');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '读取失败');
@@ -252,6 +269,38 @@ export default function DocumentDetailPage() {
     }
   };
 
+  const handleSaveMetadata = async () => {
+    if (!draftTitle.trim()) return;
+    setSavingMetadata(true);
+    setError('');
+    try {
+      const metadataResponse = await fetch(
+        `/api/documents/${params.id}/metadata`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: draftTitle.trim(),
+            summary: draftSummary,
+          }),
+        },
+      );
+      if (!metadataResponse.ok) throw new Error('标题或摘要保存失败');
+      const tagsResponse = await fetch(`/api/documents/${params.id}/tags`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag_ids: draftTagIds }),
+      });
+      if (!tagsResponse.ok) throw new Error('标签保存失败');
+      setDocument((await tagsResponse.json()) as Document);
+      setEditingMetadata(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '整理信息保存失败');
+    } finally {
+      setSavingMetadata(false);
+    }
+  };
+
   if (loading) {
     return <main className="container mx-auto p-4"><p>加载中…</p></main>;
   }
@@ -273,7 +322,12 @@ export default function DocumentDetailPage() {
     <main className="container mx-auto p-4">
       <Link href="/documents" className="text-blue-600 hover:underline">← 返回资料列表</Link>
 
-      <h1 className="mt-4 text-2xl font-bold text-slate-900">{document.title}</h1>
+      <div className="mt-4 flex flex-wrap items-start justify-between gap-3">
+        <h1 className="text-2xl font-bold text-slate-900">{document.title}</h1>
+        <button type="button" onClick={() => setEditingMetadata((value) => !value)} className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50">
+          {editingMetadata ? '取消编辑' : '编辑整理信息'}
+        </button>
+      </div>
       <div className="mt-2 flex flex-wrap gap-3 text-sm text-slate-500">
         <span>类型：{sourceTypeLabels[document.source_type] || document.source_type}</span>
         <span>创建：{new Date(document.created_at).toLocaleString('zh-CN')}</span>
@@ -299,6 +353,38 @@ export default function DocumentDetailPage() {
           </span>
         )}
       </div>
+
+      {editingMetadata && (
+        <section className="mt-4 rounded-xl border border-blue-200 bg-blue-50/40 p-4">
+          <h2 className="font-semibold text-slate-900">编辑整理信息</h2>
+          <label className="mt-3 block text-sm text-slate-700">
+            标题
+            <input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2" />
+          </label>
+          <label className="mt-3 block text-sm text-slate-700">
+            摘要
+            <textarea value={draftSummary} onChange={(event) => setDraftSummary(event.target.value)} rows={4} className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2" />
+          </label>
+          <div className="mt-3">
+            <p className="text-sm text-slate-700">标签</p>
+            <div className="mt-2 max-h-40 overflow-y-auto rounded border border-slate-200 bg-white p-2">
+              <div className="flex flex-wrap gap-2">
+                {tagOptions.map((tag) => {
+                  const selected = draftTagIds.includes(tag.id);
+                  return (
+                    <button key={tag.id} type="button" onClick={() => setDraftTagIds((current) => selected ? current.filter((id) => id !== tag.id) : [...current, tag.id])} className={`rounded-full border px-2 py-1 text-xs ${selected ? 'border-blue-700 bg-blue-700 text-white' : 'border-slate-300 text-slate-600'}`}>
+                      #{tag.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+          <button type="button" disabled={savingMetadata || !draftTitle.trim()} onClick={handleSaveMetadata} className="mt-4 rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50">
+            {savingMetadata ? '保存中…' : '保存整理信息'}
+          </button>
+        </section>
+      )}
 
       {document.source_url && (
         <div className="mt-3 text-sm">

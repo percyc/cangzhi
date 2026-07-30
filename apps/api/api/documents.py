@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
@@ -21,10 +21,13 @@ from .schemas import (
     BlobResponse,
     CategoryMini,
     DocumentBatchActionRequest,
+    DocumentBatchOrganizeRequest,
     DocumentCategoryUpdateRequest,
+    DocumentMetadataUpdateRequest,
     DocumentReprocessResponse,
     DocumentResponse,
     DocumentSummaryResponse,
+    DocumentTagsUpdateRequest,
     DocumentVersionResponse,
     ProcessingJobResponse,
     TagMini,
@@ -262,6 +265,92 @@ async def restore_documents(
     return {"ok": True, "affected": len(documents)}
 
 
+@router.post("/batch/organize", response_model=dict)
+async def organize_documents(
+    payload: DocumentBatchOrganizeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    documents = (
+        (
+            await db.execute(
+                select(Document).where(
+                    Document.id.in_(payload.document_ids),
+                    Document.is_deleted.is_(False),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    category = (
+        await db.get(Category, payload.category_id)
+        if payload.category_id is not None
+        else None
+    )
+    if payload.category_id is not None and category is None:
+        raise HTTPException(status_code=404, detail="分类不存在")
+    tags = (
+        (
+            await db.execute(select(Tag).where(Tag.id.in_(payload.add_tag_ids)))
+        )
+        .scalars()
+        .all()
+        if payload.add_tag_ids
+        else []
+    )
+    if len(tags) != len(set(payload.add_tag_ids)):
+        raise HTTPException(status_code=404, detail="部分标签不存在")
+
+    affected = 0
+    for document in documents:
+        if document.current_version_id is None:
+            continue
+        if category is not None:
+            await db.execute(
+                delete(DocumentCategory).where(
+                    DocumentCategory.document_version_id
+                    == document.current_version_id
+                )
+            )
+            db.add(
+                DocumentCategory(
+                    document_id=document.id,
+                    document_version_id=document.current_version_id,
+                    category_id=category.id,
+                    is_primary=True,
+                    confidence=1.0,
+                    source="user",
+                )
+            )
+        if tags:
+            existing_tag_ids = set(
+                (
+                    await db.execute(
+                        select(DocumentTag.tag_id).where(
+                            DocumentTag.document_version_id
+                            == document.current_version_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for tag in tags:
+                if tag.id not in existing_tag_ids:
+                    db.add(
+                        DocumentTag(
+                            document_id=document.id,
+                            document_version_id=document.current_version_id,
+                            tag_id=tag.id,
+                            confidence=1.0,
+                            source="user",
+                        )
+                    )
+        affected += 1
+    await db.commit()
+    return {"ok": True, "affected": affected}
+
+
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
     document_id: int,
@@ -270,6 +359,93 @@ async def get_document(
     document = await db.get(Document, document_id)
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="资料不存在")
+    return await build_document_response(db, document)
+
+
+@router.patch("/{document_id}/metadata", response_model=DocumentResponse)
+async def update_document_metadata(
+    document_id: int,
+    payload: DocumentMetadataUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    document = await db.get(Document, document_id)
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    if payload.title is not None:
+        document.title = payload.title.strip()
+    if "description" in payload.model_fields_set:
+        document.description = payload.description
+    if "summary" in payload.model_fields_set:
+        if document.current_version_id is None:
+            raise HTTPException(status_code=400, detail="资料没有当前版本")
+        summary = (
+            await db.execute(
+                select(DocumentSummary).where(
+                    DocumentSummary.document_version_id
+                    == document.current_version_id
+                )
+            )
+        ).scalar_one_or_none()
+        value = (payload.summary or "").strip()
+        if not value and summary is not None:
+            await db.delete(summary)
+        elif value:
+            if summary is None:
+                summary = DocumentSummary(
+                    document_id=document.id,
+                    document_version_id=document.current_version_id,
+                    summary=value,
+                    source="user",
+                )
+                db.add(summary)
+            else:
+                summary.summary = value
+                summary.source = "user"
+                summary.confidence = 1.0
+    await db.commit()
+    await db.refresh(document)
+    return await build_document_response(db, document)
+
+
+@router.patch("/{document_id}/tags", response_model=DocumentResponse)
+async def update_document_tags(
+    document_id: int,
+    payload: DocumentTagsUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    document = await db.get(Document, document_id)
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    if document.current_version_id is None:
+        raise HTTPException(status_code=400, detail="资料没有当前版本")
+    tags = (
+        (
+            await db.execute(select(Tag).where(Tag.id.in_(payload.tag_ids)))
+        )
+        .scalars()
+        .all()
+        if payload.tag_ids
+        else []
+    )
+    if len(tags) != len(set(payload.tag_ids)):
+        raise HTTPException(status_code=404, detail="部分标签不存在")
+    await db.execute(
+        delete(DocumentTag).where(
+            DocumentTag.document_version_id == document.current_version_id
+        )
+    )
+    for tag in tags:
+        db.add(
+            DocumentTag(
+                document_id=document.id,
+                document_version_id=document.current_version_id,
+                tag_id=tag.id,
+                confidence=1.0,
+                source="user",
+            )
+        )
+    await db.commit()
+    await db.refresh(document)
     return await build_document_response(db, document)
 
 

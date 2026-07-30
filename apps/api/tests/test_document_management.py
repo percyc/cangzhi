@@ -35,3 +35,51 @@ def test_document_trash_restore_and_batch_management(client):
     assert restored.status_code == 200
     assert restored.json()["affected"] == 2
     assert len(test_client.get("/api/documents").json()) == 2
+
+
+def test_document_metadata_tags_and_batch_organization(client):
+    test_client, _storage = client
+    first = test_client.post(
+        "/api/notes", json={"title": "原始标题", "content": "第一条知识"}
+    ).json()
+    second = test_client.post(
+        "/api/notes", json={"title": "第二条", "content": "第二条知识"}
+    ).json()
+    category = test_client.post(
+        "/api/categories",
+        json={"slug": "research", "name": "研究资料"},
+    ).json()
+    tag = test_client.post(
+        "/api/tags",
+        json={"slug": "important", "name": "重要"},
+    ).json()
+
+    updated = test_client.patch(
+        f"/api/documents/{first['id']}/metadata",
+        json={"title": "修正标题", "summary": "用户修正后的摘要"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "修正标题"
+    assert updated.json()["summary"]["summary"] == "用户修正后的摘要"
+    assert updated.json()["summary"]["source"] == "user"
+
+    organized = test_client.post(
+        "/api/documents/batch/organize",
+        json={
+            "document_ids": [first["id"], second["id"]],
+            "category_id": category["id"],
+            "add_tag_ids": [tag["id"]],
+        },
+    )
+    assert organized.status_code == 200
+    for document_id in (first["id"], second["id"]):
+        document = test_client.get(f"/api/documents/{document_id}").json()
+        assert document["primary_category"]["id"] == category["id"]
+        assert [item["id"] for item in document["tags"]] == [tag["id"]]
+
+    cleared = test_client.patch(
+        f"/api/documents/{first['id']}/tags",
+        json={"tag_ids": []},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["tags"] == []
