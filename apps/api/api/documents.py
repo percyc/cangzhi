@@ -1,7 +1,10 @@
+from io import BytesIO
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.config import settings
 from ..core.db import get_db
 from ..models.auth import AIRuntimeConfig
 from ..models.blobs import Blob
@@ -16,7 +19,12 @@ from ..models.taxonomy import (
     DocumentTag,
     Tag,
 )
-from ..models.webdav import WebDAVSource
+from ..models.webdav import WebDAVEntry, WebDAVSource
+from ..security.secrets import decrypt_secret
+from ..security.url_safety import URLSecurityError
+from ..services.webdav import WebDAVError, download_file
+from ..storage import get_storage
+from ..storage.base import BlobStorage
 from .schemas import (
     BlobResponse,
     CategoryMini,
@@ -179,12 +187,16 @@ async def build_document_response(
             if isinstance(connector_id, int)
             else None
         )
+        source_entry = await db.scalar(
+            select(WebDAVEntry).where(WebDAVEntry.document_id == document.id)
+        )
         origin = {
             "kind": "webdav",
             "label": connector.name if connector else "已删除的 WebDAV 连接器",
             "connector_id": connector_id,
             "remote_path": document_meta.get("webdav_path"),
             "connector_available": connector is not None,
+            "source_status": source_entry.state if source_entry else None,
         }
 
     return DocumentResponse(
@@ -241,6 +253,12 @@ async def trash_documents(
     )
     for document in documents:
         document.is_deleted = True
+    if documents:
+        await db.execute(
+            update(WebDAVEntry)
+            .where(WebDAVEntry.document_id.in_([item.id for item in documents]))
+            .values(state="ignored")
+        )
     await db.commit()
     return {"ok": True, "affected": len(documents)}
 
@@ -261,6 +279,12 @@ async def restore_documents(
     )
     for document in documents:
         document.is_deleted = False
+    if documents:
+        await db.execute(
+            update(WebDAVEntry)
+            .where(WebDAVEntry.document_id.in_([item.id for item in documents]))
+            .values(state="synced")
+        )
     await db.commit()
     return {"ok": True, "affected": len(documents)}
 
@@ -458,6 +482,11 @@ async def trash_document(
     if document is None:
         raise HTTPException(status_code=404, detail="资料不存在")
     document.is_deleted = True
+    await db.execute(
+        update(WebDAVEntry)
+        .where(WebDAVEntry.document_id == document.id)
+        .values(state="ignored")
+    )
     await db.commit()
     return {"ok": True, "message": "资料已移入回收站"}
 
@@ -471,6 +500,11 @@ async def restore_document(
     if document is None:
         raise HTTPException(status_code=404, detail="资料不存在")
     document.is_deleted = False
+    await db.execute(
+        update(WebDAVEntry)
+        .where(WebDAVEntry.document_id == document.id)
+        .values(state="synced")
+    )
     await db.commit()
     return {"ok": True, "message": "资料已恢复"}
 
@@ -479,6 +513,7 @@ async def restore_document(
 async def reprocess_document(
     document_id: int,
     db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
 ):
     document = await db.get(Document, document_id)
     if document is None or document.is_deleted:
@@ -489,6 +524,65 @@ async def reprocess_document(
     version = await db.get(DocumentVersion, document.current_version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="当前版本不存在")
+
+    document_meta = document.meta or {}
+    if (
+        document_meta.get("external_source") == "webdav"
+        and version.blob_id is None
+    ):
+        source_id = document_meta.get("webdav_source_id")
+        source = (
+            await db.get(WebDAVSource, source_id)
+            if isinstance(source_id, int)
+            else None
+        )
+        entry = (
+            await db.scalar(
+                select(WebDAVEntry).where(
+                    WebDAVEntry.document_id == document.id,
+                    WebDAVEntry.source_id == source_id,
+                )
+            )
+            if source is not None
+            else None
+        )
+        if source is None or entry is None:
+            raise HTTPException(
+                status_code=409,
+                detail="原 WebDAV 连接器已不存在，无法重新获取原文件",
+            )
+        try:
+            payload, upstream_type = await download_file(
+                base_url=source.base_url,
+                remote_path=entry.remote_path,
+                username=source.username,
+                password=decrypt_secret(source.password_cipher),
+                trusted_private_network=source.trusted_private_network,
+                max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+            )
+        except (WebDAVError, URLSecurityError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"重新获取 WebDAV 原文件失败：{exc}",
+            ) from None
+        stored = storage.save(
+            BytesIO(payload),
+            max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+        )
+        blob = await db.scalar(select(Blob).where(Blob.sha256 == stored.sha256))
+        if blob is None:
+            blob = Blob(
+                sha256=stored.sha256,
+                storage_key=stored.storage_key,
+                content_type=upstream_type.split(";", 1)[0],
+                file_size=stored.size,
+                original_filename=entry.remote_path.rsplit("/", 1)[-1],
+            )
+            db.add(blob)
+            await db.flush()
+        else:
+            storage.delete(stored.storage_key)
+        version.blob_id = blob.id
 
     idempotency_key = f"{document.id}:{document.current_version_id}:parsing:v1"
     existing_job = (

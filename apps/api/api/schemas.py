@@ -63,6 +63,7 @@ class DocumentOriginResponse(BaseModel):
     connector_id: int | None = None
     remote_path: str | None = None
     connector_available: bool = False
+    source_status: str | None = None
 
 
 class DocumentResponse(BaseModel):

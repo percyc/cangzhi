@@ -232,7 +232,7 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
             )
         ).scalars()
     }
-    discovered = changed = unchanged = 0
+    discovered = changed = unchanged = ignored = 0
     seen: set[str] = set()
     for remote_entry in files:
         seen.add(remote_entry.path)
@@ -245,6 +245,8 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
             )
             db.add(entry)
             discovered += 1
+        elif entry.state == "ignored":
+            ignored += 1
         elif (
             entry.etag != remote_entry.etag
             or entry.last_modified != remote_entry.last_modified
@@ -261,7 +263,7 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         entry.last_seen_at = now
     missing = 0
     for path, entry in existing.items():
-        if path not in seen:
+        if path not in seen and entry.state != "ignored":
             entry.state = "missing"
             missing += 1
     source.sync_status = "idle"
@@ -272,6 +274,7 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         "discovered": discovered,
         "changed": changed,
         "unchanged": unchanged,
+        "ignored": ignored,
         "missing": missing,
         "eligible_files": len(files),
     }

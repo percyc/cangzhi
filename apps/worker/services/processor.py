@@ -4,7 +4,7 @@ import datetime
 import hashlib
 
 import structlog
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from apps.api.ai import (
@@ -1233,6 +1233,7 @@ def _process_parsing(
             }
             session.add(version)
         session.commit()
+        _release_webdav_source_blob(session, version)
         logger.info(
             "parse_completed",
             job_id=job.id,
@@ -1245,6 +1246,39 @@ def _process_parsing(
         return _mark_parse_failure(
             session, job, version, "处理任务发生异常", {"exception": str(exc)}
         )
+
+
+def _release_webdav_source_blob(
+    session: Session,
+    version: DocumentVersion,
+) -> None:
+    """Release the temporary WebDAV original after parsed content is durable."""
+
+    if (
+        (version.meta or {}).get("external_source") != "webdav"
+        or version.blob_id is None
+    ):
+        return
+    blob = session.get(Blob, version.blob_id)
+    if blob is None:
+        version.blob_id = None
+        session.commit()
+        return
+    blob_id = blob.id
+    storage_key = blob.storage_key
+    version.blob_id = None
+    session.add(version)
+    session.commit()
+    remaining = session.scalar(
+        select(func.count(DocumentVersion.id)).where(
+            DocumentVersion.blob_id == blob_id
+        )
+    )
+    if remaining:
+        return
+    session.delete(blob)
+    session.commit()
+    LocalBlobStorage(settings.storage_path).delete(storage_key)
 
 
 def _apply_parse_result(

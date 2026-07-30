@@ -235,7 +235,7 @@ function statusLabel(value: string) {
   return ({ idle: '空闲', scanning: '扫描中', syncing: '同步中', failed: '有失败' } as Record<string, string>)[value] ?? value;
 }
 function entryState(value: string) {
-  return ({ discovered: '待同步', changed: '有更新', synced: '已同步', failed: '失败', missing: '远端已删除' } as Record<string, string>)[value] ?? value;
+  return ({ discovered: '待同步', changed: '有更新', synced: '已同步', failed: '失败', missing: '远端已删除', ignored: '已从知识库排除' } as Record<string, string>)[value] ?? value;
 }
 function formatSize(value: number | null) {
   if (value == null) return '—';

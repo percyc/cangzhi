@@ -1,4 +1,8 @@
-from apps.api.services.webdav import parse_multistatus, validate_webdav_url
+from apps.api.services.webdav import (
+    RemoteEntry,
+    parse_multistatus,
+    validate_webdav_url,
+)
 
 
 def test_parse_webdav_multistatus():
@@ -58,3 +62,46 @@ def test_created_webdav_source_is_returned_in_connector_list(client):
     deleted = test_client.delete(f"/api/webdav/{body[0]['id']}")
     assert deleted.status_code == 200
     assert test_client.get("/api/webdav").json() == []
+
+
+def test_deleted_webdav_document_is_not_rediscovered(client, monkeypatch):
+    test_client, _storage = client
+    source = test_client.post(
+        "/api/webdav",
+        json={
+            "name": "只读知识源",
+            "base_url": "https://dav.example.com/",
+            "username": "reader",
+            "password": "secret",
+            "root_path": "/knowledge",
+        },
+    ).json()
+
+    async def fake_propfind(**_kwargs):
+        return [
+            RemoteEntry(
+                path="/knowledge/a.md",
+                is_collection=False,
+                etag='"v1"',
+                last_modified="today",
+                size=12,
+                content_type="text/markdown",
+            )
+        ]
+
+    async def fake_download(**_kwargs):
+        return b"# title\nbody", "text/markdown"
+
+    monkeypatch.setattr("apps.api.api.webdav.propfind", fake_propfind)
+    monkeypatch.setattr("apps.api.api.webdav.download_file", fake_download)
+    assert test_client.post(f"/api/webdav/{source['id']}/scan").status_code == 200
+    synced = test_client.post(f"/api/webdav/{source['id']}/sync").json()
+    assert synced["imported"] == 1
+    entry = test_client.get(f"/api/webdav/{source['id']}/entries").json()[0]
+
+    assert test_client.delete(f"/api/documents/{entry['document_id']}").status_code == 200
+    rescanned = test_client.post(f"/api/webdav/{source['id']}/scan").json()
+    assert rescanned["ignored"] == 1
+    entry = test_client.get(f"/api/webdav/{source['id']}/entries").json()[0]
+    assert entry["state"] == "ignored"
+    assert test_client.post(f"/api/webdav/{source['id']}/sync").json()["imported"] == 0

@@ -8,6 +8,13 @@ type DocumentItem = {
   title: string;
   source_type: string;
   updated_at: string;
+  primary_category: { id: number; slug: string; name: string } | null;
+  origin: {
+    kind: string;
+    label: string;
+    connector_available: boolean;
+    source_status: string | null;
+  } | null;
 };
 
 type Stage = {
@@ -40,6 +47,8 @@ type Filter =
   | 'all'
   | 'processing'
   | 'failed'
+  | 'needs_organization'
+  | 'source_issue'
   | 'not_vectorized'
   | 'completed';
 
@@ -95,12 +104,33 @@ export default function InboxPage() {
       attention: rows.filter(
         (row) =>
           row.pipeline.overall_status !== 'completed' ||
-          !row.pipeline.vector_searchable,
+          !row.pipeline.vector_searchable ||
+          row.document.primary_category?.slug === 'inbox' ||
+          Boolean(
+            row.document.origin &&
+              (!row.document.origin.connector_available ||
+                ['failed', 'missing'].includes(
+                  row.document.origin.source_status ?? '',
+                )),
+          ),
       ).length,
       all: rows.length,
       processing: rows.filter((row) => row.pipeline.overall_status === 'processing')
         .length,
       failed: rows.filter((row) => row.pipeline.overall_status === 'failed').length,
+      needs_organization: rows.filter(
+        (row) => row.document.primary_category?.slug === 'inbox',
+      ).length,
+      source_issue: rows.filter(
+        (row) =>
+          Boolean(
+            row.document.origin &&
+              (!row.document.origin.connector_available ||
+                ['failed', 'missing'].includes(
+                  row.document.origin.source_status ?? '',
+                )),
+          ),
+      ).length,
       not_vectorized: rows.filter((row) => !row.pipeline.vector_searchable).length,
       completed: rows.filter((row) => row.pipeline.overall_status === 'completed')
         .length,
@@ -112,10 +142,28 @@ export default function InboxPage() {
     if (filter === 'attention')
       return (
         row.pipeline.overall_status !== 'completed' ||
-        !row.pipeline.vector_searchable
+        !row.pipeline.vector_searchable ||
+        row.document.primary_category?.slug === 'inbox' ||
+        Boolean(
+          row.document.origin &&
+            (!row.document.origin.connector_available ||
+              ['failed', 'missing'].includes(
+                row.document.origin.source_status ?? '',
+              )),
+        )
       );
     if (filter === 'all') return true;
     if (filter === 'not_vectorized') return !row.pipeline.vector_searchable;
+    if (filter === 'needs_organization')
+      return row.document.primary_category?.slug === 'inbox';
+    if (filter === 'source_issue')
+      return Boolean(
+        row.document.origin &&
+          (!row.document.origin.connector_available ||
+            ['failed', 'missing'].includes(
+              row.document.origin.source_status ?? '',
+            )),
+      );
     return row.pipeline.overall_status === filter;
   });
 
@@ -145,6 +193,8 @@ export default function InboxPage() {
     { key: 'all', label: '全部' },
     { key: 'processing', label: '处理中' },
     { key: 'failed', label: '失败' },
+    { key: 'needs_organization', label: '待整理' },
+    { key: 'source_issue', label: '来源异常' },
     { key: 'not_vectorized', label: '未向量化' },
     { key: 'completed', label: '已完成' },
   ];

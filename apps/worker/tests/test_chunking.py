@@ -1,23 +1,26 @@
 """Tests for the chunking job wired into the worker pipeline."""
 
-import datetime
+from io import BytesIO
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from apps.api.core.db import Base
+from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.parsers.base import Block, StructuredContent
-from apps.api.services.chunker import build_chunk_specs
+from apps.api.storage.local import LocalBlobStorage
+from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
     CHUNKING_STAGE,
     UNDERSTANDING_IDEMPOTENCY,
     UNDERSTANDING_STAGE,
     _clear_understanding_results,
     _process_chunking,
+    _release_webdav_source_blob,
     process_single_job,
 )
 
@@ -58,6 +61,46 @@ def _make_structured_payload():
 
 
 class TestChunkingJob:
+    def test_webdav_original_is_released_after_parsing(
+        self, session, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(worker_settings, "storage_path", str(tmp_path))
+        storage = LocalBlobStorage(tmp_path)
+        stored = storage.save(BytesIO(b"# source"), max_bytes=1024)
+        blob = Blob(
+            sha256=stored.sha256,
+            storage_key=stored.storage_key,
+            content_type="text/markdown",
+            file_size=stored.size,
+            original_filename="source.md",
+        )
+        document = Document(
+            title="WebDAV 临时文件",
+            source_type=DocumentSourceType.file,
+            meta={"external_source": "webdav"},
+        )
+        session.add_all([blob, document])
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            blob_id=blob.id,
+            version_number=1,
+            content_hash=stored.sha256,
+            raw_content="source",
+            structured_content=_make_structured_payload(),
+            processing_status="ready",
+            meta={"external_source": "webdav"},
+        )
+        session.add(version)
+        session.commit()
+
+        _release_webdav_source_blob(session, version)
+
+        session.refresh(version)
+        assert version.blob_id is None
+        assert session.get(Blob, blob.id) is None
+        assert not (tmp_path / stored.storage_key).exists()
+
     def test_process_chunking_persists_parent_and_children(self, session):
         document = Document(
             title="测试文档", source_type=DocumentSourceType.note
