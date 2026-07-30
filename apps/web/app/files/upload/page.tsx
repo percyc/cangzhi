@@ -61,6 +61,7 @@ export default function FileUploadPage() {
 
   const supportedTypes = [
     { ext: '.pdf', name: 'PDF' },
+    { ext: '.doc', name: 'Word DOC' },
     { ext: '.docx', name: 'Word DOCX' },
     { ext: '.md', name: 'Markdown' },
     { ext: '.txt', name: '纯文本 TXT' },

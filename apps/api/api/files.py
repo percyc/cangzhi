@@ -20,6 +20,13 @@ router = APIRouter(prefix="/files", tags=["files"])
 
 _MIME_BY_EXTENSION = {
     ".pdf": {"application/pdf"},
+    ".doc": {
+        "application/msword",
+        "application/doc",
+        "application/vnd.ms-word",
+        "application/vnd.msword",
+        "application/winword",
+    },
     ".docx": {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     },
@@ -40,7 +47,7 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
     if allowed_mimes is None:
         raise HTTPException(
             status_code=415,
-            detail="仅支持 PDF、DOCX、Markdown 和 TXT 文件",
+            detail="仅支持 PDF、DOC、DOCX、Markdown 和 TXT 文件",
         )
     normalized_mime = (content_type or "application/octet-stream").lower()
     if (

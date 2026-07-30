@@ -12,7 +12,7 @@ BlockType = Literal[
     "code_block",
     "blockquote",
 ]
-DocumentType = Literal["note", "txt", "markdown", "pdf", "docx", "html"]
+DocumentType = Literal["note", "txt", "markdown", "pdf", "doc", "docx", "html"]
 
 
 @dataclass
@@ -78,6 +78,7 @@ def get_parser_for_content(
     from .text import TextParser
     from .markdown import MarkdownParser
     from .pdf import PdfParser
+    from .doc import DocParser
     from .docx import DocxParser
     from .html import HtmlParser
 
@@ -90,6 +91,8 @@ def get_parser_for_content(
             return MarkdownParser()
         if lower_name.endswith(".pdf"):
             return PdfParser()
+        if lower_name.endswith(".doc"):
+            return DocParser()
         if lower_name.endswith(".docx"):
             return DocxParser()
         if lower_name.endswith((".html", ".htm")):
@@ -103,6 +106,14 @@ def get_parser_for_content(
         return MarkdownParser()
     if "application/pdf" in content_type:
         return PdfParser()
+    if content_type in {
+        "application/msword",
+        "application/doc",
+        "application/vnd.ms-word",
+        "application/vnd.msword",
+        "application/winword",
+    }:
+        return DocParser()
     if (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         in content_type

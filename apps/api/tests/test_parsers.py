@@ -1,6 +1,7 @@
 from io import BytesIO
 
 from apps.api.parsers import (
+    DocParser,
     DocxParser,
     MarkdownParser,
     NoteParser,
@@ -127,6 +128,58 @@ class TestStructuredContent:
 
 
 class TestOfficeParsers:
+    def test_selects_legacy_doc_parser_by_extension_and_mime(self):
+        assert isinstance(
+            get_parser_for_content("application/octet-stream", "legacy.doc"),
+            DocParser,
+        )
+        assert isinstance(
+            get_parser_for_content("application/msword", None),
+            DocParser,
+        )
+
+    def test_doc_parser_reports_missing_converter(self, monkeypatch):
+        monkeypatch.setattr(
+            "apps.api.parsers.doc.shutil.which",
+            lambda _name: None,
+        )
+
+        result = DocParser().parse(b"legacy word data")
+
+        assert result.success is False
+        assert result.error_details == {"reason": "doc_converter_unavailable"}
+
+    def test_doc_parser_converts_then_preserves_structure(self, monkeypatch):
+        from types import SimpleNamespace
+        from docx import Document
+
+        def fake_run(arguments, **_kwargs):
+            output_directory = arguments[arguments.index("--outdir") + 1]
+            converted = Document()
+            converted.add_heading("旧版合同", level=1)
+            converted.add_paragraph("转换后的正文")
+            converted.save(f"{output_directory}/source.docx")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(
+            "apps.api.parsers.doc.shutil.which",
+            lambda _name: "/usr/bin/soffice",
+        )
+        monkeypatch.setattr(
+            "apps.api.parsers.doc.subprocess.run",
+            fake_run,
+        )
+
+        result = DocParser().parse(b"legacy word data")
+
+        assert result.success is True
+        assert result.structured_content.document_type == "doc"
+        assert result.structured_content.full_text() == "旧版合同\n转换后的正文"
+        assert result.structured_content.metadata == {
+            "source_format": "doc",
+            "converted_format": "docx",
+        }
+
     def test_parse_docx_heading_paragraph_and_table(self):
         from docx import Document
 

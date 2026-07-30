@@ -2,6 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libreoffice-writer \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY apps/api/requirements.txt ./apps/api/
 COPY apps/worker/requirements.txt ./apps/worker/
 RUN pip install --no-cache-dir -r ./apps/api/requirements.txt -r ./apps/worker/requirements.txt

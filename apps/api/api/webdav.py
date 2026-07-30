@@ -29,7 +29,7 @@ from ..storage.base import BlobStorage
 from .files import normalized_filename, validate_file_type
 
 router = APIRouter(prefix="/webdav", tags=["webdav"])
-DEFAULT_EXTENSIONS = [".pdf", ".docx", ".md", ".markdown", ".txt"]
+DEFAULT_EXTENSIONS = [".pdf", ".doc", ".docx", ".md", ".markdown", ".txt"]
 
 
 class SourceCreate(BaseModel):

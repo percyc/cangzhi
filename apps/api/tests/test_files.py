@@ -84,10 +84,15 @@ def test_file_upload_validates_extension_and_mime(client):
         "/api/files/upload",
         files={"file": ("note.md", BytesIO(b"# note"), "application/octet-stream")},
     )
+    legacy_doc = test_client.post(
+        "/api/files/upload",
+        files={"file": ("legacy.doc", BytesIO(b"word"), "application/msword")},
+    )
 
     assert bad_extension.status_code == 415
     assert mismatch.status_code == 415
     assert octet_stream.status_code == 201
+    assert legacy_doc.status_code == 201
 
 
 def test_file_upload_enforces_configured_limit(client, monkeypatch):
