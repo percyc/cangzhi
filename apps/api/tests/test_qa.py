@@ -24,7 +24,13 @@ from apps.api.models.documents import Document, DocumentSourceType, DocumentVers
 from apps.api.models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
-from apps.api.services.qa import AskError, AskRequest, QAService
+from apps.api.services.qa import (
+    AskError,
+    AskRequest,
+    QAService,
+    _expanded_chunk_context,
+    _merge_neighbor_context,
+)
 
 
 # --- fixtures -------------------------------------------------------------
@@ -240,6 +246,85 @@ async def _seed_document(
             )
         await session.commit()
     return document.id
+
+
+def test_neighbor_context_keeps_previous_and_following_meaning_without_duplicates():
+    previous = "前置条件：用户必须完成实名认证。"
+    current = "用户必须完成实名认证。\n\n满足条件后可以提交申请。"
+    following = "满足条件后可以提交申请。\n\n申请将在三个工作日内审核。"
+
+    context = _merge_neighbor_context(previous, current, following)
+
+    assert "前置条件" in context
+    assert "三个工作日内审核" in context
+    assert context.count("用户必须完成实名认证") == 1
+    assert context.count("满足条件后可以提交申请") == 1
+
+
+def test_neighbor_context_is_loaded_from_same_parent(qa_db):
+    async def _run():
+        async with qa_db() as session:
+            document = Document(title="申请流程", source_type=DocumentSourceType.note)
+            session.add(document)
+            await session.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="neighbor-test",
+                processing_status="ready",
+            )
+            session.add(version)
+            await session.flush()
+            document.current_version_id = version.id
+
+            def chunk(*, external_id, role, order, content, parent_id=None):
+                return DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    parent_id=parent_id,
+                    external_id=external_id,
+                    role=role,
+                    chunk_type="paragraph",
+                    order_index=order,
+                    content=content,
+                    search_text=content,
+                    content_hash=chunk_content_hash(content),
+                    heading_path=[],
+                    char_count=len(content),
+                    token_estimate=len(content),
+                    is_current=True,
+                )
+
+            parent = chunk(
+                external_id="parent",
+                role="parent",
+                order=0,
+                content="完整申请流程",
+            )
+            session.add(parent)
+            await session.flush()
+            children = [
+                chunk(
+                    external_id=f"child-{index}",
+                    role="child",
+                    order=index,
+                    content=content,
+                    parent_id=parent.id,
+                )
+                for index, content in enumerate(
+                    ["先实名认证。", "然后提交申请。", "最后等待审核。"]
+                )
+            ]
+            session.add_all(children)
+            await session.commit()
+            return await _expanded_chunk_context(
+                session,
+                children[1],
+                fallback=children[1].content,
+            )
+
+    context = asyncio.run(_run())
+    assert context == "先实名认证。\n\n然后提交申请。\n\n最后等待审核。"
 
 
 def test_qa_service_returns_cited_answer(qa_db):

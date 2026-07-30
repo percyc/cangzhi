@@ -49,6 +49,7 @@ MAX_QUESTION_LENGTH = 500
 MAX_EVIDENCE_ITEMS = 8
 EVIDENCE_SNIPPET_CHARS = 600
 EVIDENCE_TOTAL_CHARS = 4_000
+NEIGHBOR_CONTEXT_CHARS = 180
 CJK_RECALL_LIMIT = MAX_EVIDENCE_ITEMS * 4
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _QUESTION_GRAMS = {
@@ -376,7 +377,11 @@ class QAService:
             ]
         if not rows:
             return [], vector.status.to_dict()
-        evidence = await self._rows_to_evidence(db, rows)
+        evidence = await self._rows_to_evidence(
+            db,
+            rows,
+            question=question,
+        )
         return evidence[:MAX_EVIDENCE_ITEMS], vector.status.to_dict()
 
     async def _recall_postgres(
@@ -608,6 +613,8 @@ class QAService:
         self,
         db: AsyncSession,
         rows,
+        *,
+        question: str,
     ) -> list[Evidence]:
         if not rows:
             return []
@@ -617,14 +624,30 @@ class QAService:
         # and the citation check uses the same set.
         document_ids = sorted({row.document_id for row in rows})
         categories_map, tags_map = await _load_taxonomy(db, document_ids)
+        chunk_ids = [row.chunk_id for row in rows]
+        chunks = {
+            chunk.id: chunk
+            for chunk in (
+                await db.execute(
+                    select(DocumentChunk).where(DocumentChunk.id.in_(chunk_ids))
+                )
+            )
+            .scalars()
+            .all()
+        }
+        terms = normalize_query(question)
 
         evidence: list[Evidence] = []
         budget = EVIDENCE_TOTAL_CHARS
         for index, row in enumerate(rows, start=1):
             if budget <= 0:
                 break
-            content = row.content or ""
-            snippet = _build_snippet(content, terms=None)
+            content = await _expanded_chunk_context(
+                db,
+                chunks.get(row.chunk_id),
+                fallback=row.content or "",
+            )
+            snippet = _build_snippet(content, terms=terms)
             if len(snippet) > EVIDENCE_SNIPPET_CHARS:
                 snippet = snippet[:EVIDENCE_SNIPPET_CHARS] + "…"
             if len(snippet) > budget:
@@ -693,6 +716,79 @@ def _build_snippet(content: str, *, terms: list[str] | None) -> str:
     if end < len(content):
         snippet = snippet + "…"
     return snippet
+
+
+async def _expanded_chunk_context(
+    db: AsyncSession,
+    chunk: DocumentChunk | None,
+    *,
+    fallback: str,
+) -> str:
+    if chunk is None or chunk.parent_id is None:
+        return fallback.strip()
+    neighbors = (
+        (
+            await db.execute(
+                select(DocumentChunk)
+                .where(
+                    DocumentChunk.parent_id == chunk.parent_id,
+                    DocumentChunk.is_current.is_(True),
+                    DocumentChunk.role == "child",
+                    DocumentChunk.order_index.between(
+                        chunk.order_index - 1,
+                        chunk.order_index + 1,
+                    ),
+                )
+                .order_by(DocumentChunk.order_index)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    previous = next(
+        (item.content for item in neighbors if item.order_index < chunk.order_index),
+        "",
+    )
+    following = next(
+        (item.content for item in neighbors if item.order_index > chunk.order_index),
+        "",
+    )
+    return _merge_neighbor_context(
+        previous,
+        chunk.content or fallback,
+        following,
+    )
+
+
+def _merge_neighbor_context(
+    previous: str,
+    current: str,
+    following: str,
+    *,
+    flank_chars: int = NEIGHBOR_CONTEXT_CHARS,
+) -> str:
+    pieces = []
+    if previous:
+        pieces.append(previous[-flank_chars:].strip())
+    pieces.append(current.strip())
+    if following:
+        pieces.append(following[:flank_chars].strip())
+    merged = ""
+    for piece in pieces:
+        if not piece:
+            continue
+        merged = _merge_text_overlap(merged, piece)
+    return merged
+
+
+def _merge_text_overlap(left: str, right: str) -> str:
+    if not left:
+        return right
+    max_overlap = min(len(left), len(right), NEIGHBOR_CONTEXT_CHARS + 2)
+    for size in range(max_overlap, 0, -1):
+        if left[-size:] == right[:size]:
+            return left + right[size:]
+    return f"{left}\n\n{right}"
 
 
 def _detect_backend(db: AsyncSession) -> str:

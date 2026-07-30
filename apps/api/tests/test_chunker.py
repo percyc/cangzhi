@@ -109,6 +109,39 @@ def test_hard_split_preserves_content_hash_consistency():
     assert [s.external_id for s in specs_a] == [s.external_id for s in specs_b]
 
 
+def test_adjacent_children_include_bounded_semantic_overlap():
+    text = "".join(
+        f"第{i}句说明跨切片上下文不能丢失。" for i in range(1, 80)
+    )
+    blocks = [
+        Block(type="paragraph", text=text, heading_path=[], paragraph_index=0),
+    ]
+
+    specs = build_chunk_specs(_structured(blocks))
+    children = [spec for spec in specs if spec.role == "child"]
+
+    assert len(children) > 1
+    for previous, current in zip(children, children[1:]):
+        overlap_chars = current.extra["overlap_prefix_chars"]
+        assert 0 < overlap_chars <= 120
+        prefix = current.content[:overlap_chars]
+        assert previous.content.rstrip().endswith(prefix)
+        assert current.char_count <= 900
+        assert current.extra["core_source_start"] <= current.extra["core_source_end"]
+
+
+def test_overlap_can_be_disabled_for_exact_core_coverage():
+    text = "无标点内容" * 500
+    blocks = [
+        Block(type="paragraph", text=text, heading_path=[], paragraph_index=0),
+    ]
+
+    specs = build_chunk_specs(_structured(blocks), child_overlap_chars=0)
+    children = [spec for spec in specs if spec.role == "child"]
+
+    assert "".join(child.content for child in children) == text
+
+
 def test_paragraph_offsets_increase():
     blocks = [
         Block(type="heading", text="A", heading_path=["A"], level=1, paragraph_index=0),

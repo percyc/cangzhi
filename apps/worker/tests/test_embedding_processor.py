@@ -629,6 +629,28 @@ class TestProcessEmbeddingJob:
 
 
 class TestReconcileProgress:
+    def test_active_profile_keeps_serving_while_progress_updates(self, session):
+        _make_config(session)
+        profile = _make_profile(session, dim=4)
+        document, version, chunk = _make_doc_and_chunk(session)
+        job = _make_embedding_job(
+            session, profile=profile, chunk=chunk, document=document, version=version
+        )
+        job.status = "created"
+        profile.status = "active"
+        profile.total_chunks = 0
+        session.add_all([job, profile])
+        session.commit()
+
+        reconcile_profile_progress(session, profile.id)
+        session.commit()
+        session.refresh(profile)
+
+        assert profile.status == "active"
+        assert profile.total_chunks == 1
+        assert profile.completed_chunks == 0
+        assert profile.build_finished_at is None
+
     def test_flips_to_ready_when_complete(self, session):
         _make_config(session)
         profile = _make_profile(session, dim=4)

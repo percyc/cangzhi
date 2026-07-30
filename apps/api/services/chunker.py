@@ -37,6 +37,7 @@ from ..parsers.base import Block, StructuredContent
 CHILD_TARGET_MAX_CHARS = 600
 CHILD_HARD_MAX_CHARS = 900
 CHILD_TARGET_MIN_CHARS = 80
+CHILD_OVERLAP_CHARS = 120
 
 # Sentence boundary detectors. Chinese punctuation first so we don't
 # split on the ASCII period inside a number; newline is always a
@@ -100,6 +101,7 @@ def build_chunk_specs(
     child_max_chars: int = CHILD_TARGET_MAX_CHARS,
     child_hard_max_chars: int = CHILD_HARD_MAX_CHARS,
     child_min_chars: int = CHILD_TARGET_MIN_CHARS,
+    child_overlap_chars: int = CHILD_OVERLAP_CHARS,
 ) -> list[ChunkSpec]:
     """Return the parent and child chunks for a structured document.
 
@@ -148,9 +150,20 @@ def build_chunk_specs(
             section,
             content_seed=seed,
             parent_external_id=parent_external_id,
-            target_max=child_max_chars,
-            hard_max=child_hard_max_chars,
+            target_max=max(
+                child_min_chars,
+                child_max_chars - child_overlap_chars,
+            ),
+            hard_max=max(
+                child_min_chars,
+                child_hard_max_chars - child_overlap_chars,
+            ),
             min_chars=child_min_chars,
+        )
+        _apply_child_overlap(
+            children,
+            overlap_chars=child_overlap_chars,
+            hard_max=child_hard_max_chars,
         )
         for child in children:
             child.parent_external_id = parent_external_id
@@ -437,6 +450,75 @@ def _split_section_into_children(
 
     flush_buffer()
     return children
+
+
+def _apply_child_overlap(
+    children: list[ChunkSpec],
+    *,
+    overlap_chars: int,
+    hard_max: int,
+) -> None:
+    """Prepend a bounded semantic tail from the previous child.
+
+    ``source_start``/``source_end`` continue to describe the expanded
+    retrieval text, while ``extra.core_source_*`` records the unique
+    non-overlapping span.  This makes boundary context available to
+    lexical/vector retrieval without losing exact coverage metadata.
+    """
+
+    if overlap_chars <= 0 or len(children) < 2:
+        return
+    for child in children:
+        child.extra.setdefault("core_source_start", child.source_start)
+        child.extra.setdefault("core_source_end", child.source_end)
+        child.extra.setdefault("overlap_prefix_chars", 0)
+    previous_core = children[0].content
+    previous_core_start = children[0].source_start
+    previous_core_end = children[0].source_end
+    for child in children[1:]:
+        core_content = child.content
+        available = max(0, hard_max - len(core_content) - 2)
+        prefix = _semantic_tail(
+            previous_core,
+            max_chars=min(overlap_chars, available),
+        )
+        if not prefix:
+            previous_core = core_content
+            continue
+        core_start = child.source_start
+        core_end = child.source_end
+        child.content = f"{prefix}\n\n{core_content}"
+        child.source_start = max(previous_core_start, previous_core_end - len(prefix))
+        child.content_hash = chunk_content_hash(child.content)
+        child.char_count = len(child.content)
+        child.token_estimate = _estimate_tokens(child.content)
+        child.extra.update(
+            {
+                "core_source_start": core_start,
+                "core_source_end": core_end,
+                "overlap_prefix_chars": len(prefix),
+            }
+        )
+        previous_core = core_content
+        previous_core_start = core_start
+        previous_core_end = core_end
+
+
+def _semantic_tail(text: str, *, max_chars: int) -> str:
+    if max_chars <= 0 or not text:
+        return ""
+    sentences = _split_sentences(text)
+    selected: list[str] = []
+    length = 0
+    for sentence in reversed(sentences):
+        addition = len(sentence) + (1 if selected else 0)
+        if selected and length + addition > max_chars:
+            break
+        if not selected and len(sentence) > max_chars:
+            return sentence[-max_chars:].strip()
+        selected.append(sentence)
+        length += addition
+    return " ".join(reversed(selected)).strip()
 
 
 def _split_long_text(

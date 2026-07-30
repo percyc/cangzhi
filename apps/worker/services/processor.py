@@ -57,7 +57,7 @@ BATCH_SIZE = 10
 UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
-CHUNKING_IDEMPOTENCY = "chunking:m3-v1"
+CHUNKING_IDEMPOTENCY = "chunking:m3-v2"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
@@ -555,6 +555,7 @@ def _process_chunking(
             child_max_chars=chunking_config.child_target_max_chars,
             child_hard_max_chars=chunking_config.child_hard_max_chars,
             child_min_chars=chunking_config.child_target_min_chars,
+            child_overlap_chars=chunking_config.child_overlap_chars,
         )
     except Exception as exc:
         logger.exception(
@@ -850,8 +851,23 @@ def _build_ai_input(title: str, raw_text: str, metadata: dict) -> str:
         return ""
     if not raw_text:
         return f"标题：{title}"
-    head = raw_text[:4000]
-    return f"标题：{title}\n\n正文摘要：\n{head}"
+    max_chars = 8_000
+    if len(raw_text) <= max_chars:
+        sample = raw_text
+    else:
+        head = raw_text[:3_000]
+        middle_start = max(0, len(raw_text) // 2 - 1_000)
+        middle = raw_text[middle_start : middle_start + 2_000]
+        tail = raw_text[-3_000:]
+        sample = (
+            "【文档开头】\n"
+            f"{head}\n\n"
+            "【文档中部抽样】\n"
+            f"{middle}\n\n"
+            "【文档结尾】\n"
+            f"{tail}"
+        )
+    return f"标题：{title}\n\n正文代表性内容：\n{sample}"
 
 
 def _apply_inbox_fallback(

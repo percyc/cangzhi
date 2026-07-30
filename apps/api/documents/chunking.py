@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 
 from .detection import DocumentProfile
 
-CHUNK_PROFILE_VERSION = "chunk-profile:v1"
+CHUNK_PROFILE_VERSION = "chunk-profile:v2"
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,7 @@ class ChunkingConfig:
     child_target_max_chars: int
     child_hard_max_chars: int
     child_target_min_chars: int
+    child_overlap_chars: int
     profile_version: str = CHUNK_PROFILE_VERSION
 
     def to_dict(self) -> dict:
@@ -28,9 +29,11 @@ def get_chunking_config(profile: DocumentProfile) -> ChunkingConfig:
             child_target_max_chars=1200,
             child_hard_max_chars=1800,
             child_target_min_chars=100,
+            child_overlap_chars=200,
         )
     return ChunkingConfig(
         child_target_max_chars=600,
         child_hard_max_chars=900,
         child_target_min_chars=80,
+        child_overlap_chars=120,
     )

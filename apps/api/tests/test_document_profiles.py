@@ -40,6 +40,7 @@ def test_code_profile_uses_larger_child_chunks():
     config = get_chunking_config(profile)
     assert config.child_target_max_chars == 1200
     assert config.child_hard_max_chars == 1800
+    assert config.child_overlap_chars == 200
 
 
 def test_detection_is_deterministic():

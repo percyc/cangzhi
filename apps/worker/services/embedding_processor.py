@@ -710,8 +710,14 @@ def reconcile_profile_progress(session: Session, profile_id: int) -> None:
     """
 
     profile = session.get(EmbeddingProfile, profile_id)
-    if profile is None or profile.status not in ("building", "ready", "failed"):
+    if profile is None or profile.status not in (
+        "active",
+        "building",
+        "ready",
+        "failed",
+    ):
         return
+    remains_active = profile.status == "active"
     current_chunks = list(
         session.execute(
             select(DocumentChunk).where(
@@ -761,7 +767,17 @@ def reconcile_profile_progress(session: Session, profile_id: int) -> None:
     profile.failed_chunks = failed
     total = len(current_chunks)
     profile.total_chunks = total
-    if pending == 0 and failed == 0 and completed == total:
+    if remains_active:
+        # An active profile keeps serving completed vectors while newly
+        # ingested or re-chunked content is filled in.  Counters must still
+        # reflect the live corpus, but an incremental update must never
+        # silently deactivate the profile selected by the user.
+        profile.status = "active"
+        if pending == 0 and failed == 0 and completed == total:
+            profile.build_finished_at = datetime.now(tz=timezone.utc)
+        else:
+            profile.build_finished_at = None
+    elif pending == 0 and failed == 0 and completed == total:
         profile.status = "ready"
         if profile.build_finished_at is None:
             profile.build_finished_at = datetime.now(tz=timezone.utc)

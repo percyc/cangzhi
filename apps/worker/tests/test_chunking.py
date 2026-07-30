@@ -16,9 +16,11 @@ from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
     CHUNKING_STAGE,
+    CHUNKING_IDEMPOTENCY,
     UNDERSTANDING_IDEMPOTENCY,
     UNDERSTANDING_STAGE,
     _clear_understanding_results,
+    _build_ai_input,
     _process_chunking,
     _release_webdav_source_blob,
     process_single_job,
@@ -58,6 +60,18 @@ def _make_structured_payload():
         ],
     )
     return structured.to_dict()
+
+
+def test_long_ai_input_samples_beginning_middle_and_end():
+    raw_text = "A" * 4_000 + "MIDDLE" + "B" * 4_000 + "TAIL"
+
+    result = _build_ai_input("长文", raw_text, {})
+
+    assert "【文档开头】" in result
+    assert "【文档中部抽样】" in result
+    assert "【文档结尾】" in result
+    assert "MIDDLE" in result
+    assert result.endswith("TAIL")
 
 
 class TestChunkingJob:
@@ -121,8 +135,8 @@ class TestChunkingJob:
             document_id=document.id,
             document_version_id=version.id,
             stage=CHUNKING_STAGE,
-            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:chunking:m3-v1",
-            config_version="chunking:m3-v1",
+            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}",
+            config_version=CHUNKING_IDEMPOTENCY,
         )
         session.add(job)
         session.commit()
@@ -147,8 +161,9 @@ class TestChunkingJob:
         assert child.is_current is True
         session.refresh(version)
         assert version.meta["document_profile"]["detected_type"] == "general"
-        assert version.meta["chunking_config"]["profile_version"] == "chunk-profile:v1"
-        assert child.extra["document_profile"]["profile_version"] == "chunk-profile:v1"
+        assert version.meta["chunking_config"]["profile_version"] == "chunk-profile:v2"
+        assert version.meta["chunking_config"]["child_overlap_chars"] == 120
+        assert child.extra["document_profile"]["profile_version"] == "chunk-profile:v2"
 
     def test_chunking_is_idempotent(self, session):
         document = Document(
@@ -169,8 +184,8 @@ class TestChunkingJob:
             document_id=document.id,
             document_version_id=version.id,
             stage=CHUNKING_STAGE,
-            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:chunking:m3-v1",
-            config_version="chunking:m3-v1",
+            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}",
+            config_version=CHUNKING_IDEMPOTENCY,
         )
         session.add(job)
         session.commit()
@@ -303,8 +318,8 @@ class TestChunkingJob:
             document_id=document.id,
             document_version_id=version.id,
             stage=CHUNKING_STAGE,
-            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:chunking:m3-v1",
-            config_version="chunking:m3-v1",
+            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}",
+            config_version=CHUNKING_IDEMPOTENCY,
         )
         session.add(job)
         session.commit()
@@ -346,8 +361,8 @@ class TestChunkingJob:
             document_version_id=version.id,
             stage=CHUNKING_STAGE,
             status="completed",
-            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:chunking:m3-v1",
-            config_version="chunking:m3-v1",
+            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}",
+            config_version=CHUNKING_IDEMPOTENCY,
         )
         session.add_all([understanding, chunking])
         session.commit()
@@ -400,8 +415,8 @@ class TestChunkerIntegration:
             document_id=document.id,
             document_version_id=version.id,
             stage=CHUNKING_STAGE,
-            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:chunking:m3-v1",
-            config_version="chunking:m3-v1",
+            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}",
+            config_version=CHUNKING_IDEMPOTENCY,
         )
         session.add(job)
         session.commit()
