@@ -2,7 +2,138 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --canvas: #f6f8fb;
+  --ink: #111827;
+  --muted: #64748b;
+  --line: #dfe5ec;
+  --focus: rgba(15, 23, 42, 0.14);
+}
+
+* {
+  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-width: thin;
+}
+
+html {
+  min-width: 320px;
+  background: var(--canvas);
+}
+
 body {
-  background: #f8fafc;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 15% -10%, rgba(226, 232, 240, 0.72), transparent 28rem),
+    linear-gradient(180deg, #fbfcfd 0, var(--canvas) 22rem);
+  color: var(--ink);
+  font-feature-settings: "kern", "liga", "clig", "calt";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: #cbd5e1;
   color: #0f172a;
+}
+
+main {
+  animation: page-in 180ms ease-out both;
+  padding-bottom: 4rem !important;
+  padding-top: clamp(1.5rem, 3vw, 2.75rem) !important;
+}
+
+main h1 {
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+
+main h2,
+main h3 {
+  letter-spacing: -0.012em;
+}
+
+main :is(button, a, input, textarea, select, summary) {
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+
+main button:active:not(:disabled),
+header button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+main :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select) {
+  border-color: #cbd5e1;
+  background-color: rgba(255, 255, 255, 0.92);
+}
+
+main :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus {
+  border-color: #64748b !important;
+  box-shadow: 0 0 0 3px var(--focus);
+  outline: none;
+}
+
+main :is(input, textarea)::placeholder {
+  color: #94a3b8;
+}
+
+main :is(.rounded-xl, .rounded-2xl).border.bg-white {
+  border-color: rgba(203, 213, 225, 0.78);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.025),
+    0 8px 28px rgba(15, 23, 42, 0.025);
+}
+
+main table thead {
+  letter-spacing: 0.02em;
+}
+
+main table tbody tr {
+  transition: background-color 120ms ease;
+}
+
+main table tbody tr:hover {
+  background-color: rgba(248, 250, 252, 0.82);
+}
+
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media (max-width: 639px) {
+  main {
+    padding-bottom: 3rem !important;
+    padding-top: 1.5rem !important;
+  }
+
+  main h1 {
+    font-size: 1.5rem !important;
+  }
 }

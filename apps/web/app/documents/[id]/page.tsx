@@ -340,11 +340,11 @@ export default function DocumentDetailPage() {
   ].join(' · ');
 
   return (
-    <main className="container mx-auto max-w-6xl p-4">
-      <Link href="/documents" className="text-blue-600 hover:underline">← 返回资料列表</Link>
+    <main className="mx-auto max-w-6xl px-4 sm:px-6">
+      <Link href="/documents" className="text-sm font-medium text-slate-500 hover:text-slate-900">← 返回知识库</Link>
 
       <div className="mt-4">
-        <h1 className="text-2xl font-bold text-slate-900">{document.title}</h1>
+        <h1 className="max-w-5xl text-2xl font-semibold text-slate-950 sm:text-3xl">{document.title}</h1>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         <span className={`rounded-full bg-slate-100 px-2.5 py-1 ${statusColors[status] || 'text-slate-700'}`}>
@@ -539,7 +539,7 @@ export default function DocumentDetailPage() {
         rendersAsMarkdown ? (
           <MarkdownBody content={version.raw_content} />
         ) : (
-          <article className="mt-6 whitespace-pre-wrap rounded-xl border border-slate-200 bg-slate-50 p-4 leading-relaxed text-slate-800">
+          <article className="mx-auto mt-6 max-w-4xl whitespace-pre-wrap rounded-2xl border border-slate-200 bg-white p-5 text-[15px] leading-7 text-slate-800 shadow-sm sm:p-9 sm:text-base sm:leading-8">
             {version.raw_content}
           </article>
         )
@@ -560,7 +560,7 @@ export default function DocumentDetailPage() {
 
 function MarkdownBody({ content }: { content: string }) {
   return (
-    <article className="mt-6 rounded-xl border border-slate-200 bg-white p-5 text-slate-800 shadow-sm">
+    <article className="mx-auto mt-6 max-w-4xl rounded-2xl border border-slate-200 bg-white p-5 text-slate-800 shadow-sm sm:p-9">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         components={{

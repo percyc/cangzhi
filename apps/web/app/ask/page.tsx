@@ -336,7 +336,7 @@ function FilterSections({
     return null;
   }
   return (
-    <div className="mt-5 grid gap-4 md:grid-cols-3">
+    <div className="mt-5 grid items-start gap-4 md:grid-cols-2">
       {filters.source_types.length > 0 && (
         <FilterCard title="来源类型">
           {filters.source_types.map((option) => (
@@ -367,22 +367,24 @@ function FilterSections({
         </FilterCard>
       )}
       {hasTags && (
-        <FilterCard title="标签">
-          {filters.tags
-            .filter((tag) => tag.document_count > 0)
-            .slice(0, 30)
-            .map((tag) => (
-              <FilterChip
-                key={tag.slug}
-                label={`#${tag.name}（${tag.document_count}）`}
-                active={tagSlugs.includes(tag.slug)}
-                onClick={() => onToggleTag(tag.slug)}
-              />
-            ))}
-          {filters.tags.every((tag) => tag.document_count === 0) && (
-            <p className="text-xs text-slate-500">还没有资料带标签。</p>
-          )}
-        </FilterCard>
+        <div className="md:col-span-2">
+          <FilterCard title="标签">
+            {filters.tags
+              .filter((tag) => tag.document_count > 0)
+              .slice(0, 30)
+              .map((tag) => (
+                <FilterChip
+                  key={tag.slug}
+                  label={`#${tag.name}（${tag.document_count}）`}
+                  active={tagSlugs.includes(tag.slug)}
+                  onClick={() => onToggleTag(tag.slug)}
+                />
+              ))}
+            {filters.tags.every((tag) => tag.document_count === 0) && (
+              <p className="text-xs text-slate-500">还没有资料带标签。</p>
+            )}
+          </FilterCard>
+        </div>
       )}
     </div>
   );

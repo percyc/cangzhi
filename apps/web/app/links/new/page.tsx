@@ -41,47 +41,47 @@ export default function NewLinkPage() {
   };
 
   return (
-    <main className="container mx-auto p-4">
-      <div className="mb-4">
-        <Link href="/documents" className="text-blue-600 hover:underline">← 返回资料列表</Link>
+    <main className="mx-auto max-w-4xl px-4 sm:px-6">
+      <Link href="/documents" className="text-sm font-medium text-slate-500 hover:text-slate-900">← 返回知识库</Link>
+      <div className="mt-5">
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">网页收藏</p>
+        <h1 className="mt-1 text-3xl font-semibold text-slate-950">保存一篇好文章</h1>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+          粘贴公开链接，藏知会自动提取正文、识别主题并建议合适的分类。
+        </p>
       </div>
 
-      <h1 className="text-2xl font-bold mb-2">收藏链接</h1>
-      <p className="mb-6 text-sm text-slate-500">
-        粘贴一个公开的 http 或 https 链接，藏知会自动抓取正文、识别主题并放到合适的分类下。
-      </p>
-
-      <form onSubmit={handleSubmit} className="max-w-2xl space-y-4">
-        {error && <div className="p-3 bg-red-50 text-red-700 rounded text-sm">{error}</div>}
+      <form onSubmit={handleSubmit} className="mt-7 space-y-5 rounded-2xl border bg-white p-5 sm:p-7">
+        {error && <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
         <div>
-          <label htmlFor="url" className="block text-sm font-medium mb-1">链接地址</label>
+          <label htmlFor="url" className="mb-1.5 block text-sm font-medium text-slate-700">链接地址</label>
           <input
             id="url"
             type="url"
             value={url}
             onChange={e => setUrl(e.target.value)}
-            className="w-full px-3 py-2 border rounded font-mono text-sm"
+            className="w-full rounded-xl border px-3.5 py-3 font-mono text-sm"
             placeholder="https://example.com/article"
             required
             disabled={loading}
           />
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-2 text-xs leading-5 text-slate-400">
             出于安全考虑，不支持 localhost、内网地址或需要登录的链接。
           </p>
         </div>
 
-        <div className="flex gap-4">
+        <div className="flex flex-wrap gap-3 border-t border-slate-100 pt-5">
           <button
             type="submit"
             disabled={loading}
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
             {loading ? '保存中...' : '保存链接'}
           </button>
           <Link
             href="/documents"
-            className="px-4 py-2 border rounded hover:bg-gray-50"
+            className="rounded-xl border border-slate-300 px-5 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
           >
             取消
           </Link>

@@ -58,12 +58,17 @@ function LoginInner() {
   };
 
   return (
-    <main className="mx-auto max-w-md px-6 py-16">
-      <h1 className="text-2xl font-semibold text-slate-900">登录藏知</h1>
-      <p className="mt-2 text-sm text-slate-500">
-        请输入首次设置时创建的管理员账户。当前版本暂不提供自助找回密码，请妥善保存。
-      </p>
-      <form className="mt-8 space-y-4" onSubmit={handleSubmit}>
+    <main className="grid min-h-screen place-items-center px-4 py-10">
+      <div className="w-full max-w-md">
+        <div className="mb-7 flex items-center justify-center gap-3">
+          <span className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-950 text-lg font-semibold text-white shadow-lg shadow-slate-950/15">藏</span>
+          <span className="text-xl font-semibold tracking-tight text-slate-950">藏知</span>
+        </div>
+        <form className="space-y-5 rounded-2xl border bg-white p-6 sm:p-8" onSubmit={handleSubmit}>
+          <div>
+            <h1 className="text-2xl font-semibold text-slate-950">欢迎回来</h1>
+            <p className="mt-2 text-sm text-slate-500">登录后继续整理和探索你的个人知识库。</p>
+          </div>
         <div>
           <label htmlFor="username" className="block text-sm text-slate-700">
             用户名
@@ -76,7 +81,7 @@ function LoginInner() {
             onChange={(event) => setUsername(event.target.value)}
             autoComplete="username"
             autoFocus
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+            className="mt-1.5 w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm"
           />
         </div>
         <div>
@@ -90,7 +95,7 @@ function LoginInner() {
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             autoComplete="current-password"
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+            className="mt-1.5 w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm"
           />
         </div>
         {error && (
@@ -101,14 +106,15 @@ function LoginInner() {
         <button
           type="submit"
           disabled={busy}
-          className="w-full rounded bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-400"
+          className="w-full rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
         >
           {busy ? '正在登录…' : '登录'}
         </button>
-      </form>
-      <p className="mt-6 text-xs text-slate-500">
+        </form>
+      <p className="mt-5 text-center text-xs text-slate-500">
         还没有设置过账户？<Link href="/setup" className="text-slate-700 underline">前往首次设置</Link>
       </p>
+      </div>
     </main>
   );
 }

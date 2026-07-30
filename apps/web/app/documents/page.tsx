@@ -210,28 +210,29 @@ export default function DocumentsListPage() {
         );
 
   return (
-    <main className="container mx-auto p-4">
+    <main className="mx-auto max-w-7xl px-4 sm:px-6">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">知识库</h1>
-          <p className="mt-1 text-sm text-slate-500">选择资料可批量管理；删除后先进入回收站。</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Personal Library</p>
+          <h1 className="mt-1 text-3xl font-semibold text-slate-950">知识库</h1>
+          <p className="mt-1 text-sm text-slate-500">让收藏、文档和想法在这里持续沉淀。</p>
         </div>
-        <div className="flex rounded-lg border border-slate-300 bg-white p-1 text-sm">
-          <button type="button" onClick={() => setView('active')} className={`rounded px-3 py-1.5 ${view === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>全部资料</button>
-          <button type="button" onClick={() => setView('trash')} className={`rounded px-3 py-1.5 ${view === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>回收站</button>
+        <div className="flex rounded-xl border border-slate-300 bg-white p-1 text-sm shadow-sm">
+          <button type="button" onClick={() => setView('active')} className={`rounded-lg px-3 py-1.5 ${view === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>全部资料</button>
+          <button type="button" onClick={() => setView('trash')} className={`rounded-lg px-3 py-1.5 ${view === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>回收站</button>
         </div>
       </div>
 
-      {view === 'active' && <div className="flex flex-wrap gap-3 mb-6">
+      {view === 'active' && <div className="mb-6 flex flex-wrap gap-2">
         <Link
           href="/categories"
-          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
+          className="rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-700 hover:border-slate-400 hover:bg-slate-50"
         >
           分类管理
         </Link>
         <Link
           href="/tags"
-          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
+          className="rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-700 hover:border-slate-400 hover:bg-slate-50"
         >
           标签管理
         </Link>
@@ -247,7 +248,7 @@ export default function DocumentsListPage() {
       )}
 
       {visibleDocuments.length > 0 && (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm">
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3 text-sm">
           {!manageMode ? (
             <button type="button" onClick={() => setManageMode(true)} className="rounded border border-slate-300 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
               批量管理
@@ -300,15 +301,15 @@ export default function DocumentsListPage() {
               return (
                 <div
                   key={doc.id}
-                  className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow transition-shadow"
+                  className="group min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-lg hover:shadow-slate-950/5"
                 >
                   {manageMode && <label className="mb-2 flex items-center gap-2 text-xs text-slate-500">
                     <input type="checkbox" checked={selected.includes(doc.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, doc.id] : current.filter((id) => id !== doc.id))} />
                     选择
                   </label>}
                   <div className="flex items-start justify-between gap-2">
-                    <h2 className="text-lg font-semibold text-slate-900">
-                      <Link href={`/documents/${doc.id}`} className="hover:underline">
+                    <h2 className="min-w-0 break-words text-lg font-semibold leading-6 text-slate-900">
+                      <Link href={`/documents/${doc.id}`} className="decoration-slate-300 underline-offset-4 hover:underline">
                         {doc.title}
                       </Link>
                     </h2>
@@ -343,7 +344,7 @@ export default function DocumentsListPage() {
                     </p>
                   )}
                   {doc.summary?.summary && (
-                    <p className="mt-3 text-sm text-slate-600 line-clamp-3">
+                    <p className="mt-3 line-clamp-3 text-sm leading-6 text-slate-600">
                       {doc.summary.summary}
                     </p>
                   )}

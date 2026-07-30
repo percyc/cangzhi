@@ -89,12 +89,18 @@ export default function SetupPage() {
   }
 
   return (
-    <main className="mx-auto max-w-md px-6 py-16">
-      <h1 className="text-2xl font-semibold text-slate-900">首次设置</h1>
-      <p className="mt-2 text-sm text-slate-500">
-        创建藏知唯一的管理员账户。当前版本暂不提供自助找回密码，请妥善保存。
-      </p>
-      <form className="mt-8 space-y-4" onSubmit={handleSubmit}>
+    <main className="grid min-h-screen place-items-center px-4 py-10">
+      <div className="w-full max-w-md">
+        <div className="mb-7 flex items-center justify-center gap-3">
+          <span className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-950 text-lg font-semibold text-white shadow-lg shadow-slate-950/15">藏</span>
+          <span className="text-xl font-semibold tracking-tight text-slate-950">藏知</span>
+        </div>
+      <form className="space-y-5 rounded-2xl border bg-white p-6 sm:p-8" onSubmit={handleSubmit}>
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">只需一分钟</p>
+          <h1 className="mt-1 text-2xl font-semibold text-slate-950">创建管理员账户</h1>
+          <p className="mt-2 text-sm text-slate-500">这是藏知唯一的本地管理账户，请妥善保存密码。</p>
+        </div>
         <div>
           <label htmlFor="username" className="block text-sm text-slate-700">
             用户名
@@ -107,7 +113,7 @@ export default function SetupPage() {
             onChange={(event) => setUsername(event.target.value)}
             autoComplete="username"
             autoFocus
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+            className="mt-1.5 w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm"
           />
           <p className="mt-1 text-xs text-slate-500">3-32 个字符，可使用字母、数字、下划线、点和短横线。</p>
         </div>
@@ -122,7 +128,7 @@ export default function SetupPage() {
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             autoComplete="new-password"
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+            className="mt-1.5 w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm"
           />
           <p className="mt-1 text-xs text-slate-500">至少 8 个字符，建议使用密码管理器生成。</p>
         </div>
@@ -137,7 +143,7 @@ export default function SetupPage() {
             value={confirm}
             onChange={(event) => setConfirm(event.target.value)}
             autoComplete="new-password"
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+            className="mt-1.5 w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm"
           />
         </div>
         {error && (
@@ -148,14 +154,15 @@ export default function SetupPage() {
         <button
           type="submit"
           disabled={busy}
-          className="w-full rounded bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-400"
+          className="w-full rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
         >
           {busy ? '正在创建…' : '创建管理员账户'}
         </button>
-      </form>
-      <p className="mt-6 text-xs text-slate-500">
+        </form>
+      <p className="mt-5 text-center text-xs text-slate-500">
         已经设置过？<Link href="/login" className="text-slate-700 underline">前往登录</Link>
       </p>
+      </div>
     </main>
   );
 }

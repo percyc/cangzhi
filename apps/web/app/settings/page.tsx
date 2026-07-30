@@ -341,7 +341,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-12">
+    <main className="mx-auto max-w-5xl px-4 sm:px-6">
       <h1 className="text-2xl font-semibold text-slate-900">设置</h1>
       <p className="mt-2 text-sm text-slate-500">
         管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
@@ -868,7 +868,7 @@ export default function SettingsPage() {
           )}
         </section>
 
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="sticky bottom-4 z-20 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-xl shadow-slate-950/10 backdrop-blur">
           <p className="mb-3 text-xs text-slate-500">
             同时保存上面的对话模型和向量模型配置。
           </p>

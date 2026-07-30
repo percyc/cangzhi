@@ -233,20 +233,28 @@ export default function SourcesPage() {
         连接外部文件夹，藏知只读扫描远端文件，下载后沿用正文解析、智能切片和向量流程。
       </p>
 
-      <form onSubmit={create} className="mt-6 rounded-xl border bg-white p-5">
-        <h2 className="font-semibold">添加 WebDAV 文件夹</h2>
-        <SourceFields form={form} setForm={setForm} />
-        <button disabled={creating} className="mt-4 rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50">
-          {creating ? '正在添加…' : '添加知识源'}
-        </button>
-      </form>
+      <details className="mt-6 rounded-2xl border bg-white">
+        <summary className="flex cursor-pointer items-center justify-between gap-4 px-5 py-4 hover:bg-slate-50">
+          <div>
+            <h2 className="font-semibold text-slate-900">添加 WebDAV 文件夹</h2>
+            <p className="mt-1 text-xs text-slate-500">连接新的只读远端目录</p>
+          </div>
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-lg text-slate-500">＋</span>
+        </summary>
+        <form onSubmit={create} className="border-t border-slate-100 px-5 pb-5">
+          <SourceFields form={form} setForm={setForm} />
+          <button disabled={creating} className="mt-4 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50">
+            {creating ? '正在添加…' : '添加知识源'}
+          </button>
+        </form>
+      </details>
 
       {message && <p className="mt-4 rounded bg-emerald-50 p-3 text-sm text-emerald-800">{message}</p>}
       {error && <p className="mt-4 rounded bg-red-50 p-3 text-sm text-red-700">{error}</p>}
 
       <div className="mt-6 space-y-4">
         {sources.map((source) => (
-          <section key={source.id} className="rounded-xl border bg-white p-5">
+          <section key={source.id} className="rounded-2xl border bg-white p-5">
             {editingSourceId === source.id ? (
               <form onSubmit={(event) => void save(event, source)}>
                 <div className="flex items-center justify-between gap-3">

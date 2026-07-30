@@ -26,6 +26,7 @@ type MergeHistory = {
 export default function TagsPage() {
   const [tags, setTags] = useState<Tag[]>([]);
   const [newName, setNewName] = useState('');
+  const [query, setQuery] = useState('');
   const [mergeSourceId, setMergeSourceId] = useState('');
   const [mergeTargetId, setMergeTargetId] = useState('');
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -36,6 +37,9 @@ export default function TagsPage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const visibleTags = tags.filter((tag) =>
+    tag.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
 
   const load = useCallback(async () => {
     const [tagsResponse, historyResponse] = await Promise.all([
@@ -269,15 +273,30 @@ export default function TagsPage() {
       {loading ? (
         <p className="mt-6 text-slate-500">加载中…</p>
       ) : (
-        <div className="mt-6 rounded-xl border bg-white">
-          {tags.map((tag) => (
-            <div key={tag.id} className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 last:border-0">
-              <span className="text-sm text-slate-800">#{tag.name}</span>
-              <button type="button" disabled={busy} onClick={() => void rename(tag)} className="rounded px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-40">重命名</button>
+        <section className="mt-6 rounded-2xl border bg-white p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+            <div>
+              <h2 className="font-semibold text-slate-900">全部标签</h2>
+              <p className="mt-0.5 text-xs text-slate-400">共 {tags.length} 个标签</p>
             </div>
-          ))}
-          {!tags.length && <p className="p-8 text-center text-sm text-slate-500">还没有标签。</p>}
-        </div>
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索标签"
+              className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm sm:w-56"
+            />
+          </div>
+          <div className="mt-3 grid gap-1 md:grid-cols-2">
+            {visibleTags.map((tag) => (
+              <div key={tag.id} className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5 hover:bg-slate-50">
+                <span className="truncate text-sm text-slate-700">#{tag.name}</span>
+                <button type="button" disabled={busy} onClick={() => void rename(tag)} className="shrink-0 rounded-lg px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-40">重命名</button>
+              </div>
+            ))}
+          </div>
+          {!visibleTags.length && <p className="p-8 text-center text-sm text-slate-500">{tags.length ? '没有匹配的标签。' : '还没有标签。'}</p>}
+        </section>
       )}
 
       {history.length > 0 && (
