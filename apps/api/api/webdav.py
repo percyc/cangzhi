@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from io import BytesIO
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
@@ -16,7 +16,7 @@ from ..core.db import get_db
 from ..models.blobs import Blob
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from ..models.processing import ProcessingJob
-from ..models.webdav import WebDAVEntry, WebDAVSource
+from ..models.webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource
 from ..security.secrets import decrypt_secret, encrypt_secret
 from ..security.url_safety import URLSecurityError
 from ..services.webdav import (
@@ -24,7 +24,9 @@ from ..services.webdav import (
     download_file,
     propfind,
     validate_webdav_url,
+    webdav_external_identity,
 )
+from ..services.document_lifecycle import trash_documents as trash_document_records
 from ..storage import get_storage
 from ..storage.base import BlobStorage
 from .files import normalized_filename, validate_file_type
@@ -79,6 +81,10 @@ class SourceCreate(SourceConfig):
 class SourceUpdate(SourceConfig):
     password: str = Field(default="", max_length=1024)
     clear_password: bool = False
+
+
+class SourceEnabledUpdate(BaseModel):
+    is_enabled: bool
 
 
 async def _source_or_404(db: AsyncSession, source_id: int) -> WebDAVSource:
@@ -151,9 +157,48 @@ async def list_entries(source_id: int, db: AsyncSession = Depends(get_db)):
             "document_id": entry.document_id,
             "last_error": entry.last_error,
             "synced_at": entry.synced_at.isoformat() if entry.synced_at else None,
+            "ignore_reason": entry.ignore_reason,
         }
         for entry in entries
     ]
+
+
+@router.post(
+    "/{source_id}/entries/{entry_id}/allow-reimport",
+    response_model=dict[str, Any],
+)
+async def allow_entry_reimport(
+    source_id: int,
+    entry_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    await _source_or_404(db, source_id)
+    entry = await db.get(WebDAVEntry, entry_id)
+    if entry is None or entry.source_id != source_id:
+        raise HTTPException(status_code=404, detail="远端文件记录不存在")
+    document = (
+        await db.get(Document, entry.document_id)
+        if entry.document_id is not None
+        else None
+    )
+    if document is not None and document.is_deleted:
+        raise HTTPException(
+            status_code=409,
+            detail="该资料仍在回收站，请先恢复或永久删除",
+        )
+    if entry.external_identity:
+        await db.execute(
+            delete(ExternalItemExclusion).where(
+                ExternalItemExclusion.external_identity
+                == entry.external_identity
+            )
+        )
+    entry.state = "discovered"
+    entry.ignore_reason = None
+    entry.ignored_at = None
+    entry.resume_state = None
+    await db.commit()
+    return {"ok": True, "message": "已允许该文件重新入库"}
 
 
 @router.post("", response_model=dict[str, Any], status_code=201)
@@ -213,6 +258,7 @@ async def update_source(
         tuple(source.include_extensions or []),
         tuple(source.ignore_patterns or []),
     )
+    previous_base_url = source.base_url
     source.name = payload.name.strip()
     source.base_url = base_url
     source.username = payload.username
@@ -237,6 +283,10 @@ async def update_source(
         tuple(source.include_extensions or []),
         tuple(source.ignore_patterns or []),
     )
+    if previous_base_url != source.base_url:
+        await db.execute(
+            delete(WebDAVEntry).where(WebDAVEntry.source_id == source.id)
+        )
     await db.commit()
     await db.refresh(source)
     result = source.to_public_dict()
@@ -244,16 +294,145 @@ async def update_source(
     return result
 
 
+@router.get("/{source_id}/delete-impact", response_model=dict[str, Any])
+async def source_delete_impact(
+    source_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    source = await _source_or_404(db, source_id)
+    linked_document_ids = list(
+        (
+            await db.execute(
+                select(WebDAVEntry.document_id)
+                .where(
+                    WebDAVEntry.source_id == source.id,
+                    WebDAVEntry.document_id.is_not(None),
+                )
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    active = trash = 0
+    if linked_document_ids:
+        active = int(
+            (
+                await db.execute(
+                    select(func.count(Document.id)).where(
+                        Document.id.in_(linked_document_ids),
+                        Document.is_deleted.is_(False),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        trash = int(
+            (
+                await db.execute(
+                    select(func.count(Document.id)).where(
+                        Document.id.in_(linked_document_ids),
+                        Document.is_deleted.is_(True),
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+    return {
+        "source_id": source.id,
+        "source_name": source.name,
+        "entry_count": int(
+            (
+                await db.execute(
+                    select(func.count(WebDAVEntry.id)).where(
+                        WebDAVEntry.source_id == source.id
+                    )
+                )
+            ).scalar_one()
+            or 0
+        ),
+        "active_document_count": active,
+        "trashed_document_count": trash,
+        "remote_files_affected": 0,
+    }
+
+
+@router.patch("/{source_id}/enabled", response_model=dict[str, Any])
+async def set_source_enabled(
+    source_id: int,
+    payload: SourceEnabledUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    source = await _source_or_404(db, source_id)
+    source.is_enabled = payload.is_enabled
+    source.sync_status = "idle"
+    source.last_error = None
+    await db.commit()
+    await db.refresh(source)
+    return source.to_public_dict()
+
+
 @router.delete("/{source_id}", response_model=dict[str, Any])
-async def delete_source(source_id: int, db: AsyncSession = Depends(get_db)):
-    """Remove a connector without deleting documents already indexed from it."""
+async def delete_source(
+    source_id: int,
+    document_action: Literal["keep", "trash"] = Query("keep"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a connector, optionally moving its active knowledge to trash."""
 
     source = await _source_or_404(db, source_id)
+    linked_ids = list(
+        (
+            await db.execute(
+                select(WebDAVEntry.document_id)
+                .where(
+                    WebDAVEntry.source_id == source.id,
+                    WebDAVEntry.document_id.is_not(None),
+                )
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    documents = (
+        list(
+            (
+                await db.execute(
+                    select(Document).where(Document.id.in_(linked_ids))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if linked_ids
+        else []
+    )
+    if document_action == "trash":
+        await trash_document_records(
+            db,
+            documents,
+            reason="connector_removed",
+            commit=False,
+        )
+    for document in documents:
+        meta = dict(document.meta or {})
+        meta["webdav_source_name"] = source.name
+        meta["webdav_source_id"] = None
+        meta["connector_removed"] = True
+        document.meta = meta
     await db.delete(source)
     await db.commit()
     return {
         "ok": True,
-        "message": "WebDAV 连接器已删除，已入库资料予以保留",
+        "affected_documents": len(documents),
+        "document_action": document_action,
+        "message": (
+            "WebDAV 连接器已删除，关联资料已移入回收站"
+            if document_action == "trash"
+            else "WebDAV 连接器已删除，已入库资料予以保留"
+        ),
+        "remote_files_affected": 0,
     }
 
 
@@ -280,6 +459,8 @@ async def test_source(source_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{source_id}/scan", response_model=dict[str, Any])
 async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
     source = await _source_or_404(db, source_id)
+    if not source.is_enabled:
+        raise HTTPException(status_code=409, detail="知识源已停用，请先启用")
     source.sync_status = "scanning"
     source.last_error = None
     await db.commit()
@@ -318,15 +499,41 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
     seen: set[str] = set()
     for remote_entry in files:
         seen.add(remote_entry.path)
+        identity = webdav_external_identity(source.base_url, remote_entry.path)
         entry = existing.get(remote_entry.path)
         if entry is None:
+            document = await db.scalar(
+                select(Document).where(Document.external_identity == identity)
+            )
+            exclusion = await db.scalar(
+                select(ExternalItemExclusion).where(
+                    ExternalItemExclusion.external_identity == identity
+                )
+            )
             entry = WebDAVEntry(
                 source_id=source.id,
                 remote_path=remote_entry.path,
-                state="discovered",
+                external_identity=identity,
+                document_id=document.id if document is not None else None,
+                state=(
+                    "ignored"
+                    if exclusion is not None
+                    or (document is not None and document.is_deleted)
+                    else "discovered"
+                ),
             )
+            if exclusion is not None:
+                entry.ignore_reason = exclusion.reason
+                entry.ignored_at = now
+            elif document is not None and document.is_deleted:
+                entry.ignore_reason = "document_trashed"
+                entry.resume_state = "discovered"
+                entry.ignored_at = now
             db.add(entry)
-            discovered += 1
+            if entry.state == "ignored":
+                ignored += 1
+            else:
+                discovered += 1
         elif entry.state == "ignored":
             ignored += 1
         elif (
@@ -339,6 +546,7 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         else:
             unchanged += 1
         entry.etag = remote_entry.etag
+        entry.external_identity = identity
         entry.last_modified = remote_entry.last_modified
         entry.file_size = remote_entry.size
         entry.content_type = remote_entry.content_type
@@ -382,6 +590,8 @@ async def sync_source(
     """Download new/changed files and enqueue the normal ingestion pipeline."""
 
     source = await _source_or_404(db, source_id)
+    if not source.is_enabled:
+        raise HTTPException(status_code=409, detail="知识源已停用，请先启用")
     entries = (
         (
             await db.execute(
@@ -448,14 +658,43 @@ async def sync_source(
                     meta={
                         "external_source": "webdav",
                         "webdav_source_id": source.id,
+                        "webdav_source_name": source.name,
                         "webdav_path": entry.remote_path,
                     },
+                    external_identity=entry.external_identity
+                    or webdav_external_identity(
+                        source.base_url, entry.remote_path
+                    ),
                 )
                 db.add(document)
                 await db.flush()
                 version_number = 1
                 imported += 1
             else:
+                if document.is_deleted:
+                    entry.state = "ignored"
+                    entry.ignore_reason = "document_trashed"
+                    entry.ignored_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    continue
+                document.external_identity = (
+                    entry.external_identity
+                    or document.external_identity
+                    or webdav_external_identity(
+                        source.base_url, entry.remote_path
+                    )
+                )
+                document_meta = dict(document.meta or {})
+                document_meta.update(
+                    {
+                        "external_source": "webdav",
+                        "webdav_source_id": source.id,
+                        "webdav_source_name": source.name,
+                        "webdav_path": entry.remote_path,
+                        "connector_removed": False,
+                    }
+                )
+                document.meta = document_meta
                 current = (
                     await db.get(DocumentVersion, document.current_version_id)
                     if document.current_version_id
@@ -498,6 +737,9 @@ async def sync_source(
             document.current_version_id = version.id
             entry.document_id = document.id
             entry.state = "synced"
+            entry.ignore_reason = None
+            entry.ignored_at = None
+            entry.resume_state = None
             entry.synced_at = datetime.now(timezone.utc)
             entry.last_error = None
             db.add(

@@ -37,6 +37,7 @@ class WebDAVSource(BaseModel):
     )
     include_extensions = Column(_JSON_TYPE, nullable=False)
     ignore_patterns = Column(_JSON_TYPE, nullable=False)
+    is_enabled = Column(Boolean, nullable=False, server_default=text("true"), index=True)
     sync_status = Column(
         String(32), nullable=False, server_default=text("'idle'"), index=True
     )
@@ -56,6 +57,7 @@ class WebDAVSource(BaseModel):
             "trusted_private_network": bool(self.trusted_private_network),
             "include_extensions": list(self.include_extensions or []),
             "ignore_patterns": list(self.ignore_patterns or []),
+            "is_enabled": bool(self.is_enabled),
             "sync_status": self.sync_status,
             "last_error": self.last_error,
             "last_scan_at": self.last_scan_at.isoformat()
@@ -79,6 +81,7 @@ class WebDAVEntry(BaseModel):
         index=True,
     )
     remote_path = Column(String(2048), nullable=False)
+    external_identity = Column(String(64), nullable=True, index=True)
     etag = Column(String(512), nullable=True)
     last_modified = Column(String(255), nullable=True)
     file_size = Column(Integer, nullable=True)
@@ -93,6 +96,9 @@ class WebDAVEntry(BaseModel):
     state = Column(
         String(32), nullable=False, server_default=text("'discovered'"), index=True
     )
+    resume_state = Column(String(32), nullable=True)
+    ignore_reason = Column(String(64), nullable=True)
+    ignored_at = Column(DateTime(timezone=True), nullable=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
     synced_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
@@ -103,3 +109,15 @@ class WebDAVEntry(BaseModel):
         ),
         Index("ix_webdav_entries_source_state", "source_id", "state"),
     )
+
+
+class ExternalItemExclusion(BaseModel):
+    """Durable opt-out that survives connector removal and recreation."""
+
+    __tablename__ = "external_item_exclusions"
+
+    source_type = Column(String(32), nullable=False, server_default=text("'webdav'"))
+    external_identity = Column(String(64), nullable=False, unique=True, index=True)
+    reason = Column(String(64), nullable=False)
+    display_path = Column(String(2048), nullable=True)
+    source_snapshot = Column(_JSON_TYPE, nullable=False, server_default=text("'{}'"))

@@ -3,6 +3,7 @@ from apps.api.services.webdav import (
     RemoteEntry,
     parse_multistatus,
     validate_webdav_url,
+    webdav_external_identity,
 )
 
 
@@ -32,6 +33,22 @@ def test_trusted_private_webdav_requires_http_url():
             trusted_private_network=True,
         )
         == "http://192.168.1.2:5005/dav/"
+    )
+
+
+def test_webdav_external_identity_ignores_credentials_connector_and_default_port():
+    first = webdav_external_identity(
+        "https://DAV.EXAMPLE.com:443/dav/",
+        "/dav/资料/a.md",
+    )
+    second = webdav_external_identity(
+        "https://dav.example.com/another-root/",
+        "/dav/%E8%B5%84%E6%96%99/./a.md",
+    )
+    assert first == second
+    assert first != webdav_external_identity(
+        "https://dav.example.com/",
+        "/dav/资料/b.md",
     )
 
 
@@ -192,3 +209,185 @@ def test_deleted_webdav_document_is_not_rediscovered(client, monkeypatch):
     entry = test_client.get(f"/api/webdav/{source['id']}/entries").json()[0]
     assert entry["state"] == "ignored"
     assert test_client.post(f"/api/webdav/{source['id']}/sync").json()["imported"] == 0
+
+
+def test_webdav_restore_preserves_remote_missing_state(client, monkeypatch):
+    test_client, _storage = client
+    source = test_client.post(
+        "/api/webdav",
+        json={
+            "name": "状态保留",
+            "base_url": "https://dav.example.com/",
+            "username": "reader",
+            "password": "secret",
+            "root_path": "/knowledge",
+        },
+    ).json()
+    remote = [
+        RemoteEntry(
+            path="/knowledge/missing.md",
+            is_collection=False,
+            etag='"v1"',
+            last_modified="today",
+            size=12,
+            content_type="text/markdown",
+        )
+    ]
+
+    async def fake_propfind(**_kwargs):
+        return list(remote)
+
+    async def fake_download(**_kwargs):
+        return b"# title\nbody", "text/markdown"
+
+    monkeypatch.setattr("apps.api.api.webdav.propfind", fake_propfind)
+    monkeypatch.setattr("apps.api.api.webdav.download_file", fake_download)
+    test_client.post(f"/api/webdav/{source['id']}/scan")
+    test_client.post(f"/api/webdav/{source['id']}/sync")
+    entry = test_client.get(f"/api/webdav/{source['id']}/entries").json()[0]
+    remote.clear()
+    test_client.post(f"/api/webdav/{source['id']}/scan")
+    assert test_client.get(
+        f"/api/webdav/{source['id']}/entries"
+    ).json()[0]["state"] == "missing"
+
+    test_client.delete(f"/api/documents/{entry['document_id']}")
+    test_client.post(f"/api/documents/{entry['document_id']}/restore")
+    assert test_client.get(
+        f"/api/webdav/{source['id']}/entries"
+    ).json()[0]["state"] == "missing"
+
+
+def test_permanently_deleted_webdav_file_stays_excluded_after_reconnect(
+    client, monkeypatch
+):
+    test_client, _storage = client
+    config = {
+        "name": "可重连知识源",
+        "base_url": "https://dav.example.com/",
+        "username": "reader",
+        "password": "secret",
+        "root_path": "/knowledge",
+    }
+    source = test_client.post("/api/webdav", json=config).json()
+
+    async def fake_propfind(**_kwargs):
+        return [
+            RemoteEntry(
+                path="/knowledge/a.md",
+                is_collection=False,
+                etag='"v1"',
+                last_modified="today",
+                size=12,
+                content_type="text/markdown",
+            )
+        ]
+
+    async def fake_download(**_kwargs):
+        return b"# title\nbody", "text/markdown"
+
+    monkeypatch.setattr("apps.api.api.webdav.propfind", fake_propfind)
+    monkeypatch.setattr("apps.api.api.webdav.download_file", fake_download)
+    test_client.post(f"/api/webdav/{source['id']}/scan")
+    test_client.post(f"/api/webdav/{source['id']}/sync")
+    entry = test_client.get(f"/api/webdav/{source['id']}/entries").json()[0]
+    document_id = entry["document_id"]
+    test_client.delete(f"/api/documents/{document_id}")
+    assert (
+        test_client.delete(
+            f"/api/documents/{document_id}/permanent"
+        ).status_code
+        == 200
+    )
+    assert (
+        test_client.delete(
+            f"/api/webdav/{source['id']}?document_action=keep"
+        ).status_code
+        == 200
+    )
+
+    reconnected = test_client.post("/api/webdav", json=config).json()
+    scanned = test_client.post(
+        f"/api/webdav/{reconnected['id']}/scan"
+    ).json()
+    assert scanned["ignored"] == 1
+    entry = test_client.get(
+        f"/api/webdav/{reconnected['id']}/entries"
+    ).json()[0]
+    assert entry["state"] == "ignored"
+    assert entry["ignore_reason"] == "permanent_deleted"
+    assert entry["document_id"] is None
+    assert (
+        test_client.post(
+            f"/api/webdav/{reconnected['id']}/sync"
+        ).json()["imported"]
+        == 0
+    )
+
+    allowed = test_client.post(
+        f"/api/webdav/{reconnected['id']}/entries/{entry['id']}/allow-reimport"
+    )
+    assert allowed.status_code == 200
+    assert (
+        test_client.post(
+            f"/api/webdav/{reconnected['id']}/sync"
+        ).json()["imported"]
+        == 1
+    )
+
+
+def test_connector_disable_and_delete_impact_actions(client, monkeypatch):
+    test_client, _storage = client
+    source = test_client.post(
+        "/api/webdav",
+        json={
+            "name": "生命周期",
+            "base_url": "https://dav.example.com/",
+            "username": "reader",
+            "password": "secret",
+            "root_path": "/knowledge",
+        },
+    ).json()
+    disabled = test_client.patch(
+        f"/api/webdav/{source['id']}/enabled",
+        json={"is_enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["is_enabled"] is False
+    assert test_client.post(f"/api/webdav/{source['id']}/scan").status_code == 409
+    enabled = test_client.patch(
+        f"/api/webdav/{source['id']}/enabled",
+        json={"is_enabled": True},
+    )
+    assert enabled.status_code == 200
+
+    async def fake_propfind(**_kwargs):
+        return [
+            RemoteEntry(
+                path="/knowledge/a.md",
+                is_collection=False,
+                etag='"v1"',
+                last_modified="today",
+                size=12,
+                content_type="text/markdown",
+            )
+        ]
+
+    async def fake_download(**_kwargs):
+        return b"# title\nbody", "text/markdown"
+
+    monkeypatch.setattr("apps.api.api.webdav.propfind", fake_propfind)
+    monkeypatch.setattr("apps.api.api.webdav.download_file", fake_download)
+    test_client.post(f"/api/webdav/{source['id']}/scan")
+    test_client.post(f"/api/webdav/{source['id']}/sync")
+    impact = test_client.get(
+        f"/api/webdav/{source['id']}/delete-impact"
+    ).json()
+    assert impact["active_document_count"] == 1
+    assert impact["remote_files_affected"] == 0
+    deleted = test_client.delete(
+        f"/api/webdav/{source['id']}?document_action=trash"
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["remote_files_affected"] == 0
+    assert len(test_client.get("/api/documents?deleted=true").json()) == 1

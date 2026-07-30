@@ -3,7 +3,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
@@ -25,6 +25,11 @@ from ..models.webdav import WebDAVEntry, WebDAVSource
 from ..security.secrets import decrypt_secret
 from ..security.url_safety import URLSecurityError
 from ..services.webdav import WebDAVError, download_file
+from ..services.document_lifecycle import (
+    purge_documents as purge_document_records,
+    restore_documents as restore_document_records,
+    trash_documents as trash_document_records,
+)
 from ..storage import get_storage
 from ..storage.base import BlobStorage
 from .schemas import (
@@ -214,7 +219,12 @@ async def build_document_response(
         )
         origin = {
             "kind": "webdav",
-            "label": connector.name if connector else "已删除的 WebDAV 连接器",
+            "label": (
+                connector.name
+                if connector
+                else document_meta.get("webdav_source_name")
+                or "已删除的 WebDAV 连接器"
+            ),
             "connector_id": connector_id,
             "remote_path": document_meta.get("webdav_path"),
             "connector_available": connector is not None,
@@ -229,6 +239,8 @@ async def build_document_response(
         source_url=document.source_url,
         origin=origin,
         is_deleted=document.is_deleted,
+        deleted_at=document.deleted_at,
+        delete_reason=document.delete_reason,
         created_at=document.created_at,
         updated_at=document.updated_at,
         current_version=version_response,
@@ -273,16 +285,8 @@ async def trash_documents(
         .scalars()
         .all()
     )
-    for document in documents:
-        document.is_deleted = True
-    if documents:
-        await db.execute(
-            update(WebDAVEntry)
-            .where(WebDAVEntry.document_id.in_([item.id for item in documents]))
-            .values(state="ignored")
-        )
-    await db.commit()
-    return {"ok": True, "affected": len(documents)}
+    affected = await trash_document_records(db, list(documents))
+    return {"ok": True, "affected": affected}
 
 
 @router.post("/batch/restore", response_model=dict)
@@ -299,16 +303,58 @@ async def restore_documents(
         .scalars()
         .all()
     )
-    for document in documents:
-        document.is_deleted = False
-    if documents:
-        await db.execute(
-            update(WebDAVEntry)
-            .where(WebDAVEntry.document_id.in_([item.id for item in documents]))
-            .values(state="synced")
+    affected = await restore_document_records(db, list(documents))
+    return {"ok": True, "affected": affected}
+
+
+@router.post("/batch/permanent-delete", response_model=dict)
+async def permanently_delete_documents(
+    payload: DocumentBatchActionRequest,
+    db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
+):
+    documents = list(
+        (
+            await db.execute(
+                select(Document).where(
+                    Document.id.in_(payload.document_ids),
+                    Document.is_deleted.is_(True),
+                )
+            )
         )
-    await db.commit()
-    return {"ok": True, "affected": len(documents)}
+        .scalars()
+        .all()
+    )
+    result = await purge_document_records(db, documents, storage)
+    return {
+        "ok": True,
+        "affected": result.affected,
+        "deleted_blobs": result.deleted_blob_count,
+        "cleanup_warnings": result.blob_cleanup_errors,
+    }
+
+
+@router.delete("/trash/empty", response_model=dict)
+async def empty_trash(
+    db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
+):
+    documents = list(
+        (
+            await db.execute(
+                select(Document).where(Document.is_deleted.is_(True))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    result = await purge_document_records(db, documents, storage)
+    return {
+        "ok": True,
+        "affected": result.affected,
+        "deleted_blobs": result.deleted_blob_count,
+        "cleanup_warnings": result.blob_cleanup_errors,
+    }
 
 
 @router.post("/batch/organize", response_model=dict)
@@ -503,13 +549,7 @@ async def trash_document(
     document = await db.get(Document, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="资料不存在")
-    document.is_deleted = True
-    await db.execute(
-        update(WebDAVEntry)
-        .where(WebDAVEntry.document_id == document.id)
-        .values(state="ignored")
-    )
-    await db.commit()
+    await trash_document_records(db, [document])
     return {"ok": True, "message": "资料已移入回收站"}
 
 
@@ -521,14 +561,28 @@ async def restore_document(
     document = await db.get(Document, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="资料不存在")
-    document.is_deleted = False
-    await db.execute(
-        update(WebDAVEntry)
-        .where(WebDAVEntry.document_id == document.id)
-        .values(state="synced")
-    )
-    await db.commit()
+    await restore_document_records(db, [document])
     return {"ok": True, "message": "资料已恢复"}
+
+
+@router.delete("/{document_id}/permanent", response_model=dict)
+async def permanently_delete_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
+):
+    document = await db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    if not document.is_deleted:
+        raise HTTPException(status_code=409, detail="请先将资料移入回收站")
+    result = await purge_document_records(db, [document], storage)
+    return {
+        "ok": True,
+        "message": "资料已永久删除",
+        "deleted_blobs": result.deleted_blob_count,
+        "cleanup_warnings": result.blob_cleanup_errors,
+    }
 
 
 @router.get("/{document_id}/original")

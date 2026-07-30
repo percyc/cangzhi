@@ -1,4 +1,14 @@
-from sqlalchemy import Boolean, Column, Enum, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy import text
@@ -26,10 +36,14 @@ class Document(BaseModel):
             "document_versions.id",
             name="fk_documents_current_version_id_document_versions",
             use_alter=True,
+            ondelete="SET NULL",
         ),
         nullable=True,
     )
     is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"), index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    delete_reason = Column(String(64), nullable=True)
+    external_identity = Column(String(64), nullable=True, unique=True, index=True)
     meta = Column(
         JSON().with_variant(JSONB, "postgresql"),
         nullable=False,
@@ -40,7 +54,12 @@ class Document(BaseModel):
 class DocumentVersion(BaseModel):
     __tablename__ = "document_versions"
 
-    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
+    document_id = Column(
+        Integer,
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     blob_id = Column(Integer, ForeignKey("blobs.id"), nullable=True, index=True)
     version_number = Column(Integer, nullable=False)
     content_hash = Column(String(64), nullable=False)

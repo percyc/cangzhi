@@ -44,6 +44,8 @@ type Document = {
     connector_available: boolean;
   } | null;
   is_deleted: boolean;
+  deleted_at: string | null;
+  delete_reason: string | null;
   created_at: string;
   updated_at: string;
   current_version: DocumentVersion | null;
@@ -150,6 +152,50 @@ export default function DocumentsListPage() {
     }
   };
 
+  const permanentlyDeleteSelected = async () => {
+    if (
+      !selected.length ||
+      !window.confirm(
+        `永久删除选中的 ${selected.length} 条资料？正文、切片和向量都会删除，且无法恢复。`,
+      )
+    ) return;
+    setActing(true);
+    try {
+      const response = await fetch('/api/documents/batch/permanent-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document_ids: selected }),
+      });
+      if (!response.ok) throw new Error('永久删除失败');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '永久删除失败');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const emptyTrash = async () => {
+    if (
+      !documents.length ||
+      !window.confirm(
+        `清空回收站中的 ${documents.length} 条资料？此操作无法恢复，WebDAV 远端文件不会被删除。`,
+      )
+    ) return;
+    setActing(true);
+    try {
+      const response = await fetch('/api/documents/trash/empty', {
+        method: 'DELETE',
+      });
+      if (!response.ok) throw new Error('清空回收站失败');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '清空回收站失败');
+    } finally {
+      setActing(false);
+    }
+  };
+
   const organizeSelected = async () => {
     if (!selected.length || (!batchCategoryId && !batchTagId)) return;
     setActing(true);
@@ -197,6 +243,26 @@ export default function DocumentsListPage() {
     }
   };
 
+  const permanentlyDeleteSingle = async (document: Document) => {
+    if (
+      !window.confirm(
+        `永久删除“${document.title}”？正文、切片和向量都会删除，且无法恢复。`,
+      )
+    ) return;
+    setActing(true);
+    try {
+      const response = await fetch(`/api/documents/${document.id}/permanent`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) throw new Error('永久删除失败');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '永久删除失败');
+    } finally {
+      setActing(false);
+    }
+  };
+
   const categories = Array.from(
     new Map(
       documents.flatMap((document) => document.categories).map((item) => [item.id, item]),
@@ -217,9 +283,16 @@ export default function DocumentsListPage() {
           <h1 className="mt-1 text-3xl font-semibold text-slate-950">知识库</h1>
           <p className="mt-1 text-sm text-slate-500">让收藏、文档和想法在这里持续沉淀。</p>
         </div>
-        <div className="flex rounded-xl border border-slate-300 bg-white p-1 text-sm shadow-sm">
-          <button type="button" onClick={() => setView('active')} className={`rounded-lg px-3 py-1.5 ${view === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>全部资料</button>
-          <button type="button" onClick={() => setView('trash')} className={`rounded-lg px-3 py-1.5 ${view === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>回收站</button>
+        <div className="flex items-center gap-2">
+          {view === 'trash' && documents.length > 0 && (
+            <button type="button" disabled={acting} onClick={() => void emptyTrash()} className="rounded-xl px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
+              清空回收站
+            </button>
+          )}
+          <div className="flex rounded-xl border border-slate-300 bg-white p-1 text-sm shadow-sm">
+            <button type="button" onClick={() => setView('active')} className={`rounded-lg px-3 py-1.5 ${view === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>全部资料</button>
+            <button type="button" onClick={() => setView('trash')} className={`rounded-lg px-3 py-1.5 ${view === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>回收站</button>
+          </div>
         </div>
       </div>
 
@@ -278,6 +351,11 @@ export default function DocumentsListPage() {
               <button type="button" disabled={!selected.length || acting} onClick={runBatchAction} className={`rounded px-3 py-1.5 text-white disabled:opacity-40 ${view === 'trash' ? 'bg-emerald-700' : 'bg-red-700'}`}>
                 {acting ? '处理中…' : view === 'trash' ? '恢复选中资料' : '移入回收站'}
               </button>
+              {view === 'trash' && (
+                <button type="button" disabled={!selected.length || acting} onClick={() => void permanentlyDeleteSelected()} className="rounded border border-red-300 px-3 py-1.5 text-red-700 disabled:opacity-40">
+                  永久删除选中资料
+                </button>
+              )}
               <button type="button" onClick={() => { setManageMode(false); setSelected([]); }} className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100">完成</button>
             </>
           )}
@@ -309,9 +387,11 @@ export default function DocumentsListPage() {
                   </label>}
                   <div className="flex items-start justify-between gap-2">
                     <h2 className="min-w-0 break-words text-lg font-semibold leading-6 text-slate-900">
-                      <Link href={`/documents/${doc.id}`} className="decoration-slate-300 underline-offset-4 hover:underline">
-                        {doc.title}
-                      </Link>
+                      {view === 'active' ? (
+                        <Link href={`/documents/${doc.id}`} className="decoration-slate-300 underline-offset-4 hover:underline">
+                          {doc.title}
+                        </Link>
+                      ) : doc.title}
                     </h2>
                     {!manageMode && (
                       <details className="relative">
@@ -321,6 +401,11 @@ export default function DocumentsListPage() {
                           <button type="button" disabled={acting} onClick={() => void updateSingleState(doc)} className={`block w-full rounded px-2 py-1.5 text-left hover:bg-slate-100 ${view === 'trash' ? 'text-emerald-700' : 'text-red-700'}`}>
                             {view === 'trash' ? '恢复资料' : '移入回收站'}
                           </button>
+                          {view === 'trash' && (
+                            <button type="button" disabled={acting} onClick={() => void permanentlyDeleteSingle(doc)} className="block w-full rounded px-2 py-1.5 text-left text-red-700 hover:bg-red-50">
+                              永久删除
+                            </button>
+                          )}
                         </div>
                       </details>
                     )}
@@ -341,6 +426,11 @@ export default function DocumentsListPage() {
                   {doc.origin?.remote_path && (
                     <p className="mt-2 truncate text-xs text-slate-400" title={doc.origin.remote_path}>
                       远端：{doc.origin.remote_path}
+                    </p>
+                  )}
+                  {view === 'trash' && doc.deleted_at && (
+                    <p className="mt-2 text-xs text-slate-400">
+                      删除于 {new Date(doc.deleted_at).toLocaleString('zh-CN')}
                     </p>
                   )}
                   {doc.summary?.summary && (

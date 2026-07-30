@@ -13,7 +13,7 @@ from .taxonomy import (
     Tag,
     TagMergeRecord,
 )
-from .webdav import WebDAVEntry, WebDAVSource
+from .webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource
 
 __all__ = [
     "DEFAULT_CATEGORY_SLUGS",
@@ -31,6 +31,7 @@ __all__ = [
     "DocumentTag",
     "DocumentVersion",
     "EmbeddingProfile",
+    "ExternalItemExclusion",
     "ProcessingJob",
     "Tag",
     "TagMergeRecord",

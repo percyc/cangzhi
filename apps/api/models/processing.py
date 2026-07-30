@@ -8,8 +8,18 @@ from .base import BaseModel
 class ProcessingJob(BaseModel):
     __tablename__ = "processing_jobs"
 
-    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
-    document_version_id = Column(Integer, ForeignKey("document_versions.id"), nullable=False, index=True)
+    document_id = Column(
+        Integer,
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_version_id = Column(
+        Integer,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     stage = Column(String(50), nullable=False)
     status = Column(String(20), nullable=False, default="created", server_default=text("'created'"))
 

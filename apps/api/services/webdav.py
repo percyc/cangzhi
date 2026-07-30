@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import posixpath
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlsplit
 from xml.etree import ElementTree
@@ -22,6 +24,24 @@ class RemoteEntry:
     last_modified: str | None
     size: int | None
     content_type: str | None
+
+
+def webdav_external_identity(base_url: str, remote_path: str) -> str:
+    """Return a credential- and connector-independent identity for a remote file."""
+
+    parts = urlsplit((base_url or "").strip())
+    scheme = parts.scheme.lower()
+    hostname = (parts.hostname or "").lower()
+    port = parts.port
+    default_port = (scheme == "https" and port == 443) or (
+        scheme == "http" and port == 80
+    )
+    authority = hostname if port is None or default_port else f"{hostname}:{port}"
+    normalized_path = "/" + posixpath.normpath(
+        "/" + unquote(remote_path or "").lstrip("/")
+    ).lstrip("/")
+    canonical = f"webdav:{scheme}://{authority}{normalized_path}"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def validate_webdav_url(url: str, *, trusted_private_network: bool) -> str:

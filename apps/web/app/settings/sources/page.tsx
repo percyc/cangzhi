@@ -17,6 +17,7 @@ type Source = {
   trusted_private_network: boolean;
   include_extensions: string[];
   ignore_patterns: string[];
+  is_enabled: boolean;
   sync_status: string;
   last_error: string | null;
   last_scan_at: string | null;
@@ -30,6 +31,18 @@ type Entry = {
   state: string;
   document_id: number | null;
   last_error: string | null;
+  ignore_reason: string | null;
+};
+type DeleteImpact = {
+  entry_count: number;
+  active_document_count: number;
+  trashed_document_count: number;
+  remote_files_affected: number;
+};
+type RemoveDialog = {
+  source: Source;
+  impact: DeleteImpact;
+  documentAction: 'keep' | 'trash';
 };
 
 type SourceForm = {
@@ -70,6 +83,7 @@ export default function SourcesPage() {
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [removeDialog, setRemoveDialog] = useState<RemoveDialog | null>(null);
 
   const load = useCallback(async () => {
     const response = await fetch('/api/webdav', { cache: 'no-store' });
@@ -200,20 +214,66 @@ export default function SourcesPage() {
     }));
   };
 
-  const remove = async (source: Source) => {
-    if (
-      !window.confirm(
-        `确定删除连接器“${source.name}”吗？已解析入库的资料会保留，远端文件不会被删除。`,
-      )
-    ) return;
+  const allowReimport = async (sourceId: number, entry: Entry) => {
+    setBusy(`${sourceId}:entry:${entry.id}`);
+    setError('');
+    try {
+      const response = await fetch(
+        `/api/webdav/${sourceId}/entries/${entry.id}/allow-reimport`,
+        { method: 'POST' },
+      );
+      if (!response.ok) throw new Error(await readError(response, '重新纳入失败'));
+      const entriesResponse = await fetch(`/api/webdav/${sourceId}/entries`, {
+        cache: 'no-store',
+      });
+      if (!entriesResponse.ok)
+        throw new Error(await readError(entriesResponse, '文件清单读取失败'));
+      const items = (await entriesResponse.json()) as Entry[];
+      setEntries((current) => ({ ...current, [sourceId]: items }));
+      setMessage('该远端文件已允许重新入库，请重新扫描并同步。');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '重新纳入失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const prepareRemove = async (source: Source) => {
+    setBusy(`${source.id}:impact`);
+    setError('');
+    try {
+      const response = await fetch(`/api/webdav/${source.id}/delete-impact`, {
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(await readError(response, '删除影响读取失败'));
+      setRemoveDialog({
+        source,
+        impact: (await response.json()) as DeleteImpact,
+        documentAction: 'keep',
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '删除影响读取失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const remove = async (dialog: RemoveDialog) => {
+    const { source, documentAction } = dialog;
     setBusy(`${source.id}:delete`);
     setError('');
     try {
-      const response = await fetch(`/api/webdav/${source.id}`, {
+      const response = await fetch(`/api/webdav/${source.id}?document_action=${documentAction}`, {
         method: 'DELETE',
       });
       if (!response.ok) throw new Error(await readError(response, '删除连接器失败'));
-      setMessage(`连接器“${source.name}”已删除，已入库资料仍然保留。`);
+      setMessage(
+        documentAction === 'trash'
+          ? `连接器“${source.name}”已删除，关联资料已移入回收站；远端文件未改动。`
+          : `连接器“${source.name}”已删除，已入库资料仍然保留；远端文件未改动。`,
+      );
+      setRemoveDialog(null);
       setEntries((current) => {
         const next = { ...current };
         delete next[source.id];
@@ -222,6 +282,29 @@ export default function SourcesPage() {
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '删除连接器失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const toggleEnabled = async (source: Source) => {
+    setBusy(`${source.id}:enabled`);
+    setError('');
+    try {
+      const response = await fetch(`/api/webdav/${source.id}/enabled`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_enabled: !source.is_enabled }),
+      });
+      if (!response.ok) throw new Error(await readError(response, '状态修改失败'));
+      setMessage(
+        !source.is_enabled
+          ? `知识源“${source.name}”已启用。`
+          : `知识源“${source.name}”已停用，配置和已入库资料均已保留。`,
+      );
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '状态修改失败');
     } finally {
       setBusy('');
     }
@@ -309,13 +392,13 @@ export default function SourcesPage() {
                       {source.username || '匿名访问'} · {source.recursive ? '包含子目录' : '仅当前目录'} · {source.include_extensions.join('、') || '未配置文件类型'}
                     </p>
                   </div>
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
-                    {statusLabel(source.sync_status)}
+                  <span className={`rounded-full px-3 py-1 text-xs ${source.is_enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                    {source.is_enabled ? statusLabel(source.sync_status) : '已停用'}
                   </span>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   {(['test', 'scan', 'sync'] as const).map((kind) => (
-                    <button key={kind} type="button" disabled={Boolean(busy)} onClick={() => void action(source, kind)} className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40">
+                    <button key={kind} type="button" disabled={Boolean(busy) || (!source.is_enabled && kind !== 'test')} onClick={() => void action(source, kind)} className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40">
                       {busy === `${source.id}:${kind}` ? '执行中…' : { test: '测试连接', scan: '扫描文件', sync: '同步入库' }[kind]}
                     </button>
                   ))}
@@ -325,18 +408,53 @@ export default function SourcesPage() {
                   <button type="button" onClick={() => void showEntries(source.id).catch((caught) => setError(caught instanceof Error ? caught.message : '读取失败'))} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100">
                     {entries[source.id] ? '收起清单' : '查看文件'}
                   </button>
-                  <button type="button" disabled={Boolean(busy)} onClick={() => void remove(source)} className="rounded px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
-                    {busy === `${source.id}:delete` ? '删除中…' : '删除连接器'}
+                  <button type="button" disabled={Boolean(busy)} onClick={() => void toggleEnabled(source)} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40">
+                    {busy === `${source.id}:enabled` ? '处理中…' : source.is_enabled ? '停用' : '启用'}
+                  </button>
+                  <button type="button" disabled={Boolean(busy)} onClick={() => void prepareRemove(source)} className="rounded px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
+                    {busy === `${source.id}:impact` ? '正在核对影响…' : '删除连接器'}
                   </button>
                 </div>
                 {source.last_error && <p className="mt-3 text-sm text-red-700">{source.last_error}</p>}
-                {entries[source.id] && <EntryTable entries={entries[source.id]} />}
+                {entries[source.id] && <EntryTable entries={entries[source.id]} sourceId={source.id} busy={busy} onAllowReimport={allowReimport} />}
               </>
             )}
           </section>
         ))}
         {!sources.length && <p className="rounded-xl border border-dashed p-8 text-center text-sm text-slate-500">还没有知识源。</p>}
       </div>
+      {removeDialog && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4">
+          <div role="dialog" aria-modal="true" className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <h2 className="text-lg font-semibold text-slate-900">删除连接器“{removeDialog.source.name}”</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              将删除连接配置和 {removeDialog.impact.entry_count} 条扫描记录。WebDAV 远端始终只读，不会删除任何远端文件。
+            </p>
+            <fieldset className="mt-5 space-y-3">
+              <label className="flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-4">
+                <input type="radio" name="document-action" checked={removeDialog.documentAction === 'keep'} onChange={() => setRemoveDialog({ ...removeDialog, documentAction: 'keep' })} />
+                <span>
+                  <span className="block text-sm font-medium text-slate-900">保留已入库资料（推荐）</span>
+                  <span className="mt-1 block text-xs leading-5 text-slate-500">{removeDialog.impact.active_document_count} 条可用资料继续保留在知识库，只是与连接器脱离。</span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-4">
+                <input type="radio" name="document-action" checked={removeDialog.documentAction === 'trash'} onChange={() => setRemoveDialog({ ...removeDialog, documentAction: 'trash' })} />
+                <span>
+                  <span className="block text-sm font-medium text-slate-900">将关联资料移入回收站</span>
+                  <span className="mt-1 block text-xs leading-5 text-slate-500">以后仍可恢复；要彻底清除正文和向量，请再到回收站永久删除。</span>
+                </span>
+              </label>
+            </fieldset>
+            <div className="mt-6 flex justify-end gap-2">
+              <button type="button" disabled={Boolean(busy)} onClick={() => setRemoveDialog(null)} className="rounded-xl border border-slate-300 px-4 py-2 text-sm">取消</button>
+              <button type="button" disabled={Boolean(busy)} onClick={() => void remove(removeDialog)} className="rounded-xl bg-red-700 px-4 py-2 text-sm text-white disabled:opacity-40">
+                {busy === `${removeDialog.source.id}:delete` ? '正在删除…' : '确认删除连接器'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -407,8 +525,8 @@ function Field({ label, value, onChange, type = 'text', placeholder = '', requir
   return <label className="text-sm text-slate-700">{label}<input required={required} disabled={disabled} value={value} type={type} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 disabled:bg-slate-100" /></label>;
 }
 
-function EntryTable({ entries }: { entries: Entry[] }) {
-  return <div className="mt-4 overflow-x-auto border-t pt-3"><table className="min-w-full text-left text-xs"><thead className="text-slate-500"><tr><th className="py-2">远端文件</th><th>状态</th><th>大小</th><th>资料</th></tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="border-t"><td className="max-w-xl break-all py-2 pr-4">{entry.remote_path}</td><td>{entryState(entry.state)}</td><td>{formatSize(entry.file_size)}</td><td>{entry.document_id ? <Link className="text-blue-700 hover:underline" href={`/documents/${entry.document_id}`}>查看</Link> : '—'}</td></tr>)}</tbody></table></div>;
+function EntryTable({ entries, sourceId, busy, onAllowReimport }: { entries: Entry[]; sourceId: number; busy: string; onAllowReimport: (sourceId: number, entry: Entry) => Promise<void> }) {
+  return <div className="mt-4 overflow-x-auto border-t pt-3"><table className="min-w-full text-left text-xs"><thead className="text-slate-500"><tr><th className="py-2">远端文件</th><th>状态</th><th>大小</th><th>资料</th></tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="border-t"><td className="max-w-xl break-all py-2 pr-4">{entry.remote_path}</td><td>{entryState(entry.state)}</td><td>{formatSize(entry.file_size)}</td><td>{entry.document_id ? <Link className="text-blue-700 hover:underline" href={`/documents/${entry.document_id}`}>查看</Link> : entry.ignore_reason === 'permanent_deleted' ? <button type="button" disabled={Boolean(busy)} onClick={() => void onAllowReimport(sourceId, entry)} className="text-blue-700 hover:underline disabled:opacity-40">{busy === `${sourceId}:entry:${entry.id}` ? '处理中…' : '允许重新入库'}</button> : '—'}</td></tr>)}</tbody></table></div>;
 }
 
 function statusLabel(value: string) {

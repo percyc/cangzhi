@@ -1,3 +1,6 @@
+from io import BytesIO
+
+
 def test_document_trash_restore_and_batch_management(client):
     test_client, _storage = client
     first = test_client.post(
@@ -35,6 +38,77 @@ def test_document_trash_restore_and_batch_management(client):
     assert restored.status_code == 200
     assert restored.json()["affected"] == 2
     assert len(test_client.get("/api/documents").json()) == 2
+
+
+def test_permanent_delete_requires_trash_and_cleans_only_unreferenced_blob(client):
+    test_client, storage = client
+    payload = b"shared source"
+    first = test_client.post(
+        "/api/files/upload",
+        files={"file": ("first.txt", BytesIO(payload), "text/plain")},
+    ).json()
+    second = test_client.post(
+        "/api/files/upload",
+        files={"file": ("second.txt", BytesIO(payload), "text/plain")},
+    ).json()
+    blob_id = first["current_version"]["blob"]["id"]
+    assert blob_id == second["current_version"]["blob"]["id"]
+    assert len(list(storage._blob_path.iterdir())) == 1
+
+    refused = test_client.delete(
+        f"/api/documents/{first['id']}/permanent"
+    )
+    assert refused.status_code == 409
+
+    assert test_client.delete(f"/api/documents/{first['id']}").status_code == 200
+    trashed = test_client.get("/api/documents?deleted=true").json()[0]
+    assert trashed["deleted_at"] is not None
+    purged = test_client.delete(
+        f"/api/documents/{first['id']}/permanent"
+    )
+    assert purged.status_code == 200
+    assert purged.json()["deleted_blobs"] == 0
+    assert test_client.get(f"/api/files/blobs/{blob_id}").status_code == 200
+    assert len(list(storage._blob_path.iterdir())) == 1
+
+    assert test_client.delete(f"/api/documents/{second['id']}").status_code == 200
+    purged = test_client.delete(
+        f"/api/documents/{second['id']}/permanent"
+    )
+    assert purged.status_code == 200
+    assert purged.json()["deleted_blobs"] == 1
+    assert test_client.get(f"/api/files/blobs/{blob_id}").status_code == 404
+    assert list(storage._blob_path.iterdir()) == []
+
+
+def test_batch_permanent_delete_and_empty_trash(client):
+    test_client, _storage = client
+    ids = [
+        test_client.post(
+            "/api/notes",
+            json={"title": f"待删除 {index}", "content": f"内容 {index}"},
+        ).json()["id"]
+        for index in range(3)
+    ]
+    assert (
+        test_client.post(
+            "/api/documents/batch/trash",
+            json={"document_ids": ids[:2]},
+        ).status_code
+        == 200
+    )
+    batch = test_client.post(
+        "/api/documents/batch/permanent-delete",
+        json={"document_ids": [ids[0]]},
+    )
+    assert batch.status_code == 200
+    assert batch.json()["affected"] == 1
+    emptied = test_client.delete("/api/documents/trash/empty")
+    assert emptied.status_code == 200
+    assert emptied.json()["affected"] == 1
+    assert {item["id"] for item in test_client.get("/api/documents").json()} == {
+        ids[2]
+    }
 
 
 def test_document_metadata_tags_and_batch_organization(client):
