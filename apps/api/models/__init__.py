@@ -5,23 +5,24 @@ from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from .processing import ProcessingJob
 from .taxonomy import (
+    DEFAULT_CATEGORY_SLUGS,
     Category,
     DocumentCategory,
     DocumentSummary,
     DocumentTag,
     Tag,
-    DEFAULT_CATEGORY_SLUGS,
+    TagMergeRecord,
 )
 from .webdav import WebDAVEntry, WebDAVSource
 
 __all__ = [
-    "Admin",
+    "DEFAULT_CATEGORY_SLUGS",
     "AIRuntimeConfig",
+    "Admin",
     "AuthSession",
     "Blob",
     "Category",
     "ChunkEmbedding",
-    "DEFAULT_CATEGORY_SLUGS",
     "Document",
     "DocumentCategory",
     "DocumentChunk",
@@ -32,6 +33,7 @@ __all__ = [
     "EmbeddingProfile",
     "ProcessingJob",
     "Tag",
+    "TagMergeRecord",
     "WebDAVEntry",
     "WebDAVSource",
 ]

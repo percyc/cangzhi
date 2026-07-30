@@ -1,22 +1,20 @@
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
+    DateTime,
     Float,
     ForeignKey,
-    Index,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy import text
 from sqlalchemy.orm import relationship
 
-from ..core.db import Base
 from .base import BaseModel
-
 
 DEFAULT_CATEGORY_SLUGS: tuple[tuple[str, str], ...] = (
     ("work", "工作与项目"),
@@ -210,3 +208,40 @@ class DocumentSummary(BaseModel):
             "confidence": self.confidence,
             "source": self.source,
         }
+
+
+class TagMergeRecord(BaseModel):
+    """Reversible audit record for one tag merged into another."""
+
+    __tablename__ = "tag_merge_records"
+
+    target_tag_id = Column(
+        Integer,
+        ForeignKey(
+            "tags.id",
+            name="fk_tag_merge_records_target_tag_id_tags",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    source_snapshot = Column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    moved_version_ids = Column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    deduplicated_version_ids = Column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    status = Column(
+        String(16),
+        nullable=False,
+        server_default=text("'active'"),
+        index=True,
+    )
+    reason = Column(Text, nullable=True)
+    undone_at = Column(DateTime(timezone=True), nullable=True)

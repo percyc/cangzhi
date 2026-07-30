@@ -224,18 +224,6 @@ export default function DocumentsListPage() {
 
       {view === 'active' && <div className="flex flex-wrap gap-3 mb-6">
         <Link
-          href="/ask"
-          className="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800"
-        >
-          问知识库
-        </Link>
-        <Link
-          href="/search"
-          className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
-        >
-          搜索资料
-        </Link>
-        <Link
           href="/categories"
           className="px-4 py-2 border border-slate-300 rounded hover:bg-slate-50"
         >

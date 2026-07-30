@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 import httpx
 
 from ..core.config import settings
 from .prompts import get_allowed_version
 from .schema import AnswerResult, UnderstandingResult, validate_against_evidence
-
 
 UNDERSTANDING_PROMPT = """你是一名中文个人知识库助理。下面是用户保存的一段内容（可能来自网页、文件或随手记）。
 
@@ -58,6 +58,15 @@ class AIProviderError(RuntimeError):
     """Raised when an AI provider call fails or returns invalid output."""
 
 
+def _strip_code_fence(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        first_newline = cleaned.find("\n")
+        cleaned = cleaned[first_newline + 1 :] if first_newline >= 0 else ""
+        cleaned = cleaned.removesuffix("```")
+    return cleaned.strip()
+
+
 class AIProvider(ABC):
     name: str = ""
     prompt_version: str = "v1"
@@ -82,6 +91,15 @@ class AIProvider(ABC):
         question: str,
         evidence: Sequence[dict],
     ) -> AnswerResult: ...
+
+    def generate_json(self, *, system: str, prompt: str) -> dict:
+        """Run a small operator-facing JSON task.
+
+        Providers that predate this optional capability remain valid;
+        callers must handle ``AIProviderError`` when unsupported.
+        """
+
+        raise AIProviderError("当前模型渠道不支持通用 JSON 任务")
 
 
 def _format_categories(
@@ -206,6 +224,40 @@ class OpenAICompatibleProvider(AIProvider):
     def is_configured(self) -> bool:
         return bool(self._api_key) and bool(self._base_url) and bool(self._model)
 
+    def generate_json(self, *, system: str, prompt: str) -> dict:
+        if not self.is_configured():
+            raise AIProviderError("未配置 OpenAI-compatible API Key")
+        try:
+            response = httpx.post(
+                f"{self._base_url}/chat/completions",
+                json={
+                    "model": self._model,
+                    "temperature": 0.1,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise AIProviderError(f"调用模型失败：{type(exc).__name__}") from None
+        if response.status_code >= 400:
+            raise AIProviderError(f"模型服务返回 HTTP {response.status_code}")
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+            payload = json.loads(_strip_code_fence(content))
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise AIProviderError("模型没有返回有效 JSON") from None
+        if not isinstance(payload, dict):
+            raise AIProviderError("模型 JSON 顶层必须是对象")
+        return payload
+
     def generate_understanding(
         self,
         *,
@@ -254,11 +306,11 @@ class OpenAICompatibleProvider(AIProvider):
             )
         try:
             data = response.json()
-        except ValueError as exc:
+        except ValueError:
             raise AIProviderError("模型响应不是 JSON") from None
         try:
             text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
+        except (KeyError, IndexError, TypeError):
             raise AIProviderError("模型响应缺少 choices 字段") from None
         return _parse_and_validate(text, category_slugs)
 
@@ -297,11 +349,11 @@ class OpenAICompatibleProvider(AIProvider):
             )
         try:
             data = response.json()
-        except ValueError as exc:
+        except ValueError:
             raise AIProviderError("模型响应不是 JSON") from None
         try:
             text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
+        except (KeyError, IndexError, TypeError):
             raise AIProviderError("模型响应缺少 choices 字段") from None
         allowed_ids = {int(item["id"]) for item in evidence if "id" in item}
         return _parse_answer_and_validate(text, allowed_ids)
@@ -324,6 +376,36 @@ class OllamaProvider(AIProvider):
 
     def is_configured(self) -> bool:
         return bool(self._base_url) and bool(self._model)
+
+    def generate_json(self, *, system: str, prompt: str) -> dict:
+        if not self.is_configured():
+            raise AIProviderError("未配置 Ollama 模型")
+        try:
+            response = httpx.post(
+                f"{self._base_url}/api/chat",
+                json={
+                    "model": self._model,
+                    "stream": False,
+                    "format": "json",
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise AIProviderError(f"调用 Ollama 失败：{type(exc).__name__}") from None
+        if response.status_code >= 400:
+            raise AIProviderError(f"Ollama 返回 HTTP {response.status_code}")
+        try:
+            content = response.json()["message"]["content"]
+            payload = json.loads(_strip_code_fence(content))
+        except (ValueError, KeyError, TypeError):
+            raise AIProviderError("模型没有返回有效 JSON") from None
+        if not isinstance(payload, dict):
+            raise AIProviderError("模型 JSON 顶层必须是对象")
+        return payload
 
     def generate_understanding(
         self,
@@ -364,11 +446,11 @@ class OllamaProvider(AIProvider):
             )
         try:
             data = response.json()
-        except ValueError as exc:
+        except ValueError:
             raise AIProviderError("Ollama 响应不是 JSON") from None
         try:
             text = data["message"]["content"]
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError):
             raise AIProviderError("Ollama 响应缺少 message.content") from None
         return _parse_and_validate(text, category_slugs)
 
@@ -398,11 +480,11 @@ class OllamaProvider(AIProvider):
             )
         try:
             data = response.json()
-        except ValueError as exc:
+        except ValueError:
             raise AIProviderError("Ollama 响应不是 JSON") from None
         try:
             text = data["message"]["content"]
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError):
             raise AIProviderError("Ollama 响应缺少 message.content") from None
         allowed_ids = {int(item["id"]) for item in evidence if "id" in item}
         return _parse_answer_and_validate(text, allowed_ids)
@@ -470,7 +552,7 @@ def _parse_answer_and_validate(
         raise AIProviderError(str(exc)) from None
 
 
-import re  # noqa: E402 — keep at the bottom to reuse above aliases
+import re
 
 
 def build_provider() -> AIProvider | None:

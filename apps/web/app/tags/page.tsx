@@ -9,21 +9,42 @@ type Tag = {
   name: string;
   description: string | null;
 };
+type Suggestion = {
+  target_tag_id: number;
+  source_tag_ids: number[];
+  reason: string;
+  confidence: number;
+};
+type MergeHistory = {
+  id: number;
+  status: string;
+  source: { name: string };
+  target: { id: number; name: string } | null;
+  reason: string | null;
+};
 
 export default function TagsPage() {
   const [tags, setTags] = useState<Tag[]>([]);
   const [newName, setNewName] = useState('');
   const [mergeSourceId, setMergeSourceId] = useState('');
   const [mergeTargetId, setMergeTargetId] = useState('');
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [selectedSuggestions, setSelectedSuggestions] = useState<number[]>([]);
+  const [history, setHistory] = useState<MergeHistory[]>([]);
+  const [analyzing, setAnalyzing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
-    const response = await fetch('/api/tags', { cache: 'no-store' });
-    if (!response.ok) throw new Error('标签读取失败');
-    setTags((await response.json()) as Tag[]);
+    const [tagsResponse, historyResponse] = await Promise.all([
+      fetch('/api/tags', { cache: 'no-store' }),
+      fetch('/api/tags/merges/history', { cache: 'no-store' }),
+    ]);
+    if (!tagsResponse.ok || !historyResponse.ok) throw new Error('标签读取失败');
+    setTags((await tagsResponse.json()) as Tag[]);
+    setHistory((await historyResponse.json()) as MergeHistory[]);
     setLoading(false);
   }, []);
 
@@ -108,6 +129,74 @@ export default function TagsPage() {
     }
   };
 
+  const analyze = async () => {
+    setAnalyzing(true);
+    setError('');
+    setMessage('');
+    try {
+      const response = await fetch('/api/tags/suggestions', { method: 'POST' });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(body.detail || 'AI 标签分析失败');
+      }
+      const body = (await response.json()) as { groups: Suggestion[] };
+      setSuggestions(body.groups);
+      setSelectedSuggestions(body.groups.map((_item, index) => index));
+      setMessage(
+        body.groups.length
+          ? `AI 找到 ${body.groups.length} 组合并建议，请确认后执行。`
+          : 'AI 没有发现足够可靠的合并建议。',
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'AI 标签分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const applySuggestions = async () => {
+    const groups = suggestions.filter((_item, index) =>
+      selectedSuggestions.includes(index),
+    );
+    if (!groups.length) return;
+    if (!window.confirm(`确定执行选中的 ${groups.length} 组合并建议吗？合并后可以从历史记录撤销。`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch('/api/tags/merge-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groups }),
+      });
+      if (!response.ok) throw new Error('批量合并失败');
+      setSuggestions([]);
+      setSelectedSuggestions([]);
+      setMessage('已完成 AI 建议的标签合并，可在合并历史中撤销。');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '批量合并失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const undo = async (record: MergeHistory) => {
+    if (!window.confirm(`撤销“${record.source.name}”的合并吗？`)) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/tags/merges/${record.id}/undo`, {
+        method: 'POST',
+      });
+      if (!response.ok) throw new Error('撤销合并失败');
+      setMessage('标签合并已撤销');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '撤销合并失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <main className="container mx-auto max-w-5xl p-4">
       <Link href="/documents" className="text-blue-600 hover:underline">← 返回知识库</Link>
@@ -144,6 +233,39 @@ export default function TagsPage() {
         </section>
       </div>
 
+      <section className="mt-6 rounded-xl border border-violet-200 bg-violet-50/40 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-semibold text-slate-900">AI 标签治理建议</h2>
+            <p className="mt-1 text-sm text-slate-500">AI 只给出保守建议，不会自动修改；确认合并后仍可撤销。</p>
+          </div>
+          <button type="button" disabled={analyzing || busy || tags.length < 2} onClick={analyze} className="rounded bg-violet-700 px-3 py-2 text-sm text-white disabled:opacity-40">
+            {analyzing ? '分析中…' : '让 AI 检查重复标签'}
+          </button>
+        </div>
+        {suggestions.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {suggestions.map((suggestion, index) => {
+              const target = tags.find((tag) => tag.id === suggestion.target_tag_id);
+              const sources = suggestion.source_tag_ids
+                .map((id) => tags.find((tag) => tag.id === id)?.name)
+                .filter(Boolean);
+              return (
+                <label key={`${suggestion.target_tag_id}-${index}`} className="flex gap-3 rounded-lg border border-violet-100 bg-white p-3">
+                  <input type="checkbox" checked={selectedSuggestions.includes(index)} onChange={(event) => setSelectedSuggestions((current) => event.target.checked ? [...current, index] : current.filter((item) => item !== index))} />
+                  <span className="text-sm">
+                    <span className="font-medium">{sources.join('、')} → {target?.name}</span>
+                    <span className="ml-2 text-xs text-violet-700">置信度 {Math.round(suggestion.confidence * 100)}%</span>
+                    <span className="mt-1 block text-xs text-slate-500">{suggestion.reason}</span>
+                  </span>
+                </label>
+              );
+            })}
+            <button type="button" disabled={busy || !selectedSuggestions.length} onClick={applySuggestions} className="rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-40">合并选中建议</button>
+          </div>
+        )}
+      </section>
+
       {loading ? (
         <p className="mt-6 text-slate-500">加载中…</p>
       ) : (
@@ -156,6 +278,27 @@ export default function TagsPage() {
           ))}
           {!tags.length && <p className="p-8 text-center text-sm text-slate-500">还没有标签。</p>}
         </div>
+      )}
+
+      {history.length > 0 && (
+        <section className="mt-6 rounded-xl border bg-white p-4">
+          <h2 className="font-semibold">合并历史</h2>
+          <div className="mt-3 space-y-2">
+            {history.slice(0, 20).map((record) => (
+              <div key={record.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2 text-sm first:border-0">
+                <span>
+                  {record.source.name} → {record.target?.name ?? '目标标签已删除'}
+                  {record.reason && <span className="ml-2 text-xs text-slate-400">{record.reason}</span>}
+                </span>
+                {record.status === 'active' ? (
+                  <button type="button" disabled={busy} onClick={() => void undo(record)} className="rounded px-2 py-1 text-xs text-amber-700 hover:bg-amber-50">撤销</button>
+                ) : (
+                  <span className="text-xs text-slate-400">已撤销</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
       )}
     </main>
   );
