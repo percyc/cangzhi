@@ -157,6 +157,7 @@ export default function DocumentDetailPage() {
   const [draftTitle, setDraftTitle] = useState('');
   const [draftSummary, setDraftSummary] = useState('');
   const [draftTagIds, setDraftTagIds] = useState<number[]>([]);
+  const [pipelineExpanded, setPipelineExpanded] = useState(false);
 
   const handleDelete = async () => {
     if (!window.confirm('确定删除这条资料吗？资料将进入回收站，可以恢复。')) return;
@@ -317,41 +318,84 @@ export default function DocumentDetailPage() {
     document.source_type === 'note' ||
     version?.structured_content?.document_type === 'markdown' ||
     Boolean(version?.blob?.original_filename?.toLowerCase().endsWith('.md'));
+  const canDownload =
+    document.source_type === 'file' &&
+    Boolean(
+      version?.blob ||
+        (document.origin?.kind === 'webdav' &&
+          document.origin.connector_available),
+    );
+  const knowledgeStatus =
+    pipeline?.overall_status === 'completed'
+      ? '知识库已就绪'
+      : pipeline?.overall_status === 'failed'
+        ? '知识库部分失败'
+        : '知识库处理中';
+  const informationSummary = [
+    document.primary_category?.name || '未分类',
+    document.tags.length ? `${document.tags.length} 个标签` : '无标签',
+    document.origin?.kind === 'webdav'
+      ? `WebDAV · ${document.origin.label}`
+      : sourceTypeLabels[document.source_type] || document.source_type,
+  ].join(' · ');
 
   return (
-    <main className="container mx-auto p-4">
+    <main className="container mx-auto max-w-6xl p-4">
       <Link href="/documents" className="text-blue-600 hover:underline">← 返回资料列表</Link>
 
-      <div className="mt-4 flex flex-wrap items-start justify-between gap-3">
+      <div className="mt-4">
         <h1 className="text-2xl font-bold text-slate-900">{document.title}</h1>
-        <button type="button" onClick={() => setEditingMetadata((value) => !value)} className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50">
-          {editingMetadata ? '取消编辑' : '编辑整理信息'}
-        </button>
       </div>
-      <div className="mt-2 flex flex-wrap gap-3 text-sm text-slate-500">
-        <span>类型：{sourceTypeLabels[document.source_type] || document.source_type}</span>
-        <span>创建：{new Date(document.created_at).toLocaleString('zh-CN')}</span>
-        <span className={statusColors[status] || 'text-slate-700'}>
-          正文：{statusLabels[status] || status}
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <span className={`rounded-full bg-slate-100 px-2.5 py-1 ${statusColors[status] || 'text-slate-700'}`}>
+          正文{statusLabels[status] || status}
         </span>
         {pipeline && (
           <span
-            className={
+            className={`rounded-full px-2.5 py-1 ${
               pipeline.overall_status === 'completed'
-                ? 'text-green-700'
+                ? 'bg-emerald-100 text-emerald-800'
                 : pipeline.overall_status === 'failed'
-                  ? 'text-red-700'
-                  : 'text-blue-700'
-            }
+                  ? 'bg-red-100 text-red-800'
+                  : 'bg-blue-100 text-blue-800'
+            }`}
           >
-            知识库：
-            {pipeline.overall_status === 'completed'
-              ? '已就绪'
-              : pipeline.overall_status === 'failed'
-                ? '部分失败'
-                : '处理中'}
+            {knowledgeStatus}
           </span>
         )}
+        <span className="text-slate-400">
+          {sourceTypeLabels[document.source_type] || document.source_type} ·{' '}
+          {new Date(document.created_at).toLocaleDateString('zh-CN')}
+        </span>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+        <button type="button" onClick={() => setEditingMetadata((value) => !value)} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+          {editingMetadata ? '取消编辑' : '编辑信息'}
+        </button>
+        {document.source_type === 'note' && (
+          <Link href={`/notes/${document.id}/edit`} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+            编辑正文
+          </Link>
+        )}
+        {document.source_url && (
+          <a href={document.source_url} target="_blank" rel="noreferrer noopener" className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+            打开来源
+          </a>
+        )}
+        {canDownload && (
+          <a href={`/api/documents/${document.id}/original`} className="rounded border border-blue-600 px-3 py-2 text-sm text-blue-700 hover:bg-blue-50">
+            {document.origin?.kind === 'webdav' ? '下载远端原文件' : '下载原文件'}
+          </a>
+        )}
+        {canRetry && (
+          <button type="button" onClick={handleRetry} disabled={retrying} className="rounded border border-amber-500 px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-50">
+            {retrying ? '正在提交…' : '重新处理'}
+          </button>
+        )}
+        <button type="button" onClick={handleDelete} disabled={deleting} className="ml-auto rounded px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50">
+          {deleting ? '删除中…' : '删除'}
+        </button>
       </div>
 
       {editingMetadata && (
@@ -386,119 +430,102 @@ export default function DocumentDetailPage() {
         </section>
       )}
 
-      {document.source_url && (
-        <div className="mt-3 text-sm">
-          <span className="text-slate-500">来源：</span>
-          <a
-            href={document.source_url}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="font-mono text-blue-600 hover:underline break-all"
-          >
-            {document.source_url}
-          </a>
-        </div>
-      )}
-      {document.origin?.kind === 'webdav' && (
-        <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm">
-          <div>
-            <span className="text-slate-500">知识来源：</span>
-            {document.origin.connector_available && document.origin.connector_id ? (
-              <Link href="/settings/sources" className="font-medium text-violet-800 hover:underline">
-                WebDAV · {document.origin.label}
-              </Link>
-            ) : (
-              <span className="font-medium text-slate-700">
-                WebDAV · {document.origin.label}
-              </span>
-            )}
+      <details className="mt-4 rounded-xl border border-slate-200 bg-white">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 hover:bg-slate-50">
+          <div className="min-w-0">
+            <span className="text-sm font-semibold text-slate-800">文档信息</span>
+            <span className="ml-3 text-xs text-slate-500">{informationSummary}</span>
           </div>
-          {document.origin.remote_path && (
-            <div className="mt-1 break-all font-mono text-xs text-slate-600">
-              {document.origin.remote_path}
+          <span className="shrink-0 text-xs text-slate-400">展开查看与整理</span>
+        </summary>
+        <div className="border-t border-slate-200 p-4">
+          {document.summary?.summary && (
+            <div>
+              <h2 className="text-xs font-semibold text-slate-500">摘要</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-700">{document.summary.summary}</p>
+            </div>
+          )}
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-slate-500">主分类</span>
+            {document.primary_category ? (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">{document.primary_category.name}</span>
+            ) : (
+              <span className="text-slate-400">未分类</span>
+            )}
+            <select
+              value={selectedCategoryId}
+              onChange={event => {
+                const value = event.target.value;
+                setSelectedCategoryId(value === '' ? '' : Number(value));
+                setCategoryMessage('');
+              }}
+              disabled={savingCategory}
+              className="ml-2 rounded border border-slate-300 px-2 py-1.5 text-sm"
+            >
+              <option value="">选择分类</option>
+              {categories.map(category => (
+                <option key={category.id} value={category.id}>{category.name}</option>
+              ))}
+            </select>
+            <button type="button" onClick={handleSaveCategory} disabled={savingCategory || selectedCategoryId === ''} className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50">
+              {savingCategory ? '保存中…' : '保存'}
+            </button>
+            {categoryMessage && <span className="text-xs text-slate-500">{categoryMessage}</span>}
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-slate-500">标签</span>
+            {document.tags.length ? document.tags.map(tag => (
+              <span key={tag.id} className="rounded-full border border-slate-200 px-2 py-0.5 text-slate-600">#{tag.name}</span>
+            )) : <span className="text-slate-400">无标签</span>}
+          </div>
+          {(metadata?.author || metadata?.published_at) && (
+            <div className="mt-4 text-xs text-slate-500">
+              {metadata?.author && <span>作者：{metadata.author}</span>}
+              {metadata?.author && metadata?.published_at && <span> · </span>}
+              {metadata?.published_at && <span>发布日期：{metadata.published_at}</span>}
+            </div>
+          )}
+          {document.source_url && (
+            <div className="mt-4 break-all text-xs">
+              <span className="text-slate-500">来源地址：</span>
+              <a href={document.source_url} target="_blank" rel="noreferrer noopener" className="font-mono text-blue-600 hover:underline">{document.source_url}</a>
+            </div>
+          )}
+          {document.origin?.kind === 'webdav' && (
+            <div className="mt-4 rounded-lg bg-violet-50 p-3 text-sm">
+              <span className="text-slate-500">知识来源：</span>
+              {document.origin.connector_available && document.origin.connector_id ? (
+                <Link href="/settings/sources" className="font-medium text-violet-800 hover:underline">WebDAV · {document.origin.label}</Link>
+              ) : (
+                <span className="font-medium text-slate-700">WebDAV · {document.origin.label}</span>
+              )}
+              {document.origin.remote_path && <div className="mt-1 break-all font-mono text-xs text-slate-600">{document.origin.remote_path}</div>}
             </div>
           )}
         </div>
-      )}
+      </details>
 
-      {pipeline && <PipelineStatus pipeline={pipeline} />}
-
-      {document.primary_category && (
-        <div className="mt-3 text-sm text-slate-700">
-          <span className="text-slate-500">主分类：</span>
-          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">
-            {document.primary_category.name}
-          </span>
-        </div>
-      )}
-
-      <section className="mt-3 rounded-xl border border-slate-200 bg-white p-4">
-        <h2 className="text-sm font-semibold text-slate-500">手动选择主分类</h2>
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <select
-            value={selectedCategoryId}
-            onChange={event => {
-              const value = event.target.value;
-              setSelectedCategoryId(value === '' ? '' : Number(value));
-              setCategoryMessage('');
-            }}
-            disabled={savingCategory}
-            className="rounded border border-slate-300 px-3 py-2 text-sm"
-          >
-            <option value="">未选择</option>
-            {categories.map(category => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={handleSaveCategory}
-            disabled={savingCategory || selectedCategoryId === ''}
-            className="rounded bg-slate-900 px-3 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
-          >
-            {savingCategory ? '保存中…' : '保存主分类'}
-          </button>
-        </div>
-        {categoryMessage && (
-          <p className="mt-2 text-xs text-slate-500">{categoryMessage}</p>
-        )}
-      </section>
-
-      {document.tags.length > 0 && (
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-slate-500">标签：</span>
-          {document.tags.map(tag => (
-            <span key={tag.id} className="rounded-full border border-slate-200 px-2 py-0.5 text-slate-600">
-              #{tag.name}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {document.summary?.summary && (
-        <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
-          <h2 className="text-sm font-semibold text-slate-500">摘要</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-700">{document.summary.summary}</p>
-        </section>
-      )}
-
-      {(metadata?.author || metadata?.published_at) && (
-        <div className="mt-3 text-xs text-slate-500">
-          {metadata?.author && <span>作者：{metadata.author}</span>}
-          {metadata?.author && metadata?.published_at && <span> · </span>}
-          {metadata?.published_at && <span>发布日期：{metadata.published_at}</span>}
-        </div>
-      )}
-
-      {document.source_type === 'note' && (
-        <Link
-          href={`/notes/${document.id}/edit`}
-          className="mt-4 inline-block rounded border border-slate-300 px-3 py-2 text-sm"
+      {pipeline && (
+        <details
+          className="mt-3 rounded-xl border border-slate-200 bg-white"
+          open={pipeline.overall_status !== 'completed' || pipelineExpanded}
+          onToggle={(event) =>
+            setPipelineExpanded(event.currentTarget.open)
+          }
         >
-          编辑随手记
-        </Link>
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 hover:bg-slate-50">
+            <div>
+              <span className="text-sm font-semibold text-slate-800">处理与检索状态</span>
+              <span className="ml-3 text-xs text-slate-500">
+                {knowledgeStatus} · {pipeline.stages.chunking.child_chunks} 个切片
+              </span>
+            </div>
+            <span className="shrink-0 text-xs text-slate-400">
+              {pipeline.overall_status === 'completed' ? '展开详情' : '处理中，自动展开'}
+            </span>
+          </summary>
+          <PipelineStatus pipeline={pipeline} />
+        </details>
       )}
 
       {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
@@ -527,39 +554,6 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap gap-3">
-        {document.source_type === 'file' &&
-          (version?.blob ||
-            (document.origin?.kind === 'webdav' &&
-              document.origin.connector_available)) && (
-          <a
-            href={`/api/documents/${document.id}/original`}
-            className="rounded border border-blue-600 px-3 py-2 text-sm text-blue-600 hover:bg-blue-50"
-          >
-            {document.origin?.kind === 'webdav'
-              ? '从 WebDAV 下载原文件'
-              : '下载原文件'}
-          </a>
-        )}
-        {canRetry && (
-          <button
-            type="button"
-            onClick={handleRetry}
-            disabled={retrying}
-            className="rounded bg-amber-600 px-3 py-2 text-sm text-white hover:bg-amber-700 disabled:opacity-50"
-          >
-            {retrying ? '正在提交…' : '重新处理'}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={handleDelete}
-          disabled={deleting}
-          className="rounded border border-red-300 px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50"
-        >
-          {deleting ? '正在删除…' : '删除资料'}
-        </button>
-      </div>
     </main>
   );
 }
@@ -676,14 +670,11 @@ function PipelineStatus({ pipeline }: { pipeline: ProcessingPipeline }) {
   ];
 
   return (
-    <section className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+    <div className="border-t border-slate-200 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h2 className="text-base font-semibold text-slate-800">知识库处理进度</h2>
-          <p className="mt-1 text-xs text-slate-500">
-            正文完成后，系统还会继续进行 AI 整理、切片和向量解析。
-          </p>
-        </div>
+        <p className="text-xs text-slate-500">
+          正文完成后，系统继续进行 AI 整理、切片和向量解析。
+        </p>
         <div className="flex flex-wrap gap-2 text-xs">
           <span
             className={`rounded-full px-2 py-1 ${
@@ -720,7 +711,7 @@ function PipelineStatus({ pipeline }: { pipeline: ProcessingPipeline }) {
           </div>
         ))}
       </div>
-    </section>
+    </div>
   );
 }
 
