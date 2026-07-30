@@ -94,10 +94,18 @@ def test_deleted_webdav_document_is_not_rediscovered(client, monkeypatch):
 
     monkeypatch.setattr("apps.api.api.webdav.propfind", fake_propfind)
     monkeypatch.setattr("apps.api.api.webdav.download_file", fake_download)
+    monkeypatch.setattr("apps.api.api.documents.download_file", fake_download)
     assert test_client.post(f"/api/webdav/{source['id']}/scan").status_code == 200
     synced = test_client.post(f"/api/webdav/{source['id']}/sync").json()
     assert synced["imported"] == 1
     entry = test_client.get(f"/api/webdav/{source['id']}/entries").json()[0]
+
+    downloaded = test_client.get(
+        f"/api/documents/{entry['document_id']}/original"
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"# title\nbody"
+    assert "a.md" in downloaded.headers["content-disposition"]
 
     assert test_client.delete(f"/api/documents/{entry['document_id']}").status_code == 200
     rescanned = test_client.post(f"/api/webdav/{source['id']}/scan").json()

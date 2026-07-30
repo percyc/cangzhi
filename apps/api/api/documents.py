@@ -1,6 +1,8 @@
 from io import BytesIO
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +46,26 @@ from .schemas import (
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 _RUNNING_JOB_STATUSES = {"created", "processing", "retry"}
+
+
+def _download_response(
+    stream,
+    *,
+    filename: str,
+    content_type: str,
+    content_length: int,
+) -> StreamingResponse:
+    encoded_filename = quote(filename or "download")
+    return StreamingResponse(
+        stream,
+        media_type=content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{encoded_filename}"
+            ),
+            "Content-Length": str(content_length),
+        },
+    )
 
 
 def _stage_payload(
@@ -507,6 +529,86 @@ async def restore_document(
     )
     await db.commit()
     return {"ok": True, "message": "资料已恢复"}
+
+
+@router.get("/{document_id}/original")
+async def download_document_original(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
+):
+    """Download an uploaded original or fetch a WebDAV original on demand."""
+
+    document = await db.get(Document, document_id)
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    version = (
+        await db.get(DocumentVersion, document.current_version_id)
+        if document.current_version_id is not None
+        else None
+    )
+    if version is None:
+        raise HTTPException(status_code=404, detail="资料没有当前版本")
+
+    document_meta = document.meta or {}
+    if document_meta.get("external_source") == "webdav":
+        source_id = document_meta.get("webdav_source_id")
+        source = (
+            await db.get(WebDAVSource, source_id)
+            if isinstance(source_id, int)
+            else None
+        )
+        entry = (
+            await db.scalar(
+                select(WebDAVEntry).where(
+                    WebDAVEntry.document_id == document.id,
+                    WebDAVEntry.source_id == source_id,
+                )
+            )
+            if source is not None
+            else None
+        )
+        if source is None or entry is None:
+            raise HTTPException(
+                status_code=409,
+                detail="原 WebDAV 连接器已不存在，无法获取原文件",
+            )
+        try:
+            payload, upstream_type = await download_file(
+                base_url=source.base_url,
+                remote_path=entry.remote_path,
+                username=source.username,
+                password=decrypt_secret(source.password_cipher),
+                trusted_private_network=source.trusted_private_network,
+                max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+            )
+        except (WebDAVError, URLSecurityError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"获取 WebDAV 原文件失败：{exc}",
+            ) from None
+        return _download_response(
+            BytesIO(payload),
+            filename=entry.remote_path.rsplit("/", 1)[-1],
+            content_type=upstream_type.split(";", 1)[0].strip(),
+            content_length=len(payload),
+        )
+
+    if version.blob_id is None:
+        raise HTTPException(status_code=404, detail="原文件不存在")
+    blob = await db.get(Blob, version.blob_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="原文件不存在")
+    try:
+        stream = storage.open(blob.storage_key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="原文件内容已丢失") from None
+    return _download_response(
+        stream,
+        filename=blob.original_filename or "download",
+        content_type=blob.content_type,
+        content_length=blob.file_size,
+    )
 
 
 @router.post("/{document_id}/reprocess", response_model=DocumentReprocessResponse)

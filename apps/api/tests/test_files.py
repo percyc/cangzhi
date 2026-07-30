@@ -69,6 +69,13 @@ def test_file_upload_reuses_blob_but_keeps_explicit_document_records(client):
     assert downloaded.status_code == 200
     assert downloaded.content == content
 
+    downloaded_by_document = test_client.get(
+        f"/api/documents/{first_body['id']}/original"
+    )
+    assert downloaded_by_document.status_code == 200
+    assert downloaded_by_document.content == content
+    assert "knowledge.txt" in downloaded_by_document.headers["content-disposition"]
+
 
 def test_file_upload_validates_extension_and_mime(client):
     test_client, _ = client

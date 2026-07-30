@@ -528,12 +528,17 @@ export default function DocumentDetailPage() {
       )}
 
       <div className="mt-4 flex flex-wrap gap-3">
-        {document.source_type === 'file' && version?.blob && (
+        {document.source_type === 'file' &&
+          (version?.blob ||
+            (document.origin?.kind === 'webdav' &&
+              document.origin.connector_available)) && (
           <a
-            href={`/api/files/blobs/${version.blob.id}/download`}
+            href={`/api/documents/${document.id}/original`}
             className="rounded border border-blue-600 px-3 py-2 text-sm text-blue-600 hover:bg-blue-50"
           >
-            下载原文件
+            {document.origin?.kind === 'webdav'
+              ? '从 WebDAV 下载原文件'
+              : '下载原文件'}
           </a>
         )}
         {canRetry && (
