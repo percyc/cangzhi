@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 
+import { SettingsSectionNav } from '@/components/SettingsSectionNav';
+
 type Counts = { total: number; pending: number; failed: number; synced: number };
 type Source = {
   id: number;
@@ -226,9 +228,17 @@ export default function SourcesPage() {
   };
 
   return (
-    <main className="container mx-auto max-w-6xl p-4">
-      <Link href="/settings" className="text-sm text-blue-700 hover:underline">← 返回设置</Link>
-      <h1 className="mt-4 text-2xl font-bold">知识源</h1>
+    <main className="mx-auto max-w-5xl px-4 sm:px-6">
+      <h1 className="text-2xl font-semibold text-slate-900">设置</h1>
+      <p className="mt-2 text-sm text-slate-500">
+        管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
+      </p>
+      <SettingsSectionNav active="sources" />
+
+      <div className="mt-8">
+        <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600">外部知识来源</p>
+        <h2 className="mt-1 text-xl font-semibold text-slate-900">知识源</h2>
+      </div>
       <p className="mt-1 text-sm text-slate-500">
         连接外部文件夹，藏知只读扫描远端文件，下载后沿用正文解析、智能切片和向量流程。
       </p>

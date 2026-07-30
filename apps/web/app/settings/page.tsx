@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import {
@@ -19,12 +18,16 @@ import {
   type EmbeddingCompatibilityResult,
   type EmbeddingStatus,
 } from '@/lib/api';
+import {
+  SettingsSectionNav,
+  type SettingsSection,
+} from '@/components/SettingsSectionNav';
 
 type Provider = AIConfig['provider'];
 type EmbeddingProvider = AIConfig['embedding_provider'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type FetchState = 'idle' | 'fetching' | 'success' | 'error';
-type SettingsPanel = 'chat' | 'embedding';
+type SettingsPanel = Exclude<SettingsSection, 'sources'>;
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -102,6 +105,15 @@ export default function SettingsPage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const syncPanelFromHash = () => {
+      setActivePanel(window.location.hash === '#embedding' ? 'embedding' : 'chat');
+    };
+    syncPanelFromHash();
+    window.addEventListener('hashchange', syncPanelFromHash);
+    return () => window.removeEventListener('hashchange', syncPanelFromHash);
   }, []);
 
   useEffect(() => {
@@ -358,36 +370,27 @@ export default function SettingsPage() {
       <p className="mt-2 text-sm text-slate-500">
         管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
       </p>
-      <div className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 sm:grid-cols-4">
-        <SettingsPanelButton
-          title="对话模型"
-          hint={provider === 'disabled' ? '当前未启用' : currentChatModel(provider, openaiModel, ollamaModel)}
-          active={activePanel === 'chat'}
-          onClick={() => setActivePanel('chat')}
-          dirty={chatDirty}
-        />
-        <SettingsPanelButton
-          title="向量与索引"
-          hint={
-            embeddingStatus?.active_profile.id
-              ? `${embeddingStatus.active_profile.model} · ${embeddingStatus.active_profile.dim} 维`
-              : '当前未启用'
-          }
-          active={activePanel === 'embedding'}
-          onClick={() => setActivePanel('embedding')}
-          dirty={embeddingDirty}
-        />
-        <SettingsLink
-          href="/settings/sources"
-          title="知识源"
-          hint="WebDAV 连接与同步"
-        />
-        <SettingsLink
-          href="/inbox"
-          title="系统任务"
-          hint="解析和索引状态"
-        />
-      </div>
+      <SettingsSectionNav
+        active={activePanel}
+        hints={{
+          chat:
+            provider === 'disabled'
+              ? '当前未启用'
+              : currentChatModel(provider, openaiModel, ollamaModel),
+          embedding: embeddingStatus?.active_profile.id
+            ? `${embeddingStatus.active_profile.model} · ${embeddingStatus.active_profile.dim} 维`
+            : '当前未启用',
+        }}
+        dirty={{ chat: chatDirty, embedding: embeddingDirty }}
+        onSelect={(section) => {
+          if (section !== 'sources') setActivePanel(section);
+        }}
+        beforeNavigate={(section) =>
+          section !== 'sources' ||
+          !anyDirty ||
+          window.confirm('模型设置还有未保存的修改，确定离开并前往知识源吗？')
+        }
+      />
 
       <form className="mt-6 space-y-6" onSubmit={handleSave}>
         {activePanel === 'chat' && (
@@ -945,63 +948,6 @@ export default function SettingsPage() {
         </div>
       </form>
     </main>
-  );
-}
-
-function SettingsPanelButton({
-  title,
-  hint,
-  active,
-  dirty,
-  onClick,
-}: {
-  title: string;
-  hint: string;
-  active: boolean;
-  dirty: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={`rounded-xl p-3 text-left ${
-        active
-          ? 'bg-slate-950 text-white shadow-sm'
-          : 'text-slate-700 hover:bg-slate-50'
-      }`}
-    >
-      <span className="flex items-center justify-between gap-2">
-        <span className="text-sm font-semibold">{title}</span>
-        {dirty && (
-          <span className={`h-2 w-2 rounded-full ${active ? 'bg-amber-300' : 'bg-amber-500'}`} title="有未保存的修改" />
-        )}
-      </span>
-      <span className={`mt-1 block truncate text-xs ${active ? 'text-slate-300' : 'text-slate-400'}`}>
-        {hint}
-      </span>
-    </button>
-  );
-}
-
-function SettingsLink({
-  href,
-  title,
-  hint,
-}: {
-  href: string;
-  title: string;
-  hint: string;
-}) {
-  return (
-    <Link href={href} className="group rounded-xl p-3 text-left text-slate-700 hover:bg-slate-50">
-      <span className="flex items-center justify-between gap-2 text-sm font-semibold">
-        {title}
-        <span className="text-slate-300 transition-transform group-hover:translate-x-0.5">→</span>
-      </span>
-      <span className="mt-1 block truncate text-xs text-slate-400">{hint}</span>
-    </Link>
   );
 }
 
