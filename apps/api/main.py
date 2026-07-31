@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import (
+    access_tokens,
     ask,
     auth,
     categories,
@@ -27,10 +28,12 @@ from .api import (
     exports,
     files,
     health,
+    mcp,
     notes,
     search,
     settings_ai,
     sources,
+    v1,
     webdav,
 )
 from .api.auth import require_admin
@@ -71,6 +74,8 @@ app.add_middleware(
 # Public routers — anyone may call these.
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(v1.router, prefix="/api")
+app.include_router(mcp.router, prefix="/api")
 
 # Protected routers — every endpoint requires an authenticated
 # admin. ``Depends(require_admin)`` reads the session cookie and
@@ -81,6 +86,7 @@ _admin_dep = [Depends(require_admin)]
 app.include_router(
     settings_ai.router, prefix="/api", dependencies=_admin_dep, tags=["settings"]
 )
+app.include_router(access_tokens.router, prefix="/api")
 app.include_router(notes.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(files.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(documents.router, prefix="/api", dependencies=_admin_dep)

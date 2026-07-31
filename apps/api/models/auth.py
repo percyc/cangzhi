@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     Column,
@@ -16,10 +17,8 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy import JSON
 
 from .base import BaseModel
-
 
 # --- AI runtime config ----------------------------------------------------
 
@@ -239,3 +238,74 @@ class AuthSession(BaseModel):
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=timezone.utc)
         return expires > datetime.now(tz=timezone.utc)
+
+
+class PersonalAccessToken(BaseModel):
+    """Personal Access Token for API authentication.
+
+    Tokens are always owned by an admin (single-user system today).
+    Only the SHA-256 hash of the token is stored; the plaintext is
+    only returned once at creation time. A short prefix is kept for
+    identification without exposing the full hash.
+    """
+
+    __tablename__ = "personal_access_tokens"
+
+    admin_id = Column(
+        Integer,
+        ForeignKey(
+            "admins.id",
+            name="fk_personal_access_tokens_admin_id_admins",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+    name = Column(String(255), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    token_prefix = Column(String(15), nullable=False, index=True)
+    scopes = Column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        server_default=text("'[]'"),
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_personal_access_tokens_admin_active", "admin_id", "revoked_at"),
+        Index("ix_personal_access_tokens_expires_at", "expires_at"),
+    )
+
+    def to_public_dict(self) -> dict:
+        """Return a safe public representation without sensitive fields."""
+        return {
+            "id": self.id,
+            "admin_id": self.admin_id,
+            "name": self.name,
+            "token_prefix": self.token_prefix,
+            "scopes": self.scopes,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    @property
+    def is_valid(self) -> bool:
+        """Check if the token is currently usable."""
+        if self.revoked_at is not None:
+            return False
+        if self.expires_at is not None:
+            expires = self.expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires <= datetime.now(tz=timezone.utc):
+                return False
+        return True
+
+    def has_scope(self, scope: str) -> bool:
+        """Check if this token has the given scope."""
+        return scope in (self.scopes or [])

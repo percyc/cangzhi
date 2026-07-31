@@ -1,0 +1,7 @@
+interface:
+  display_name: "藏知知识库"
+  short_description: "Search Cangzhi with verifiable knowledge citations"
+  default_prompt: "Use $cangzhi-knowledge to retrieve evidence from my personal knowledge base and answer with verifiable citations."
+
+policy:
+  allow_implicit_invocation: true

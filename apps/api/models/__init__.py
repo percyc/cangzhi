@@ -1,8 +1,9 @@
-from .auth import Admin, AIRuntimeConfig, AuthSession
+from .auth import Admin, AIRuntimeConfig, AuthSession, PersonalAccessToken
 from .blobs import Blob
 from .chunks import DocumentChunk
 from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
+from .knowledge_scopes import KnowledgeScope
 from .processing import ProcessingJob
 from .taxonomy import (
     DEFAULT_CATEGORY_SLUGS,
@@ -20,6 +21,7 @@ __all__ = [
     "AIRuntimeConfig",
     "Admin",
     "AuthSession",
+    "PersonalAccessToken",
     "Blob",
     "Category",
     "ChunkEmbedding",
@@ -32,6 +34,7 @@ __all__ = [
     "DocumentVersion",
     "EmbeddingProfile",
     "ExternalItemExclusion",
+    "KnowledgeScope",
     "ProcessingJob",
     "Tag",
     "TagMergeRecord",

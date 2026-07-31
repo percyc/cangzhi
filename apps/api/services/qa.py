@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, false, func, or_, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
@@ -97,6 +97,9 @@ class AskRequest:
     tag_ids: list[int] = field(default_factory=list)
     tag_slugs: list[str] = field(default_factory=list)
     source_types: list[str] = field(default_factory=list)
+    document_ids: list[int] = field(default_factory=list)
+    connector_ids: list[int] = field(default_factory=list)
+    matches_none: bool = False
 
 
 @dataclass
@@ -232,6 +235,9 @@ class QAService:
             tag_ids=request.tag_ids,
             tag_slugs=request.tag_slugs,
             source_types=request.source_types,
+            document_ids=request.document_ids,
+            connector_ids=request.connector_ids,
+            matches_none=request.matches_none,
         )
         if not evidence:
             return AskResult(
@@ -312,13 +318,35 @@ class QAService:
         tag_ids: Sequence[int],
         tag_slugs: Sequence[str],
         source_types: Sequence[str],
+        document_ids: Sequence[int] | None = None,
+        connector_ids: Sequence[int] | None = None,
+        matches_none: bool = False,
     ) -> tuple[list[Evidence], dict]:
+        effective_document_ids = list(document_ids or [])
+        if connector_ids and not matches_none:
+            from .knowledge_scopes import resolve_connector_document_ids
+
+            connector_document_ids = await resolve_connector_document_ids(
+                db, connector_ids
+            )
+            if not connector_document_ids:
+                matches_none = True
+            elif effective_document_ids:
+                effective_document_ids = sorted(
+                    set(effective_document_ids).intersection(connector_document_ids)
+                )
+                matches_none = not effective_document_ids
+            else:
+                effective_document_ids = connector_document_ids
         filters = {
             "category_ids": list(category_ids),
             "category_slugs": list(category_slugs),
             "tag_ids": list(tag_ids),
             "tag_slugs": list(tag_slugs),
             "source_types": list(source_types),
+            "document_ids": effective_document_ids,
+            "connector_ids": list(connector_ids or []),
+            "matches_none": matches_none,
         }
         if _contains_cjk(question):
             rows = await self._recall_cjk(
@@ -815,6 +843,8 @@ def _apply_filters(stmt, filters: dict):
     )
 
     conditions = []
+    if filters.get("matches_none"):
+        conditions.append(false())
     category_ids = filters.get("category_ids") or []
     category_slugs = filters.get("category_slugs") or []
     if category_ids or category_slugs:
@@ -840,6 +870,9 @@ def _apply_filters(stmt, filters: dict):
     source_types = filters.get("source_types") or []
     if source_types:
         conditions.append(Document.source_type.in_(source_types))
+    document_ids = filters.get("document_ids") or []
+    if document_ids:
+        conditions.append(Document.id.in_(document_ids))
     if conditions:
         stmt = stmt.where(and_(*conditions))
     return stmt

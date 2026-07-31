@@ -2,7 +2,12 @@
 
 import Link from 'next/link';
 
-export type SettingsSection = 'chat' | 'embedding' | 'sources' | 'data';
+export type SettingsSection =
+  | 'chat'
+  | 'embedding'
+  | 'sources'
+  | 'data'
+  | 'access';
 
 type Item = {
   id: SettingsSection;
@@ -36,6 +41,12 @@ const ITEMS: Item[] = [
     title: '数据与备份',
     defaultHint: '导出、备份与恢复',
   },
+  {
+    id: 'access',
+    href: '/settings/access',
+    title: '外部接入',
+    defaultHint: 'CLI、Skill 与 MCP 令牌',
+  },
 ];
 
 export function SettingsSectionNav({
@@ -54,7 +65,7 @@ export function SettingsSectionNav({
   return (
     <nav
       aria-label="设置分类"
-      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 md:grid-cols-4"
+      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 md:grid-cols-5"
     >
       {ITEMS.map((item) => {
         const selected = active === item.id;

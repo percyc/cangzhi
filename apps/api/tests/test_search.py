@@ -356,6 +356,37 @@ def test_search_filters_by_tag(search_db):
     assert result.hits[0].title == "带标签的笔记"
 
 
+def test_search_document_scope_and_empty_intersection_never_expand(search_db):
+    from apps.api.services.search import search_documents
+
+    async def _run():
+        selected_id = await _seed_document(
+            search_db,
+            title="选中的资料",
+            source_type=DocumentSourceType.note,
+            body="共同检索词只应命中选中的资料。",
+        )
+        await _seed_document(
+            search_db,
+            title="范围外资料",
+            source_type=DocumentSourceType.note,
+            body="共同检索词也存在于范围外。",
+        )
+        async with search_db() as session:
+            selected = await search_documents(
+                session, query="共同检索词", document_ids=[selected_id]
+            )
+            empty = await search_documents(
+                session, query="共同检索词", matches_none=True
+            )
+            return selected, empty
+
+    selected, empty = asyncio.run(_run())
+    assert [hit.title for hit in selected.hits] == ["选中的资料"]
+    assert empty.total == 0
+    assert empty.hits == []
+
+
 def test_search_post_endpoint(search_db):
     asyncio.run(
         _seed_document(

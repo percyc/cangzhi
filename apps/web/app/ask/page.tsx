@@ -1,35 +1,13 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
+import remarkGfm from 'remark-gfm';
 
-type CategoryOption = {
-  id: number;
-  slug: string;
-  name: string;
-  document_count: number;
-};
-
-type TagOption = {
-  id: number;
-  slug: string;
-  name: string;
-  document_count: number;
-};
-
-type SourceTypeOption = {
-  value: string;
-  label: string;
-};
-
-type FiltersPayload = {
-  source_types: SourceTypeOption[];
-  categories: CategoryOption[];
-  tags: TagOption[];
-};
-
-type AskCitation = {
+type Citation = {
   id: number;
   document_id: number;
   document_version_id: number;
@@ -43,36 +21,36 @@ type AskCitation = {
   source_type: string;
   source_url: string | null;
   snippet: string;
-  categories: { id: number; slug: string; name: string }[];
-  tags: { id: number; slug: string; name: string }[];
 };
 
 type AskResponse = {
   question: string;
   answer: string;
   insufficient_evidence: boolean;
-  citations: AskCitation[];
-  evidence: AskCitation[];
+  citations: Citation[];
+  evidence: Citation[];
   provider: string;
   model: string | null;
   retrieval?: {
-    mode: string;
     vector_used: boolean;
     degraded_reason: string | null;
-    active_profile_id: number | null;
   };
+  scope?: { slug: string };
 };
 
-type AskStatus = {
-  provider_configured: boolean;
-  provider: string;
+type KnowledgeScope = {
+  id: number | null;
+  slug: string;
+  name: string;
+  description: string | null;
+  system: boolean;
 };
 
-type State =
-  | { kind: 'idle' }
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; payload: AskResponse };
+type Turn = {
+  id: number;
+  question: string;
+  response: AskResponse;
+};
 
 export default function AskPage() {
   return (
@@ -84,501 +62,395 @@ export default function AskPage() {
 
 function AskSkeleton() {
   return (
-    <main className="container mx-auto max-w-4xl p-4">
-      <p className="text-sm text-slate-500">加载中…</p>
+    <main className="mx-auto max-w-6xl px-5 py-8">
+      <div className="h-8 w-48 animate-pulse rounded bg-slate-200" />
+      <div className="mt-6 h-80 animate-pulse rounded-3xl bg-slate-100" />
     </main>
   );
 }
 
 function AskClient() {
   const searchParams = useSearchParams();
-  const initialQuestion = searchParams.get('q') ?? '';
-
-  const [question, setQuestion] = useState(initialQuestion);
-  const [categorySlugs, setCategorySlugs] = useState<string[]>([]);
-  const [tagSlugs, setTagSlugs] = useState<string[]>([]);
-  const [sourceTypes, setSourceTypes] = useState<string[]>([]);
-  const [filters, setFilters] = useState<FiltersPayload | null>(null);
-  const [filtersError, setFiltersError] = useState<string | null>(null);
-  const [status, setStatus] = useState<AskStatus | null>(null);
-  const [statusError, setStatusError] = useState<string | null>(null);
-  const [state, setState] = useState<State>({ kind: 'idle' });
+  const [question, setQuestion] = useState(searchParams.get('q') ?? '');
+  const [scopeSlug, setScopeSlug] = useState('all');
+  const [scopes, setScopes] = useState<KnowledgeScope[]>([]);
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [providerReady, setProviderReady] = useState<boolean | null>(null);
+  const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetch('/api/ask/status', { cache: 'no-store' })
-      .then((res) => {
-        if (!res.ok) throw new Error('暂时无法读取问答状态');
-        return res.json();
+    Promise.all([
+      fetch('/api/v1/knowledge/scopes', { cache: 'no-store' }).then(
+        async (response) => {
+          if (!response.ok) throw new Error('知识范围加载失败');
+          return (await response.json()) as { items: KnowledgeScope[] };
+        },
+      ),
+      fetch('/api/ask/status', { cache: 'no-store' }).then(
+        async (response) => {
+          if (!response.ok) throw new Error('模型状态加载失败');
+          return (await response.json()) as { provider_configured: boolean };
+        },
+      ),
+    ])
+      .then(([scopeResult, status]) => {
+        setScopes(scopeResult.items);
+        setProviderReady(status.provider_configured);
       })
-      .then((data: AskStatus) => {
-        setStatus(data);
-        setStatusError(null);
-      })
-      .catch((err) => {
-        setStatusError(err instanceof Error ? err.message : '读取问答状态失败');
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : '初始化失败');
       });
   }, []);
 
   useEffect(() => {
-    fetch('/api/search/filters', { cache: 'no-store' })
-      .then((res) => {
-        if (!res.ok) throw new Error('暂时无法读取筛选条件');
-        return res.json();
-      })
-      .then((data: FiltersPayload) => {
-        setFilters(data);
-        setFiltersError(null);
-      })
-      .catch((err) => {
-        setFiltersError(err instanceof Error ? err.message : '读取筛选条件失败');
-      });
-  }, []);
+    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [turns, loading]);
 
   const runAsk = async () => {
     const trimmed = question.trim();
-    if (!trimmed || state.kind === 'loading') return;
-    setState({ kind: 'loading' });
+    if (!trimmed || loading) return;
+    setLoading(true);
+    setError(null);
     try {
-      const response = await fetch('/api/ask', {
+      const response = await fetch('/api/v1/knowledge/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question: trimmed,
-          category_slugs: categorySlugs,
-          tag_slugs: tagSlugs,
-          source_types: sourceTypes,
+          scope_slug: scopeSlug,
         }),
       });
+      const body = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
         const detail = body?.detail;
-        if (detail && typeof detail === 'object') {
-          throw new Error(detail.message ?? '问答请求失败');
-        }
-        throw new Error(typeof detail === 'string' ? detail : '问答请求失败');
+        throw new Error(
+          typeof detail === 'object'
+            ? (detail.message ?? '问答请求失败')
+            : (detail ?? '问答请求失败'),
+        );
       }
-      const payload = (await response.json()) as AskResponse;
-      setState({ kind: 'ready', payload });
-      const params = new URLSearchParams();
-      params.set('q', trimmed);
-      window.history.replaceState(null, '', `/ask?${params.toString()}`);
-    } catch (err) {
-      setState({
-        kind: 'error',
-        message: err instanceof Error ? err.message : '问答失败',
-      });
+      setTurns((current) => [
+        ...current,
+        {
+          id: Date.now(),
+          question: trimmed,
+          response: body as AskResponse,
+        },
+      ]);
+      setQuestion('');
+      window.history.replaceState(null, '', '/ask');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '问答失败');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const toggleCategory = (slug: string) => {
-    setCategorySlugs((prev) =>
-      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
-    );
-  };
-  const toggleTag = (slug: string) => {
-    setTagSlugs((prev) =>
-      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
-    );
-  };
-  const toggleSourceType = (value: string) => {
-    setSourceTypes((prev) =>
-      prev.includes(value) ? prev.filter((s) => s !== value) : [...prev, value],
-    );
-  };
-
-  const hasAnyFilter =
-    categorySlugs.length > 0 || tagSlugs.length > 0 || sourceTypes.length > 0;
+  const selectedScope = scopes.find((item) => item.slug === scopeSlug);
 
   return (
-    <main className="container mx-auto max-w-4xl p-4">
-      <Link href="/documents" className="text-blue-600 hover:underline">
-        ← 返回资料列表
-      </Link>
-      <div className="mt-4 flex w-fit rounded-lg border border-slate-300 bg-white p-1 text-sm">
-        <Link href={question ? `/search?q=${encodeURIComponent(question)}` : '/search'} className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100">
-          找资料
-        </Link>
-        <span className="rounded bg-slate-900 px-3 py-1.5 text-white">问知识库</span>
-      </div>
-      <h1 className="mt-4 text-2xl font-bold text-slate-900">问知识库</h1>
-      <p className="mt-1 text-sm text-slate-500">
-        用自然语言提问，系统会从你保存的资料中找到相关片段并给出带出处的中文回答。
-        回答中的引用会跳回对应资料。
-      </p>
-
-      {status && !status.provider_configured && (
-        <Notice kind="warn">
-          当前没有配置问答模型，资料里的内容暂时无法用自然语言提问。
-          <Link href="/settings" className="ml-2 text-amber-900 underline">
-            前往模型设置
-          </Link>
-        </Notice>
-      )}
-      {statusError && <Notice kind="error">问答状态读取失败：{statusError}</Notice>}
-
-      <form
-        className="mt-6"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void runAsk();
-        }}
-      >
-        <label htmlFor="question" className="sr-only">
-          问题
-        </label>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
-            id="question"
-            type="text"
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            placeholder="例如：向量检索是怎么实现的？"
-            className="flex-1 rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
-            autoFocus
-            maxLength={500}
-          />
-          <button
-            type="submit"
-            className="rounded bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-400"
-            disabled={!question.trim() || state.kind === 'loading'}
+    <main className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-7xl gap-5 px-4 py-5 lg:px-6">
+      <aside className="hidden w-64 shrink-0 lg:block">
+        <div className="sticky top-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+            当前知识范围
+          </p>
+          <div className="mt-3 space-y-1">
+            {scopes.map((scope) => (
+              <button
+                key={`${scope.system ? 'system' : 'saved'}-${scope.slug}`}
+                type="button"
+                onClick={() => setScopeSlug(scope.slug)}
+                className={`w-full rounded-xl px-3 py-2 text-left text-sm transition ${
+                  scopeSlug === scope.slug
+                    ? 'bg-slate-900 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                {scope.name}
+              </button>
+            ))}
+          </div>
+          <p className="mt-4 border-t border-slate-100 pt-4 text-xs leading-5 text-slate-500">
+            每轮都会重新检索所选范围，并保留可核验出处。当前会话只在本页保留，
+            不会影响知识原文。
+          </p>
+          <Link
+            href="/search"
+            className="mt-4 block text-xs font-medium text-slate-700 hover:text-slate-950"
           >
-            提问
-          </button>
-          {hasAnyFilter && (
-            <button
-              type="button"
-              onClick={() => {
-                setCategorySlugs([]);
-                setTagSlugs([]);
-                setSourceTypes([]);
-              }}
-              className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-            >
-              清除筛选
-            </button>
-          )}
+            切换到精确搜索 →
+          </Link>
         </div>
-      </form>
+      </aside>
 
-      {filtersError && (
-        <p className="mt-3 text-xs text-red-700">筛选条件加载失败：{filtersError}</p>
-      )}
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-7">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight text-slate-950">
+              问知识库
+            </h1>
+            <p className="mt-1 text-xs text-slate-500">
+              {selectedScope?.name ?? '全部知识'} · 检索证据后回答
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={scopeSlug}
+              onChange={(event) => setScopeSlug(event.target.value)}
+              className="max-w-48 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 lg:hidden"
+              aria-label="知识范围"
+            >
+              {scopes.map((scope) => (
+                <option key={scope.slug} value={scope.slug}>
+                  {scope.name}
+                </option>
+              ))}
+            </select>
+            {turns.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTurns([]);
+                  setError(null);
+                }}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50"
+              >
+                新对话
+              </button>
+            )}
+          </div>
+        </header>
 
-      <FilterSections
-        filters={filters}
-        categorySlugs={categorySlugs}
-        tagSlugs={tagSlugs}
-        sourceTypes={sourceTypes}
-        onToggleCategory={toggleCategory}
-        onToggleTag={toggleTag}
-        onToggleSourceType={toggleSourceType}
-      />
+        <div className="min-h-[32rem] flex-1 overflow-y-auto bg-slate-50/60 px-4 py-6 sm:px-7">
+          {turns.length === 0 && !loading && (
+            <WelcomeState
+              disabled={providerReady === false}
+              onExample={setQuestion}
+            />
+          )}
+          <div className="space-y-8">
+            {turns.map((turn) => (
+              <ConversationTurn key={turn.id} turn={turn} />
+            ))}
+            {loading && (
+              <div className="flex gap-3">
+                <AssistantMark />
+                <div className="rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm">
+                  正在检索、核对出处并组织回答…
+                </div>
+              </div>
+            )}
+          </div>
+          <div ref={endRef} />
+        </div>
 
-      <section className="mt-6">
-        {state.kind === 'idle' && (
-          <EmptyState
-            heading="开始一次提问"
-            description="例如：“藏知支持哪些文件格式？”或“我之前学过的向量检索笔记说了什么？”可以同时选择分类、标签和来源类型来缩小检索范围。"
-          />
-        )}
-        {state.kind === 'loading' && (
-          <p className="text-sm text-slate-500">正在从知识库中寻找答案…</p>
-        )}
-        {state.kind === 'error' && (
-          <ErrorState
-            message={state.message}
-            onRetry={() => void runAsk()}
-          />
-        )}
-        {state.kind === 'ready' && <AskResult payload={state.payload} />}
+        <footer className="border-t border-slate-100 bg-white p-4 sm:px-7 sm:py-5">
+          {providerReady === false && (
+            <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              尚未配置对话模型。
+              <Link href="/settings" className="ml-1 font-medium underline">
+                前往设置
+              </Link>
+            </p>
+          )}
+          {error && (
+            <p className="mb-3 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">
+              {error}
+            </p>
+          )}
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void runAsk();
+            }}
+            className="flex items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-2 focus-within:border-slate-400 focus-within:bg-white"
+          >
+            <textarea
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key === 'Enter' &&
+                  !event.shiftKey &&
+                  !event.nativeEvent.isComposing
+                ) {
+                  event.preventDefault();
+                  void runAsk();
+                }
+              }}
+              placeholder="询问你保存过的资料…"
+              rows={2}
+              maxLength={500}
+              className="max-h-40 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400"
+            />
+            <button
+              type="submit"
+              disabled={!question.trim() || loading || providerReady === false}
+              className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              发送
+            </button>
+          </form>
+          <p className="mt-2 text-center text-[11px] text-slate-400">
+            Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文
+          </p>
+        </footer>
       </section>
     </main>
   );
 }
 
-function Notice({
-  kind,
-  children,
+function WelcomeState({
+  disabled,
+  onExample,
 }: {
-  kind: 'warn' | 'error';
-  children: React.ReactNode;
+  disabled: boolean;
+  onExample: (value: string) => void;
 }) {
-  const style =
-    kind === 'warn'
-      ? 'border-amber-200 bg-amber-50 text-amber-900'
-      : 'border-red-200 bg-red-50 text-red-800';
+  const examples = [
+    '总结我收藏过的向量检索方案',
+    '我保存的资料里，如何避免知识切片截断？',
+    '比较几篇资料对个人知识管理的不同观点',
+  ];
   return (
-    <div className={`mt-4 rounded-xl border p-3 text-sm ${style}`}>{children}</div>
-  );
-}
-
-function FilterSections({
-  filters,
-  categorySlugs,
-  tagSlugs,
-  sourceTypes,
-  onToggleCategory,
-  onToggleTag,
-  onToggleSourceType,
-}: {
-  filters: FiltersPayload | null;
-  categorySlugs: string[];
-  tagSlugs: string[];
-  sourceTypes: string[];
-  onToggleCategory: (slug: string) => void;
-  onToggleTag: (slug: string) => void;
-  onToggleSourceType: (value: string) => void;
-}) {
-  if (!filters) return null;
-  const hasCategories = filters.categories.length > 0;
-  const hasTags = filters.tags.length > 0;
-  if (!hasCategories && !hasTags && filters.source_types.length === 0) {
-    return null;
-  }
-  return (
-    <div className="mt-5 grid items-start gap-4 md:grid-cols-2">
-      {filters.source_types.length > 0 && (
-        <FilterCard title="来源类型">
-          {filters.source_types.map((option) => (
-            <FilterChip
-              key={option.value}
-              label={option.label}
-              active={sourceTypes.includes(option.value)}
-              onClick={() => onToggleSourceType(option.value)}
-            />
-          ))}
-        </FilterCard>
-      )}
-      {hasCategories && (
-        <FilterCard title="分类">
-          {filters.categories
-            .filter((cat) => cat.document_count > 0)
-            .map((cat) => (
-              <FilterChip
-                key={cat.slug}
-                label={`${cat.name}（${cat.document_count}）`}
-                active={categorySlugs.includes(cat.slug)}
-                onClick={() => onToggleCategory(cat.slug)}
-              />
-            ))}
-          {filters.categories.every((cat) => cat.document_count === 0) && (
-            <p className="text-xs text-slate-500">还没有资料命中分类。</p>
-          )}
-        </FilterCard>
-      )}
-      {hasTags && (
-        <div className="md:col-span-2">
-          <FilterCard title="标签">
-            {filters.tags
-              .filter((tag) => tag.document_count > 0)
-              .slice(0, 30)
-              .map((tag) => (
-                <FilterChip
-                  key={tag.slug}
-                  label={`#${tag.name}（${tag.document_count}）`}
-                  active={tagSlugs.includes(tag.slug)}
-                  onClick={() => onToggleTag(tag.slug)}
-                />
-              ))}
-            {filters.tags.every((tag) => tag.document_count === 0) && (
-              <p className="text-xs text-slate-500">还没有资料带标签。</p>
-            )}
-          </FilterCard>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FilterCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white p-3">
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-        {title}
+    <div className="mx-auto flex max-w-2xl flex-col items-center py-16 text-center">
+      <AssistantMark large />
+      <h2 className="mt-5 text-2xl font-semibold text-slate-900">
+        从自己的知识出发
       </h2>
-      <div className="mt-2 flex flex-wrap gap-2">{children}</div>
+      <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500">
+        藏知会在当前范围中同时使用关键词和可用的向量索引检索，并把答案链接回原文。
+      </p>
+      <div className="mt-7 grid w-full gap-2 sm:grid-cols-3">
+        {examples.map((example) => (
+          <button
+            key={example}
+            type="button"
+            disabled={disabled}
+            onClick={() => onExample(example)}
+            className="rounded-2xl border border-slate-200 bg-white p-3 text-left text-xs leading-5 text-slate-600 shadow-sm hover:border-slate-300 hover:text-slate-900 disabled:opacity-50"
+          >
+            {example}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
 
-function FilterChip({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  const base =
-    'cursor-pointer rounded-full border px-3 py-1 text-xs transition-colors';
-  const style = active
-    ? 'border-slate-900 bg-slate-900 text-white'
-    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50';
+function ConversationTurn({ turn }: { turn: Turn }) {
   return (
-    <button type="button" className={`${base} ${style}`} onClick={onClick}>
-      {label}
-    </button>
+    <article className="space-y-4">
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-slate-900 px-4 py-3 text-sm leading-6 text-white">
+          {turn.question}
+        </div>
+      </div>
+      <div className="flex items-start gap-3">
+        <AssistantMark />
+        <div className="min-w-0 max-w-3xl flex-1">
+          <div className="prose prose-slate max-w-none rounded-2xl rounded-tl-md border border-slate-200 bg-white px-5 py-4 text-sm leading-7 shadow-sm">
+            <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+              {turn.response.answer}
+            </ReactMarkdown>
+          </div>
+          <ResultMeta response={turn.response} />
+          {turn.response.citations.length > 0 && (
+            <CitationList citations={turn.response.citations} />
+          )}
+        </div>
+      </div>
+    </article>
   );
 }
 
-function AskResult({ payload }: { payload: AskResponse }) {
+function ResultMeta({ response }: { response: AskResponse }) {
   return (
-    <div className="space-y-4">
-      <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <p className="text-xs uppercase tracking-wide text-slate-500">回答</p>
-        {payload.insufficient_evidence ? (
-          <p className="mt-2 text-sm leading-7 text-slate-700">{payload.answer}</p>
-        ) : (
-          <p className="mt-2 whitespace-pre-line text-sm leading-7 text-slate-800">
-            {payload.answer}
-          </p>
-        )}
-        {payload.provider && !payload.insufficient_evidence && (
-          <p className="mt-3 text-xs text-slate-400">
-            模型：{payload.provider}
-            {payload.model ? ` · ${payload.model}` : ''}
-          </p>
-        )}
-        <p className="mt-2 text-xs text-slate-400">
-          资料召回：
-          {payload.retrieval?.vector_used ? '关键词 + 向量混合检索' : '关键词检索'}
-        </p>
-        {payload.retrieval?.degraded_reason && (
-          <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            {payload.retrieval.degraded_reason}
-          </p>
-        )}
-      </article>
-
-      {payload.citations.length > 0 && (
-        <section>
-          <h3 className="text-sm font-semibold text-slate-700">
-            引用 · {payload.citations.length} 条
-          </h3>
-          <ol className="mt-2 space-y-2">
-            {payload.citations.map((citation) => (
-              <li
-                key={citation.id}
-                className="rounded-xl border border-slate-200 bg-white p-3 text-sm shadow-sm"
-              >
-                <CitationHeader citation={citation} />
-                <p className="mt-2 whitespace-pre-line text-slate-700">{citation.snippet}</p>
-                <CitationMeta citation={citation} />
-              </li>
-            ))}
-          </ol>
-        </section>
-      )}
-
-      {payload.evidence.length > payload.citations.length && (
-        <details className="rounded-xl border border-dashed border-slate-300 bg-white p-3 text-sm">
-          <summary className="cursor-pointer text-slate-600">
-            查看其他被检索到的资料（{payload.evidence.length - payload.citations.length}）
-          </summary>
-          <ol className="mt-2 space-y-2">
-            {payload.evidence
-              .filter((item) => !payload.citations.some((c) => c.id === item.id))
-              .map((item) => (
-                <li
-                  key={item.id}
-                  className="rounded border border-slate-100 bg-slate-50 p-2 text-xs text-slate-600"
-                >
-                  <Link
-                    href={`/documents/${item.document_id}`}
-                    className="font-semibold text-slate-800 hover:underline"
-                  >
-                    {item.title}
-                  </Link>
-                  <p className="mt-1 text-slate-600">{item.snippet}</p>
-                </li>
-              ))}
-          </ol>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function CitationHeader({ citation }: { citation: AskCitation }) {
-  const headingLabel = citation.heading_path.length
-    ? citation.heading_path.join(' › ')
-    : null;
-  return (
-    <div className="flex flex-wrap items-baseline gap-2">
-      <Link
-        href={`/documents/${citation.document_id}`}
-        className="text-base font-semibold text-slate-900 hover:underline"
-      >
-        {citation.title}
-      </Link>
-      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
-        {sourceTypeLabel(citation.source_type)}
+    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
+      <span>
+        {response.retrieval?.vector_used ? '混合检索' : '关键词检索'}
       </span>
-      {headingLabel && (
-        <span className="text-xs text-slate-500">章节：{headingLabel}</span>
+      {response.provider && (
+        <span>
+          {response.provider}
+          {response.model ? ` · ${response.model}` : ''}
+        </span>
+      )}
+      {response.insufficient_evidence && (
+        <span className="text-amber-700">证据不足</span>
+      )}
+      {response.retrieval?.degraded_reason && (
+        <span className="text-amber-700">
+          {response.retrieval.degraded_reason}
+        </span>
       )}
     </div>
   );
 }
 
-function CitationMeta({ citation }: { citation: AskCitation }) {
-  const meta: string[] = [];
-  if (citation.page) meta.push(`第 ${citation.page} 页`);
-  if (citation.paragraph_index !== null)
-    meta.push(`段落 ${citation.paragraph_index + 1}`);
-  if (meta.length === 0) return null;
-  return <p className="mt-2 text-xs text-slate-500">{meta.join(' · ')}</p>;
-}
-
-function EmptyState({
-  heading,
-  description,
-}: {
-  heading: string;
-  description: string;
-}) {
+function CitationList({ citations }: { citations: Citation[] }) {
   return (
-    <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
-      <p className="text-lg font-medium text-slate-800">{heading}</p>
-      <p className="mt-2 text-sm text-slate-500">{description}</p>
-    </div>
+    <details className="mt-3 rounded-2xl border border-slate-200 bg-white">
+      <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-slate-600">
+        查看 {citations.length} 条引用
+      </summary>
+      <ol className="border-t border-slate-100">
+        {citations.map((citation, index) => (
+          <li
+            key={`${citation.chunk_id}-${citation.id}`}
+            className="border-b border-slate-100 p-4 last:border-b-0"
+          >
+            <div className="flex items-start gap-3">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-600">
+                {index + 1}
+              </span>
+              <div className="min-w-0">
+                <Link
+                  href={`/documents/${citation.document_id}`}
+                  className="text-sm font-semibold text-slate-800 hover:underline"
+                >
+                  {citation.title}
+                </Link>
+                <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-500">
+                  {citation.snippet}
+                </p>
+                <p className="mt-2 text-[11px] text-slate-400">
+                  {citation.heading_path.length > 0
+                    ? citation.heading_path.join(' › ')
+                    : sourceTypeLabel(citation.source_type)}
+                  {citation.page ? ` · 第 ${citation.page} 页` : ''}
+                </p>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </details>
   );
 }
 
-function ErrorState({
-  message,
-  onRetry,
-}: {
-  message: string;
-  onRetry: () => void;
-}) {
+function AssistantMark({ large = false }: { large?: boolean }) {
   return (
-    <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-      <p>问答失败：{message}</p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="mt-3 rounded border border-red-300 px-3 py-1 text-xs text-red-800 hover:bg-red-100"
-      >
-        重试
-      </button>
-    </div>
+    <span
+      className={`flex shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-slate-800 to-slate-950 font-semibold text-white shadow-sm ${
+        large ? 'h-12 w-12 text-lg' : 'h-8 w-8 text-xs'
+      }`}
+      aria-hidden="true"
+    >
+      知
+    </span>
   );
 }
-
-const sourceTypeLabels: Record<string, string> = {
-  note: '随手记',
-  file: '文件',
-  url: '链接',
-};
 
 function sourceTypeLabel(value: string) {
-  return sourceTypeLabels[value] ?? value;
+  return (
+    {
+      note: '随手记',
+      file: '文件',
+      url: '网页',
+    }[value] ?? value
+  );
 }

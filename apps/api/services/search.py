@@ -24,7 +24,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Integer, and_, case, func, or_, select
+from sqlalchemy import Integer, and_, case, false, func, or_, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
@@ -242,8 +242,28 @@ async def search_documents(
     tag_ids: Sequence[int] | None = None,
     tag_slugs: Sequence[str] | None = None,
     source_types: Sequence[str] | None = None,
+    document_ids: Sequence[int] | None = None,
+    connector_ids: Sequence[int] | None = None,
+    matches_none: bool = False,
 ) -> SearchResult:
     """Run hybrid retrieval, transparently degrading to lexical search."""
+
+    effective_document_ids = list(document_ids or [])
+    if connector_ids and not matches_none:
+        from .knowledge_scopes import resolve_connector_document_ids
+
+        connector_document_ids = await resolve_connector_document_ids(
+            db, connector_ids
+        )
+        if not connector_document_ids:
+            matches_none = True
+        elif effective_document_ids:
+            effective_document_ids = sorted(
+                set(effective_document_ids).intersection(connector_document_ids)
+            )
+            matches_none = not effective_document_ids
+        else:
+            effective_document_ids = connector_document_ids
 
     requested_limit = max(1, min(limit, MAX_LIMIT))
     requested_offset = max(0, offset)
@@ -261,6 +281,9 @@ async def search_documents(
         tag_ids=tag_ids,
         tag_slugs=tag_slugs,
         source_types=source_types,
+        document_ids=effective_document_ids,
+        connector_ids=connector_ids,
+        matches_none=matches_none,
     )
     if not (query or "").strip():
         return lexical
@@ -320,6 +343,9 @@ async def _search_documents_lexical(
     tag_ids: Sequence[int] | None = None,
     tag_slugs: Sequence[str] | None = None,
     source_types: Sequence[str] | None = None,
+    document_ids: Sequence[int] | None = None,
+    connector_ids: Sequence[int] | None = None,
+    matches_none: bool = False,
 ) -> SearchResult:
     """Run a search and return a :class:`SearchResult`.
 
@@ -342,6 +368,9 @@ async def _search_documents_lexical(
         "tag_ids": list(tag_ids or []),
         "tag_slugs": list(tag_slugs or []),
         "source_types": list(source_types or []),
+        "document_ids": list(document_ids or []),
+        "connector_ids": list(connector_ids or []),
+        "matches_none": matches_none,
     }
 
     if not cleaned:
@@ -644,6 +673,8 @@ async def _search_like(
 
 def _apply_filters(stmt, filters: dict):
     conditions = []
+    if filters.get("matches_none"):
+        conditions.append(false())
     category_ids = filters.get("category_ids") or []
     category_slugs = filters.get("category_slugs") or []
     if category_ids or category_slugs:
@@ -669,6 +700,9 @@ def _apply_filters(stmt, filters: dict):
     source_types = filters.get("source_types") or []
     if source_types:
         conditions.append(Document.source_type.in_(source_types))
+    document_ids = filters.get("document_ids") or []
+    if document_ids:
+        conditions.append(Document.id.in_(document_ids))
     if conditions:
         stmt = stmt.where(and_(*conditions))
     return stmt

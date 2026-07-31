@@ -12,17 +12,15 @@ under test.
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from apps.api.api.auth import require_admin, reset_auth_limiters_for_tests
 from apps.api.core.db import get_db
 from apps.api.main import app
-from apps.api.models.auth import Admin, AuthSession
+from apps.api.models.auth import AuthSession
 
 
 def _login(client: TestClient, username: str, password: str):
