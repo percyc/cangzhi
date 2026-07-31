@@ -4,6 +4,7 @@ from apps.api.models.table_rows import StructuredTableRow
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.structured_table import (
     TableDataset,
+    _literal_detail_plan_is_complete,
     _literal_matches_for_question,
     execute_query_plan,
     extract_table_row_payloads,
@@ -315,3 +316,47 @@ def test_literal_inference_does_not_guess_year_for_ambiguous_date_alias():
     )
 
     assert matches == (("字段乙", "早餐"),)
+
+
+def test_weak_detail_phrase_needs_complete_literal_constraints():
+    incidental = TableDataset(
+        document_id=8,
+        document_version_id=12,
+        title="项目跟踪",
+        sheet_name="明细",
+        region_index=1,
+        columns=("状态", "结论"),
+        row_count=10,
+        semantic_summary="项目状态和结论跟踪表",
+        literal_matches=(("状态", "完成"),),
+    )
+    complete = TableDataset(
+        document_id=9,
+        document_version_id=13,
+        title="排班",
+        sheet_name="明细",
+        region_index=1,
+        columns=("日期", "班次", "人员"),
+        row_count=10,
+        semantic_summary="每日班次和人员排班",
+        literal_matches=(("日期", "2026-06-23"), ("班次", "早班")),
+    )
+
+    assert _literal_detail_plan_is_complete("这份完成表有什么结论？", incidental) is False
+    assert _literal_detail_plan_is_complete("列出状态为完成的记录", incidental) is True
+    assert _literal_detail_plan_is_complete("6月23日早班有什么人？", complete) is True
+
+
+def test_dataset_prompt_exposes_semantic_summary_for_relevance_routing():
+    dataset = TableDataset(
+        document_id=8,
+        document_version_id=12,
+        title="物料表",
+        sheet_name="库存",
+        region_index=1,
+        columns=("物料", "数量"),
+        row_count=20,
+        semantic_summary="仓库物料与实时库存数量",
+    )
+
+    assert dataset.to_prompt_dict()["semantic_summary"] == "仓库物料与实时库存数量"

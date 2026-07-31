@@ -22,7 +22,13 @@ from apps.api.main import app
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.table_rows import StructuredTableRow
-from apps.api.models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
+from apps.api.models.taxonomy import (
+    Category,
+    DocumentCategory,
+    DocumentSummary,
+    DocumentTag,
+    Tag,
+)
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
 from apps.api.services.qa import (
@@ -431,6 +437,7 @@ def test_qa_service_uses_exact_structured_table_calculation(qa_db):
         provider = StubProvider()
         provider.json_responses.append(
             {
+                "relevant": True,
                 "document_id": document_id,
                 "sheet_name": "明细",
                 "region_index": 1,
@@ -553,6 +560,91 @@ def test_qa_service_resolves_yearless_date_and_completes_detail_answer(qa_db):
     assert "甲" in result.answer and "乙" in result.answer and "丙" in result.answer
     assert "模型未完整覆盖" in result.answer
     assert '"人员":"丙"' in provider.calls[0]["evidence"][0]["snippet"]
+
+
+def test_qa_service_uses_table_summary_to_reject_unrelated_weak_detail(qa_db):
+    async def _run():
+        async with qa_db() as session:
+            document = Document(title="项目状态表", source_type=DocumentSourceType.file)
+            session.add(document)
+            await session.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="weak-detail-routing",
+                processing_status="ready",
+            )
+            session.add(version)
+            await session.flush()
+            document.current_version_id = version.id
+            session.add(
+                DocumentSummary(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    summary="记录项目执行状态和负责人，不包含报告结论。",
+                    source="model",
+                )
+            )
+            session.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id="weak-detail-child",
+                    role="child",
+                    chunk_type="table",
+                    order_index=0,
+                    content="行 2｜状态=完成｜负责人=张三",
+                    search_text="项目 完成 负责人 张三",
+                    content_hash="weak-detail-chunk",
+                    heading_path=["项目"],
+                    char_count=30,
+                    token_estimate=15,
+                    extra={
+                        "sheet_name": "明细",
+                        "region_index": 1,
+                        "row_start": 2,
+                        "row_end": 2,
+                        "column_names": ["状态", "负责人"],
+                    },
+                    is_current=True,
+                )
+            )
+            session.add(
+                StructuredTableRow(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    sheet_name="明细",
+                    region_index=1,
+                    row_number=2,
+                    values={"状态": "完成", "负责人": "张三"},
+                )
+            )
+            await session.commit()
+            document_id = document.id
+
+        provider = StubProvider()
+        provider.json_responses.append({"relevant": False})
+        provider.queue(
+            AnswerResult(
+                answer="证据只显示项目状态，无法得出报告结论。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            result = await QAService(provider).ask(
+                session,
+                AskRequest(
+                    question="这份完成表有什么报告结论？",
+                    document_ids=[document_id],
+                ),
+            )
+        return result, provider
+
+    result, provider = asyncio.run(_run())
+    assert result.retrieval["mode"] != "structured_table"
+    assert provider.json_calls
+    assert "不包含报告结论" in provider.json_calls[0]["prompt"]
 
 
 def test_qa_service_skips_model_when_no_evidence(qa_db):

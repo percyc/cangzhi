@@ -65,6 +65,7 @@ class TableDataset:
     region_index: int
     columns: tuple[str, ...]
     row_count: int
+    semantic_summary: str = ""
     samples: tuple[dict[str, Any], ...] = ()
     literal_matches: tuple[tuple[str, str], ...] = ()
 
@@ -80,6 +81,7 @@ class TableDataset:
             "region_index": self.region_index,
             "columns": list(self.columns),
             "row_count": self.row_count,
+            "semantic_summary": self.semantic_summary,
             "samples": list(self.samples),
         }
 
@@ -271,6 +273,7 @@ def validate_query_plan(
     if not isinstance(raw, dict):
         raise TypeError("查询计划必须是 JSON 对象")
     allowed_keys = {
+        "relevant",
         "document_id",
         "sheet_name",
         "region_index",
@@ -606,6 +609,40 @@ def _literal_matches_for_question(
     return tuple(matches)
 
 
+def _literal_detail_plan_is_complete(
+    question: str,
+    dataset: TableDataset,
+) -> bool:
+    """Decide whether literals alone safely express the user's filters.
+
+    A weak phrase such as "有什么" must not turn one incidental cell value
+    into a broad detail query. Two independently resolved values are sufficient;
+    one value is accepted only when the question explicitly binds it as a
+    condition (for example "状态为完成").
+    """
+
+    matches = dataset.literal_matches
+    if not matches:
+        return False
+    if _DATE_QUERY_RE.search(question) and not any(
+        _date_parts(value) is not None or bool(_DATE_QUERY_RE.fullmatch(value))
+        for _, value in matches
+    ):
+        return False
+    if len(matches) >= 2:
+        return True
+    value = matches[0][1]
+    escaped = re.escape(value)
+    return bool(
+        re.search(
+            rf"(?:为|是|等于|属于|：|:|=)\s*{escaped}"
+            rf"(?:\s|的|、|，|。|？|\?|$)",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+
 async def _load_datasets(
     db: AsyncSession,
     document_ids: Sequence[int],
@@ -613,11 +650,12 @@ async def _load_datasets(
     question: str = "",
 ) -> list[TableDataset]:
     from ..models.documents import Document, DocumentVersion
+    from ..models.taxonomy import DocumentSummary
 
     if not document_ids:
         return []
     result = await db.execute(
-        select(StructuredTableRow, Document.title)
+        select(StructuredTableRow, Document.title, DocumentSummary.summary)
         .join(Document, Document.id == StructuredTableRow.document_id)
         .join(
             DocumentVersion,
@@ -627,6 +665,11 @@ async def _load_datasets(
             StructuredTableRow.document_id.in_(list(document_ids)),
             Document.current_version_id == StructuredTableRow.document_version_id,
             Document.is_deleted.is_(False),
+        )
+        .outerjoin(
+            DocumentSummary,
+            DocumentSummary.document_version_id
+            == StructuredTableRow.document_version_id,
         )
         .order_by(
             StructuredTableRow.document_id,
@@ -641,16 +684,17 @@ async def _load_datasets(
         # Never return a plausible-looking partial aggregate. A future
         # DuckDB/Polars backend will handle datasets above this boundary.
         return []
-    grouped: dict[tuple[int, str, int], list[tuple[StructuredTableRow, str]]] = (
-        defaultdict(list)
-    )
-    for row, title in loaded_rows:
+    grouped: dict[
+        tuple[int, str, int],
+        list[tuple[StructuredTableRow, str, str]],
+    ] = defaultdict(list)
+    for row, title, semantic_summary in loaded_rows:
         grouped[(row.document_id, row.sheet_name, row.region_index)].append(
-            (row, title)
+            (row, title, semantic_summary or "")
         )
     datasets: list[TableDataset] = []
     for (document_id, sheet_name, region_index), items in grouped.items():
-        first, title = items[0]
+        first, title, semantic_summary = items[0]
         columns = tuple(str(column) for column in (first.values or {}))
         datasets.append(
             TableDataset(
@@ -661,10 +705,11 @@ async def _load_datasets(
                 region_index=region_index,
                 columns=columns,
                 row_count=len(items),
-                samples=tuple(dict(row.values or {}) for row, _ in items[:3]),
+                semantic_summary=semantic_summary,
+                samples=tuple(dict(row.values or {}) for row, _, _ in items[:3]),
                 literal_matches=_literal_matches_for_question(
                     question,
-                    [row for row, _ in items],
+                    [row for row, _, _ in items],
                     columns,
                 ),
             )
@@ -674,8 +719,12 @@ async def _load_datasets(
 
 _PLAN_SYSTEM = """你是藏知的表格查询规划器。
 只返回 JSON 对象，不生成 SQL、Python 或解释文字。
+先根据数据集的 semantic_summary、标题、表名、列名和样例判断问题
+是否适合用该表格精确查询。“有什么”“有哪些”等只是弱信号，
+不能单独证明相关。若无法把问题映射到表格的字段、筛选、统计或明细，
+返回 relevant=false；否则返回 relevant=true 和完整计划。
 你只能从给定数据集和列名中选择。计划字段固定为：
-document_id、sheet_name、region_index、filters、group_by、metric、
+relevant、document_id、sheet_name、region_index、filters、group_by、metric、
 metric_column、sort_by、sort_order、limit。
 filters 每项固定为 column/operator/value，operator 仅可用
 eq/ne/gt/gte/lt/lte/contains/in。
@@ -700,17 +749,11 @@ async def try_structured_table_query(
     if not datasets:
         return None
     if _DETAIL_INTENT_RE.search(question):
-        matched_datasets = [dataset for dataset in datasets if dataset.literal_matches]
-        if _DATE_QUERY_RE.search(question):
-            matched_datasets = [
-                dataset
-                for dataset in matched_datasets
-                if any(
-                    _date_parts(value) is not None
-                    or bool(_DATE_QUERY_RE.fullmatch(value))
-                    for _, value in dataset.literal_matches
-                )
-            ]
+        matched_datasets = [
+            dataset
+            for dataset in datasets
+            if _literal_detail_plan_is_complete(question, dataset)
+        ]
         if matched_datasets:
             dataset = max(
                 matched_datasets,
@@ -762,6 +805,10 @@ async def try_structured_table_query(
                 system=_PLAN_SYSTEM,
                 prompt=prompt + correction,
             )
+            if raw_plan.get("relevant") is False:
+                return None
+            if raw_plan.get("relevant") is not True:
+                raise ValueError("查询计划缺少布尔字段 relevant")
             plan = validate_query_plan(raw_plan, datasets)
             break
         except AIProviderError:
