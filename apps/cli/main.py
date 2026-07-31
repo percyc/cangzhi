@@ -152,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("capabilities", help="查看服务能力")
     commands.add_parser("scopes", help="列出可用知识范围")
+    commands.add_parser("facets", help="列出分类、标签、来源和连接器筛选项")
 
     search = commands.add_parser("search", help="检索知识证据")
     search.add_argument("query")
@@ -175,6 +176,8 @@ def run(args: argparse.Namespace, client: CangzhiClient) -> dict[str, Any]:
         return client.request("GET", "/api/v1/capabilities")
     if args.command == "scopes":
         return client.request("GET", "/api/v1/knowledge/scopes")
+    if args.command == "facets":
+        return client.request("GET", "/api/v1/knowledge/facets")
     if args.command == "search":
         return client.request(
             "POST",

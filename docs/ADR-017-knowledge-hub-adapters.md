@@ -30,6 +30,7 @@ REST v1、现有网页 API、CLI 与 MCP 都是适配器，只负责鉴权、DTO
 
 - `GET /api/v1/capabilities`
 - `GET /api/v1/knowledge/scopes`
+- `GET /api/v1/knowledge/facets`
 - `POST /api/v1/knowledge/search`
 - `POST /api/v1/knowledge/ask`
 - `GET /api/v1/knowledge/documents/{document_id}`
@@ -181,6 +182,7 @@ Cookie 登录的管理员拥有全部能力。`/api/v1` 使用统一的
 只读 tools：
 
 - `knowledge_search`
+- `knowledge_list_facets`
 - `knowledge_get_document`
 - `knowledge_get_chunk`
 - `knowledge_list_scopes`
@@ -233,7 +235,7 @@ Hermes、OpenClaw 及兼容 Skills 平台均可使用的最小模板。
 
 ### 阶段 C：只读 MCP 与接入模板
 
-交付 Streamable HTTP、四个取证 tools、通用 Skill 模板与安全测试。验证取证
+交付 Streamable HTTP、五个只读取证 tools、通用 Skill 模板与安全测试。验证取证
 工具不调用对话模型。
 
 ### 阶段 D：持久对话

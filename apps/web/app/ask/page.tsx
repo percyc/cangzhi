@@ -44,12 +44,47 @@ type KnowledgeScope = {
   name: string;
   description: string | null;
   system: boolean;
+  filter?: {
+    category_ids?: number[];
+    tag_ids?: number[];
+    source_types?: string[];
+    connector_ids?: number[];
+    document_ids?: number[];
+  };
+};
+
+type FacetCatalog = {
+  categories: Array<{
+    id: number;
+    slug: string;
+    name: string;
+    parent_id: number | null;
+    document_count: number;
+  }>;
+  tags: Array<{
+    id: number;
+    slug: string;
+    name: string;
+    document_count: number;
+  }>;
+  source_types: Array<{
+    value: string;
+    label: string;
+    document_count: number;
+  }>;
+  connectors: Array<{
+    id: number;
+    name: string;
+    is_enabled: boolean;
+    document_count: number;
+  }>;
 };
 
 type Turn = {
   id: number;
   question: string;
   response: AskResponse;
+  contextLabel: string;
 };
 
 export default function AskPage() {
@@ -74,6 +109,12 @@ function AskClient() {
   const [question, setQuestion] = useState(searchParams.get('q') ?? '');
   const [scopeSlug, setScopeSlug] = useState('all');
   const [scopes, setScopes] = useState<KnowledgeScope[]>([]);
+  const [facets, setFacets] = useState<FacetCatalog | null>(null);
+  const [categoryIds, setCategoryIds] = useState<number[]>([]);
+  const [tagIds, setTagIds] = useState<number[]>([]);
+  const [sourceTypes, setSourceTypes] = useState<string[]>([]);
+  const [connectorIds, setConnectorIds] = useState<number[]>([]);
+  const [filterOpen, setFilterOpen] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,10 +135,17 @@ function AskClient() {
           return (await response.json()) as { provider_configured: boolean };
         },
       ),
+      fetch('/api/v1/knowledge/facets', { cache: 'no-store' }).then(
+        async (response) => {
+          if (!response.ok) throw new Error('知识筛选项加载失败');
+          return (await response.json()) as FacetCatalog;
+        },
+      ),
     ])
-      .then(([scopeResult, status]) => {
+      .then(([scopeResult, status, facetResult]) => {
         setScopes(scopeResult.items);
         setProviderReady(status.provider_configured);
+        setFacets(facetResult);
       })
       .catch((reason: unknown) => {
         setError(reason instanceof Error ? reason.message : '初始化失败');
@@ -113,6 +161,14 @@ function AskClient() {
     if (!trimmed || loading) return;
     setLoading(true);
     setError(null);
+    const contextLabel = buildContextLabel(
+      selectedScope?.name ?? '全部知识',
+      facets,
+      categoryIds,
+      tagIds,
+      sourceTypes,
+      connectorIds,
+    );
     try {
       const response = await fetch('/api/v1/knowledge/ask', {
         method: 'POST',
@@ -120,6 +176,10 @@ function AskClient() {
         body: JSON.stringify({
           question: trimmed,
           scope_slug: scopeSlug,
+          category_ids: categoryIds,
+          tag_ids: tagIds,
+          source_types: sourceTypes,
+          connector_ids: connectorIds,
         }),
       });
       const body = await response.json().catch(() => ({}));
@@ -137,6 +197,7 @@ function AskClient() {
           id: Date.now(),
           question: trimmed,
           response: body as AskResponse,
+          contextLabel,
         },
       ]);
       setQuestion('');
@@ -149,6 +210,21 @@ function AskClient() {
   };
 
   const selectedScope = scopes.find((item) => item.slug === scopeSlug);
+  const refinementCount =
+    categoryIds.length +
+    tagIds.length +
+    sourceTypes.length +
+    connectorIds.length;
+  const clearRefinements = () => {
+    setCategoryIds([]);
+    setTagIds([]);
+    setSourceTypes([]);
+    setConnectorIds([]);
+  };
+  const changeScope = (slug: string) => {
+    setScopeSlug(slug);
+    clearRefinements();
+  };
 
   return (
     <main className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-7xl gap-5 px-4 py-5 lg:px-6">
@@ -162,7 +238,7 @@ function AskClient() {
               <button
                 key={`${scope.system ? 'system' : 'saved'}-${scope.slug}`}
                 type="button"
-                onClick={() => setScopeSlug(scope.slug)}
+                onClick={() => changeScope(scope.slug)}
                 className={`w-full rounded-xl px-3 py-2 text-left text-sm transition ${
                   scopeSlug === scope.slug
                     ? 'bg-slate-900 text-white'
@@ -199,7 +275,7 @@ function AskClient() {
           <div className="flex items-center gap-2">
             <select
               value={scopeSlug}
-              onChange={(event) => setScopeSlug(event.target.value)}
+              onChange={(event) => changeScope(event.target.value)}
               className="max-w-48 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 lg:hidden"
               aria-label="知识范围"
             >
@@ -209,6 +285,17 @@ function AskClient() {
                 </option>
               ))}
             </select>
+            <button
+              type="button"
+              onClick={() => setFilterOpen((current) => !current)}
+              className={`rounded-xl border px-3 py-2 text-xs font-medium ${
+                refinementCount > 0
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              细化范围{refinementCount > 0 ? ` · ${refinementCount}` : ''}
+            </button>
             {turns.length > 0 && (
               <button
                 type="button"
@@ -223,6 +310,22 @@ function AskClient() {
             )}
           </div>
         </header>
+
+        {filterOpen && (
+          <FacetPanel
+            facets={facets}
+            selectedScope={selectedScope}
+            categoryIds={categoryIds}
+            tagIds={tagIds}
+            sourceTypes={sourceTypes}
+            connectorIds={connectorIds}
+            setCategoryIds={setCategoryIds}
+            setTagIds={setTagIds}
+            setSourceTypes={setSourceTypes}
+            setConnectorIds={setConnectorIds}
+            onClear={clearRefinements}
+          />
+        )}
 
         <div className="min-h-[32rem] flex-1 overflow-y-auto bg-slate-50/60 px-4 py-6 sm:px-7">
           {turns.length === 0 && !loading && (
@@ -341,6 +444,240 @@ function WelcomeState({
   );
 }
 
+function FacetPanel({
+  facets,
+  selectedScope,
+  categoryIds,
+  tagIds,
+  sourceTypes,
+  connectorIds,
+  setCategoryIds,
+  setTagIds,
+  setSourceTypes,
+  setConnectorIds,
+  onClear,
+}: {
+  facets: FacetCatalog | null;
+  selectedScope: KnowledgeScope | undefined;
+  categoryIds: number[];
+  tagIds: number[];
+  sourceTypes: string[];
+  connectorIds: number[];
+  setCategoryIds: (value: number[]) => void;
+  setTagIds: (value: number[]) => void;
+  setSourceTypes: (value: string[]) => void;
+  setConnectorIds: (value: number[]) => void;
+  onClear: () => void;
+}) {
+  const [tagQuery, setTagQuery] = useState('');
+  const count =
+    categoryIds.length +
+    tagIds.length +
+    sourceTypes.length +
+    connectorIds.length;
+  if (!facets) {
+    return (
+      <div className="border-b border-slate-100 bg-slate-50 px-5 py-4 text-xs text-slate-500 sm:px-7">
+        正在加载知识筛选项…
+      </div>
+    );
+  }
+  const constrainedSources = selectedScope?.filter?.source_types ?? [];
+  const visibleTags = facets.tags
+    .filter(
+      (tag) =>
+        tag.document_count > 0 &&
+        (tagIds.includes(tag.id) ||
+          !tagQuery.trim() ||
+          `${tag.name} ${tag.slug}`
+            .toLowerCase()
+            .includes(tagQuery.trim().toLowerCase())),
+    )
+    .sort(
+      (left, right) =>
+        Number(tagIds.includes(right.id)) - Number(tagIds.includes(left.id)),
+    )
+    .slice(0, 24);
+  return (
+    <div className="border-b border-slate-100 bg-slate-50/80 px-5 py-5 sm:px-7">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-900">细化当前知识范围</h2>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            同一组满足任意一项，不同组需要同时满足；这些条件只会缩小
+            “{selectedScope?.name ?? '全部知识'}”。
+          </p>
+        </div>
+        {count > 0 && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-xs font-medium text-slate-600 hover:text-slate-950"
+          >
+            清除全部
+          </button>
+        )}
+      </div>
+
+      <FacetGroup title="分类">
+        {facets.categories
+          .filter((item) => item.document_count > 0)
+          .map((item) => (
+            <FacetChip
+              key={item.id}
+              label={`${item.name}（${item.document_count}）`}
+              active={categoryIds.includes(item.id)}
+              onClick={() =>
+                setCategoryIds(toggleValue(categoryIds, item.id))
+              }
+            />
+          ))}
+      </FacetGroup>
+
+      <FacetGroup title="标签">
+        <input
+          value={tagQuery}
+          onChange={(event) => setTagQuery(event.target.value)}
+          placeholder="搜索标签"
+          className="mb-2 w-full max-w-xs rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs outline-none focus:border-slate-400"
+        />
+        <div className="flex flex-wrap gap-2">
+          {visibleTags.map((item) => (
+            <FacetChip
+              key={item.id}
+              label={`#${item.name}（${item.document_count}）`}
+              active={tagIds.includes(item.id)}
+              onClick={() => setTagIds(toggleValue(tagIds, item.id))}
+            />
+          ))}
+          {visibleTags.length === 0 && (
+            <span className="text-xs text-slate-400">没有匹配的可用标签</span>
+          )}
+        </div>
+      </FacetGroup>
+
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <FacetGroup title="来源类型" compact>
+          {constrainedSources.length > 0 ? (
+            <p className="text-xs text-slate-500">
+              已由基础范围限定为：
+              {facets.source_types
+                .filter((item) => constrainedSources.includes(item.value))
+                .map((item) => item.label)
+                .join('、')}
+            </p>
+          ) : (
+            facets.source_types
+              .filter((item) => item.document_count > 0)
+              .map((item) => (
+                <FacetChip
+                  key={item.value}
+                  label={`${item.label}（${item.document_count}）`}
+                  active={sourceTypes.includes(item.value)}
+                  onClick={() =>
+                    setSourceTypes(toggleValue(sourceTypes, item.value))
+                  }
+                />
+              ))
+          )}
+        </FacetGroup>
+        <FacetGroup title="WebDAV 连接器" compact>
+          {facets.connectors.filter((item) => item.document_count > 0).length >
+          0 ? (
+            facets.connectors
+              .filter((item) => item.document_count > 0)
+              .map((item) => (
+                <FacetChip
+                  key={item.id}
+                  label={`${item.name}（${item.document_count}）`}
+                  active={connectorIds.includes(item.id)}
+                  onClick={() =>
+                    setConnectorIds(toggleValue(connectorIds, item.id))
+                  }
+                />
+              ))
+          ) : (
+            <span className="text-xs text-slate-400">暂无已入库的连接器资料</span>
+          )}
+        </FacetGroup>
+      </div>
+    </div>
+  );
+}
+
+function FacetGroup({
+  title,
+  compact = false,
+  children,
+}: {
+  title: string;
+  compact?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className={compact ? '' : 'mt-4'}>
+      <h3 className="mb-2 text-xs font-semibold text-slate-600">{title}</h3>
+      <div className="flex flex-wrap gap-2">{children}</div>
+    </section>
+  );
+}
+
+function FacetChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full border px-3 py-1 text-xs transition ${
+        active
+          ? 'border-slate-900 bg-slate-900 text-white'
+          : 'border-slate-200 bg-white text-slate-600 hover:border-slate-400'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function toggleValue<T>(values: T[], value: T): T[] {
+  return values.includes(value)
+    ? values.filter((item) => item !== value)
+    : [...values, value];
+}
+
+function buildContextLabel(
+  scopeName: string,
+  facets: FacetCatalog | null,
+  categoryIds: number[],
+  tagIds: number[],
+  sourceTypes: string[],
+  connectorIds: number[],
+) {
+  if (!facets) return scopeName;
+  const labels = [
+    ...facets.categories
+      .filter((item) => categoryIds.includes(item.id))
+      .map((item) => item.name),
+    ...facets.tags
+      .filter((item) => tagIds.includes(item.id))
+      .map((item) => `#${item.name}`),
+    ...facets.source_types
+      .filter((item) => sourceTypes.includes(item.value))
+      .map((item) => item.label),
+    ...facets.connectors
+      .filter((item) => connectorIds.includes(item.id))
+      .map((item) => item.name),
+  ];
+  return [scopeName, ...labels].join(' · ');
+}
+
 function ConversationTurn({ turn }: { turn: Turn }) {
   return (
     <article className="space-y-4">
@@ -357,7 +694,7 @@ function ConversationTurn({ turn }: { turn: Turn }) {
               {turn.response.answer}
             </ReactMarkdown>
           </div>
-          <ResultMeta response={turn.response} />
+          <ResultMeta response={turn.response} contextLabel={turn.contextLabel} />
           {turn.response.citations.length > 0 && (
             <CitationList citations={turn.response.citations} />
           )}
@@ -367,9 +704,16 @@ function ConversationTurn({ turn }: { turn: Turn }) {
   );
 }
 
-function ResultMeta({ response }: { response: AskResponse }) {
+function ResultMeta({
+  response,
+  contextLabel,
+}: {
+  response: AskResponse;
+  contextLabel: string;
+}) {
   return (
     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
+      <span>范围：{contextLabel}</span>
       <span>
         {response.retrieval?.vector_used ? '混合检索' : '关键词检索'}
       </span>

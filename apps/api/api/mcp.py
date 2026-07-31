@@ -19,6 +19,7 @@ from ..services.knowledge_read import (
 from ..services.knowledge_scopes import (
     KnowledgeScopeError,
     KnowledgeScopeResolver,
+    list_facet_catalog,
     list_scope_catalog,
 )
 from ..services.search import search_documents
@@ -53,6 +54,22 @@ TOOLS = [
         "name": "knowledge_list_scopes",
         "title": "列出知识范围",
         "description": "列出全部、随手记、网页、文件和用户保存的知识范围。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_list_facets",
+        "title": "列出知识筛选项",
+        "description": "列出可用于收窄检索的分类、标签、来源类型和 WebDAV 连接器。",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -211,6 +228,8 @@ async def _call_tool(
     try:
         if name == "knowledge_list_scopes":
             return _tool_result({"items": await list_scope_catalog(db)})
+        if name == "knowledge_list_facets":
+            return _tool_result(await list_facet_catalog(db))
         if name == "knowledge_get_document":
             document_id = int(arguments.get("document_id", 0))
             if document_id <= 0:
@@ -252,8 +271,10 @@ async def mcp_post(
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": "cangzhi", "version": "0.1.0"},
                 "instructions": (
-                    "优先使用 knowledge_search 获取证据；需要完整上下文时，"
-                    "再按返回的 document_id 或 chunk.id 读取。"
+                    "范围不明确时先使用 knowledge_list_scopes；需要按分类、标签、"
+                    "来源或连接器收窄时使用 knowledge_list_facets，再调用 "
+                    "knowledge_search 获取证据。需要完整上下文时，再按返回的 "
+                    "document_id 或 chunk.id 读取。"
                 ),
             },
         )

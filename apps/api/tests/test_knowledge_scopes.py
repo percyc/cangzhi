@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from apps.api.core.db import Base
-from apps.api.models.documents import Document, DocumentSourceType
+from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.knowledge_scopes import KnowledgeScope
+from apps.api.models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
 from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.api.services.knowledge_scopes import (
     SYSTEM_SCOPE_FILES,
@@ -17,6 +18,7 @@ from apps.api.services.knowledge_scopes import (
     KnowledgeScopeError,
     KnowledgeScopeNotFound,
     KnowledgeScopeResolver,
+    list_facet_catalog,
     merge_filters,
     normalize_scope_filter,
 )
@@ -216,6 +218,79 @@ async def test_connector_without_documents_is_no_match(scope_db):
             connector_ids=[source.id]
         )
         assert resolved.matches_none is True
+
+
+@pytest.mark.asyncio
+async def test_facet_catalog_counts_only_current_active_knowledge(scope_db):
+    async with scope_db() as session:
+        active = Document(
+            title="Active", source_type=DocumentSourceType.file, is_deleted=False
+        )
+        deleted = Document(
+            title="Deleted", source_type=DocumentSourceType.note, is_deleted=True
+        )
+        session.add_all([active, deleted])
+        await session.flush()
+        active_version = DocumentVersion(
+            document_id=active.id,
+            version_number=1,
+            content_hash="a" * 64,
+            processing_status="ready",
+        )
+        deleted_version = DocumentVersion(
+            document_id=deleted.id,
+            version_number=1,
+            content_hash="b" * 64,
+            processing_status="ready",
+        )
+        session.add_all([active_version, deleted_version])
+        await session.flush()
+        active.current_version_id = active_version.id
+        deleted.current_version_id = deleted_version.id
+        category = Category(name="技术", slug="tech")
+        tag = Tag(name="向量", slug="vector")
+        session.add_all([category, tag])
+        await session.flush()
+        session.add_all(
+            [
+                DocumentCategory(
+                    document_id=active.id,
+                    document_version_id=active_version.id,
+                    category_id=category.id,
+                    is_primary=True,
+                ),
+                DocumentCategory(
+                    document_id=deleted.id,
+                    document_version_id=deleted_version.id,
+                    category_id=category.id,
+                    is_primary=True,
+                ),
+                DocumentTag(
+                    document_id=active.id,
+                    document_version_id=active_version.id,
+                    tag_id=tag.id,
+                ),
+            ]
+        )
+        connector = await _add_connector(session, [active, deleted])
+        await session.commit()
+
+        catalog = await list_facet_catalog(session)
+        assert catalog["categories"][0]["document_count"] == 1
+        assert catalog["tags"][0]["document_count"] == 1
+        source_counts = {
+            item["value"]: item["document_count"]
+            for item in catalog["source_types"]
+        }
+        assert source_counts == {"url": 0, "file": 1, "note": 0}
+        assert catalog["connectors"] == [
+            {
+                "id": connector.id,
+                "name": "Test Drive",
+                "is_enabled": True,
+                "document_count": 1,
+            }
+        ]
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,12 @@ def test_scope_payload_omits_empty_dimensions():
     assert _scope_payload(args) == {}
 
 
+def test_facets_command_uses_stable_catalog_endpoint():
+    client = StubClient()
+    assert run(argparse.Namespace(command="facets"), client) == {"ok": True}
+    assert client.calls == [("GET", "/api/v1/knowledge/facets", None)]
+
+
 def test_missing_token_is_machine_readable(capsys):
     assert main(["capabilities"]) == 2
     error = json.loads(capsys.readouterr().err)

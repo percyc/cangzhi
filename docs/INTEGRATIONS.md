@@ -9,6 +9,10 @@
 2. CLI：`python -m apps.cli`
 3. MCP Streamable HTTP：`/api/mcp`
 
+REST 的 `/api/v1/knowledge/facets` 与 MCP 的 `knowledge_list_facets`
+用于发现可用分类、标签、来源类型和 WebDAV 连接器。检索时同一维度内满足任一
+选项，不同维度之间同时满足；临时筛选只能继续缩小已有 KnowledgeScope。
+
 这三种入口不会绕过藏知的回收站、KnowledgeScope 或文档存活状态，也不会各自维护
 另一套向量索引。
 

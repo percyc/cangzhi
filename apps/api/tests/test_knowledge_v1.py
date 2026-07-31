@@ -58,6 +58,16 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     capabilities = test_client.get("/api/v1/capabilities", headers=headers)
     assert capabilities.status_code == 200
     assert capabilities.json()["api_version"] == "v1"
+    assert capabilities.json()["features"]["facets"] is True
+
+    facets = test_client.get("/api/v1/knowledge/facets", headers=headers)
+    assert facets.status_code == 200
+    assert set(facets.json()) == {
+        "categories",
+        "tags",
+        "source_types",
+        "connectors",
+    }
 
     search = test_client.post(
         "/api/v1/knowledge/search",
@@ -89,6 +99,7 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         item["name"] for item in tools.json()["result"]["tools"]
     } == {
         "knowledge_list_scopes",
+        "knowledge_list_facets",
         "knowledge_search",
         "knowledge_get_document",
         "knowledge_get_chunk",
@@ -109,6 +120,26 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     tool_result = mcp_search.json()["result"]
     assert tool_result["isError"] is False
     assert tool_result["structuredContent"]["hits"] == []
+    mcp_facets = test_client.post(
+        "/api/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "knowledge_list_facets",
+                "arguments": {},
+            },
+        },
+    ).json()["result"]
+    assert mcp_facets["isError"] is False
+    assert set(mcp_facets["structuredContent"]) == {
+        "categories",
+        "tags",
+        "source_types",
+        "connectors",
+    }
 
     ask = test_client.post(
         "/api/v1/knowledge/ask",

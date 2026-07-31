@@ -19,6 +19,7 @@ from ..services.knowledge_read import (
 from ..services.knowledge_scopes import (
     KnowledgeScopeError,
     KnowledgeScopeResolver,
+    list_facet_catalog,
     list_scope_catalog,
 )
 from ..services.qa import AskError, AskRequest, QAService
@@ -85,6 +86,7 @@ async def capabilities(
         "scopes": ["knowledge:read", "knowledge:search", "knowledge:ask"],
         "features": {
             "saved_scopes": True,
+            "facets": True,
             "lexical_search": True,
             "vector_search": True,
             "cited_qa": True,
@@ -100,6 +102,14 @@ async def list_knowledge_scopes(
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     return {"items": await list_scope_catalog(db)}
+
+
+@router.get("/knowledge/facets", response_model=dict[str, Any])
+async def list_knowledge_facets(
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    return await list_facet_catalog(db)
 
 
 @router.post("/knowledge/search", response_model=dict[str, Any])

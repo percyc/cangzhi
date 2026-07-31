@@ -6,12 +6,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.documents import Document, DocumentSourceType
 from ..models.knowledge_scopes import KnowledgeScope
-from ..models.webdav import WebDAVEntry
+from ..models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
+from ..models.webdav import WebDAVEntry, WebDAVSource
 
 FILTER_DIMENSIONS = (
     "category_ids",
@@ -41,6 +42,11 @@ SYSTEM_SCOPE_NAMES = {
     "notes": "随手记",
     "web": "网页收藏",
     "files": "文件资料",
+}
+SOURCE_TYPE_NAMES = {
+    DocumentSourceType.note.value: "随手记",
+    DocumentSourceType.url.value: "网页收藏",
+    DocumentSourceType.file.value: "文件资料",
 }
 
 
@@ -355,3 +361,122 @@ async def list_scope_catalog(db: AsyncSession) -> list[dict[str, Any]]:
     return system + [
         {**scope.to_public_dict(), "system": False} for scope in saved
     ]
+
+
+async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]]:
+    """Return filter choices and active-document counts for every adapter."""
+
+    category_rows = (
+        await db.execute(
+            select(
+                Category,
+                func.count(func.distinct(Document.id)).label("document_count"),
+            )
+            .outerjoin(
+                DocumentCategory,
+                DocumentCategory.category_id == Category.id,
+            )
+            .outerjoin(
+                Document,
+                and_(
+                    Document.id == DocumentCategory.document_id,
+                    Document.is_deleted.is_(False),
+                    Document.current_version_id
+                    == DocumentCategory.document_version_id,
+                ),
+            )
+            .group_by(Category.id)
+            .order_by(Category.sort_order, Category.name, Category.id)
+        )
+    ).all()
+    tag_rows = (
+        await db.execute(
+            select(
+                Tag,
+                func.count(func.distinct(Document.id)).label("document_count"),
+            )
+            .outerjoin(DocumentTag, DocumentTag.tag_id == Tag.id)
+            .outerjoin(
+                Document,
+                and_(
+                    Document.id == DocumentTag.document_id,
+                    Document.is_deleted.is_(False),
+                    Document.current_version_id == DocumentTag.document_version_id,
+                ),
+            )
+            .group_by(Tag.id)
+            .order_by(
+                func.count(func.distinct(Document.id)).desc(),
+                Tag.name,
+                Tag.id,
+            )
+        )
+    ).all()
+    source_counts = {
+        source_type.value
+        if isinstance(source_type, DocumentSourceType)
+        else str(source_type): int(count)
+        for source_type, count in (
+            await db.execute(
+                select(Document.source_type, func.count(Document.id))
+                .where(Document.is_deleted.is_(False))
+                .group_by(Document.source_type)
+            )
+        ).all()
+    }
+    connector_rows = (
+        await db.execute(
+            select(
+                WebDAVSource,
+                func.count(func.distinct(Document.id)).label("document_count"),
+            )
+            .outerjoin(WebDAVEntry, WebDAVEntry.source_id == WebDAVSource.id)
+            .outerjoin(
+                Document,
+                and_(
+                    Document.id == WebDAVEntry.document_id,
+                    Document.is_deleted.is_(False),
+                ),
+            )
+            .group_by(WebDAVSource.id)
+            .order_by(WebDAVSource.name, WebDAVSource.id)
+        )
+    ).all()
+    return {
+        "categories": [
+            {
+                "id": category.id,
+                "slug": category.slug,
+                "name": category.name,
+                "parent_id": category.parent_id,
+                "document_count": int(document_count),
+            }
+            for category, document_count in category_rows
+        ],
+        "tags": [
+            {
+                "id": tag.id,
+                "slug": tag.slug,
+                "name": tag.name,
+                "document_count": int(document_count),
+            }
+            for tag, document_count in tag_rows
+        ],
+        "source_types": [
+            {
+                "value": source_type.value,
+                "label": SOURCE_TYPE_NAMES[source_type.value],
+                "document_count": source_counts.get(source_type.value, 0),
+            }
+            for source_type in DocumentSourceType
+        ],
+        "connectors": [
+            {
+                "id": source.id,
+                "name": source.name,
+                "is_enabled": bool(source.is_enabled),
+                "document_count": int(document_count),
+            }
+            for source, document_count in connector_rows
+        ],
+    }

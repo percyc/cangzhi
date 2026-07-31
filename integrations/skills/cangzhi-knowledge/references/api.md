@@ -6,6 +6,7 @@ Send `Authorization: Bearer <PAT>` and `Accept: application/json`.
 
 - `GET /api/v1/capabilities`
 - `GET /api/v1/knowledge/scopes`
+- `GET /api/v1/knowledge/facets`
 - `POST /api/v1/knowledge/search`
 - `POST /api/v1/knowledge/ask`
 - `GET /api/v1/knowledge/documents/{id}`
@@ -28,6 +29,10 @@ Search body:
 
 Only send one of `scope_slug` and `scope_id`. Request-time filters narrow a
 saved scope by intersection; they never broaden it.
+
+Use `facets` to discover valid category, tag, source-type, and connector IDs
+before adding request-time filters. Options in the same dimension use OR
+semantics; different dimensions use AND semantics.
 
 ## Stable errors
 
@@ -55,6 +60,7 @@ Streamable HTTP endpoint: `POST /api/mcp`.
 Supported tools:
 
 - `knowledge_list_scopes`
+- `knowledge_list_facets`
 - `knowledge_search`
 - `knowledge_get_document`
 - `knowledge_get_chunk`
