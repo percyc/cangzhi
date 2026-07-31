@@ -87,6 +87,8 @@ type Turn = {
   contextLabel: string;
 };
 
+const ASK_SESSION_KEY = 'cangzhi:ask-session:v1';
+
 export default function AskPage() {
   return (
     <Suspense fallback={<AskSkeleton />}>
@@ -115,11 +117,71 @@ function AskClient() {
   const [sourceTypes, setSourceTypes] = useState<string[]>([]);
   const [connectorIds, setConnectorIds] = useState<number[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providerReady, setProviderReady] = useState<boolean | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const saved = window.sessionStorage.getItem(ASK_SESSION_KEY);
+        if (saved) {
+          const value = JSON.parse(saved) as {
+            turns?: Turn[];
+            scopeSlug?: string;
+            categoryIds?: number[];
+            tagIds?: number[];
+            sourceTypes?: string[];
+            connectorIds?: number[];
+            question?: string;
+          };
+          if (Array.isArray(value.turns)) setTurns(value.turns.slice(-20));
+          if (typeof value.scopeSlug === 'string') setScopeSlug(value.scopeSlug);
+          if (Array.isArray(value.categoryIds)) setCategoryIds(value.categoryIds);
+          if (Array.isArray(value.tagIds)) setTagIds(value.tagIds);
+          if (Array.isArray(value.sourceTypes)) setSourceTypes(value.sourceTypes);
+          if (Array.isArray(value.connectorIds))
+            setConnectorIds(value.connectorIds);
+          if (!searchParams.get('q') && typeof value.question === 'string') {
+            setQuestion(value.question);
+          }
+        }
+      } catch {
+        window.sessionStorage.removeItem(ASK_SESSION_KEY);
+      } finally {
+        setSessionReady(true);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    window.sessionStorage.setItem(
+      ASK_SESSION_KEY,
+      JSON.stringify({
+        turns: turns.slice(-20),
+        scopeSlug,
+        categoryIds,
+        tagIds,
+        sourceTypes,
+        connectorIds,
+        question,
+      }),
+    );
+  }, [
+    turns,
+    scopeSlug,
+    categoryIds,
+    tagIds,
+    sourceTypes,
+    connectorIds,
+    question,
+    sessionReady,
+  ]);
 
   useEffect(() => {
     Promise.all([
@@ -227,7 +289,7 @@ function AskClient() {
   };
 
   return (
-    <main className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-7xl gap-5 px-4 py-5 lg:px-6">
+    <main className="mx-auto flex h-[calc(100dvh-4rem)] max-w-7xl gap-5 overflow-hidden px-3 py-3 sm:px-4 lg:px-6">
       <aside className="hidden w-64 shrink-0 lg:block">
         <div className="sticky top-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
@@ -262,7 +324,7 @@ function AskClient() {
         </div>
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+      <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-7">
           <div>
             <h1 className="text-xl font-semibold tracking-tight text-slate-950">
@@ -327,7 +389,7 @@ function AskClient() {
           />
         )}
 
-        <div className="min-h-[32rem] flex-1 overflow-y-auto bg-slate-50/60 px-4 py-6 sm:px-7">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-50/60 px-4 py-6 sm:px-7">
           {turns.length === 0 && !loading && (
             <WelcomeState
               disabled={providerReady === false}
@@ -350,7 +412,7 @@ function AskClient() {
           <div ref={endRef} />
         </div>
 
-        <footer className="border-t border-slate-100 bg-white p-4 sm:px-7 sm:py-5">
+        <footer className="shrink-0 border-t border-slate-100 bg-white p-3 sm:px-7 sm:py-4">
           {providerReady === false && (
             <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
               尚未配置对话模型。
@@ -743,36 +805,122 @@ function CitationList({ citations }: { citations: Citation[] }) {
       </summary>
       <ol className="border-t border-slate-100">
         {citations.map((citation, index) => (
-          <li
+          <CitationItem
             key={`${citation.chunk_id}-${citation.id}`}
-            className="border-b border-slate-100 p-4 last:border-b-0"
-          >
-            <div className="flex items-start gap-3">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-600">
-                {index + 1}
-              </span>
-              <div className="min-w-0">
-                <Link
-                  href={`/documents/${citation.document_id}`}
-                  className="text-sm font-semibold text-slate-800 hover:underline"
-                >
-                  {citation.title}
-                </Link>
-                <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-500">
-                  {citation.snippet}
-                </p>
-                <p className="mt-2 text-[11px] text-slate-400">
-                  {citation.heading_path.length > 0
-                    ? citation.heading_path.join(' › ')
-                    : sourceTypeLabel(citation.source_type)}
-                  {citation.page ? ` · 第 ${citation.page} 页` : ''}
-                </p>
-              </div>
-            </div>
-          </li>
+            citation={citation}
+            index={index}
+          />
         ))}
       </ol>
     </details>
+  );
+}
+
+function CitationItem({
+  citation,
+  index,
+}: {
+  citation: Citation;
+  index: number;
+}) {
+  const [content, setContent] = useState<string | null>(null);
+  const [contentLabel, setContentLabel] = useState('完整引用片段');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const loadFullChunk = async () => {
+    if (content !== null || loading) return;
+    setLoading(true);
+    setError('');
+    try {
+      const response = await fetch(
+        `/api/v1/knowledge/chunks/${citation.chunk_id}`,
+        { cache: 'no-store' },
+      );
+      if (!response.ok) throw new Error('完整引用读取失败');
+      const body = (await response.json()) as {
+        content?: string;
+        parent_id?: number | null;
+      };
+      if (body.parent_id) {
+        const parentResponse = await fetch(
+          `/api/v1/knowledge/chunks/${body.parent_id}`,
+          { cache: 'no-store' },
+        );
+        if (parentResponse.ok) {
+          const parent = (await parentResponse.json()) as { content?: string };
+          if (parent.content) {
+            setContentLabel('完整引用所在章节');
+            setContent(parent.content);
+            return;
+          }
+        }
+      }
+      setContent(body.content || citation.snippet);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '完整引用读取失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <li className="border-b border-slate-100 p-4 last:border-b-0">
+      <details
+        onToggle={(event) => {
+          if (event.currentTarget.open) void loadFullChunk();
+        }}
+      >
+        <summary className="cursor-pointer list-none">
+          <div className="flex items-start gap-3">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-600">
+              {index + 1}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-semibold text-slate-800">
+                  {citation.title}
+                </span>
+                <span className="shrink-0 text-[11px] font-medium text-slate-500">
+                  展开引用
+                </span>
+              </div>
+              <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-500">
+                {citation.snippet}
+              </p>
+              <p className="mt-2 text-[11px] text-slate-400">
+                {citation.heading_path.length > 0
+                  ? citation.heading_path.join(' › ')
+                  : sourceTypeLabel(citation.source_type)}
+                {citation.page ? ` · 第 ${citation.page} 页` : ''}
+              </p>
+            </div>
+          </div>
+        </summary>
+        <div className="ml-9 mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          {loading && (
+            <p className="text-xs text-slate-500">正在读取完整引用片段…</p>
+          )}
+          {error && <p className="text-xs text-red-700">{error}</p>}
+          {content !== null && (
+            <>
+              <p className="mb-2 text-[11px] font-semibold text-slate-500">
+                {contentLabel}
+              </p>
+              <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">
+                {content}
+              </p>
+            </>
+          )}
+          <Link
+            href={`/documents/${citation.document_id}?return_to=ask`}
+            className="mt-3 inline-flex text-xs font-medium text-blue-700 hover:underline"
+          >
+            打开完整文档 →
+          </Link>
+        </div>
+      </details>
+    </li>
   );
 }
 

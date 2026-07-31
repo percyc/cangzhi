@@ -158,6 +158,16 @@ export default function DocumentDetailPage() {
   const [draftSummary, setDraftSummary] = useState('');
   const [draftTagIds, setDraftTagIds] = useState<number[]>([]);
   const [pipelineExpanded, setPipelineExpanded] = useState(false);
+  const [returnToAsk, setReturnToAsk] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setReturnToAsk(
+        new URLSearchParams(window.location.search).get('return_to') === 'ask',
+      );
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const handleDelete = async () => {
     if (!window.confirm('确定删除这条资料吗？资料将进入回收站，可以恢复。')) return;
@@ -341,7 +351,12 @@ export default function DocumentDetailPage() {
 
   return (
     <main className="mx-auto max-w-6xl px-4 sm:px-6">
-      <Link href="/documents" className="text-sm font-medium text-slate-500 hover:text-slate-900">← 返回知识库</Link>
+      <Link
+        href={returnToAsk ? '/ask' : '/documents'}
+        className="text-sm font-medium text-slate-500 hover:text-slate-900"
+      >
+        {returnToAsk ? '← 返回当前对话' : '← 返回知识库'}
+      </Link>
 
       <div className="mt-4">
         <h1 className="max-w-5xl text-2xl font-semibold text-slate-950 sm:text-3xl">{document.title}</h1>
