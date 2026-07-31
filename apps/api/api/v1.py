@@ -90,6 +90,8 @@ async def capabilities(
             "lexical_search": True,
             "vector_search": True,
             "cited_qa": True,
+            "structured_table_qa": True,
+            "mcp_ask": True,
             "document_read": True,
             "chunk_read": True,
         },

@@ -62,6 +62,7 @@ Supported tools:
 - `knowledge_list_scopes`
 - `knowledge_list_facets`
 - `knowledge_search`
+- `knowledge_ask`（需要 `knowledge:ask`；复用藏知问答、精确表格计算和引用）
 - `knowledge_get_document`
 - `knowledge_get_chunk`
 

@@ -4,6 +4,7 @@ from apps.api.models.table_rows import StructuredTableRow
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.structured_table import (
     TableDataset,
+    _literal_matches_for_question,
     execute_query_plan,
     extract_table_row_payloads,
     is_structured_table_question,
@@ -179,6 +180,25 @@ def test_plan_normalizes_model_empty_optional_fields():
     assert plan.limit == 20
 
 
+def test_plan_clamps_large_model_limit_instead_of_falling_back():
+    plan = validate_query_plan(
+        {
+            "document_id": 8,
+            "sheet_name": "明细",
+            "region_index": 1,
+            "filters": [],
+            "group_by": [],
+            "metric": "rows",
+            "metric_column": None,
+            "sort_by": None,
+            "sort_order": None,
+            "limit": 100,
+        },
+        [_dataset()],
+    )
+    assert plan.limit == 50
+
+
 def test_executor_can_return_filtered_and_ranked_detail_rows():
     dataset = _dataset()
     plan = validate_query_plan(
@@ -221,3 +241,29 @@ def test_executor_can_return_filtered_and_ranked_detail_rows():
 )
 def test_generic_table_detail_questions_use_structured_path(question):
     assert is_structured_table_question(question) is True
+
+
+def test_detail_filter_inference_uses_literal_cell_values_not_business_columns():
+    rows = [
+        StructuredTableRow(
+            document_id=8,
+            document_version_id=12,
+            sheet_name="任意数据",
+            region_index=1,
+            row_number=2,
+            values={
+                "字段甲": "2026-06-26",
+                "字段乙": "晚餐",
+                "字段丙": "霸王花瘦肉汤",
+                "数值": "26",
+            },
+        )
+    ]
+
+    matches = _literal_matches_for_question(
+        "2026-06-26 这一天的晚餐有哪些项目？",
+        rows,
+        ["字段甲", "字段乙", "字段丙", "数值"],
+    )
+
+    assert matches == (("字段甲", "2026-06-26"), ("字段乙", "晚餐"))

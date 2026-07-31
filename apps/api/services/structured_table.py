@@ -29,6 +29,10 @@ _STRUCTURED_INTENT_RE = re.compile(
     r"count|sum|average|avg|max|min|group|rank|top\s*\d+)",
     re.IGNORECASE,
 )
+_DETAIL_INTENT_RE = re.compile(
+    r"(哪些|哪几|列出|罗列|包含什么|包含哪些|提供了什么|提供了哪些)",
+    re.IGNORECASE,
+)
 
 ALLOWED_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"}
 ALLOWED_METRICS = {"rows", "count", "count_distinct", "sum", "avg", "min", "max"}
@@ -50,6 +54,7 @@ class TableDataset:
     columns: tuple[str, ...]
     row_count: int
     samples: tuple[dict[str, Any], ...] = ()
+    literal_matches: tuple[tuple[str, str], ...] = ()
 
     @property
     def key(self) -> tuple[int, str, int]:
@@ -339,12 +344,9 @@ def validate_query_plan(
         isinstance(limit, int) and not isinstance(limit, bool) and limit == 0
     ):
         limit = 20
-    if (
-        isinstance(limit, bool)
-        or not isinstance(limit, int)
-        or not 1 <= limit <= MAX_RESULT_ROWS
-    ):
-        raise ValueError(f"返回数量必须在 1 到 {MAX_RESULT_ROWS} 之间")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("返回数量必须是正整数")
+    limit = min(limit, MAX_RESULT_ROWS)
     return TableQueryPlan(
         document_id=document_id,
         sheet_name=sheet_name,
@@ -410,6 +412,11 @@ def execute_query_plan(
                 reverse=plan.sort_order == "desc",
             )
         detail_rows = detail_rows[: plan.limit]
+        warnings = (
+            [f"结果共 {len(filtered)} 行，仅返回前 {plan.limit} 行"]
+            if len(filtered) > plan.limit
+            else []
+        )
         summary = json.dumps(
             {
                 "数据集": (
@@ -418,6 +425,7 @@ def execute_query_plan(
                 ),
                 "筛选后行数": len(filtered),
                 "返回明细": detail_rows,
+                "提示": warnings,
             },
             ensure_ascii=False,
             indent=2,
@@ -431,6 +439,7 @@ def execute_query_plan(
             source_row_end=max((row.row_number for row in filtered), default=None),
             matched_row_count=len(filtered),
             summary=summary,
+            warnings=warnings,
         )
     groups: dict[tuple[Any, ...], list[StructuredTableRow]] = defaultdict(list)
     if plan.group_by:
@@ -504,8 +513,36 @@ def _safe_sort_value(value: Any) -> tuple[int, Any]:
     return (1, str(value).casefold())
 
 
+def _literal_matches_for_question(
+    question: str,
+    rows: Sequence[StructuredTableRow],
+    columns: Sequence[str],
+) -> tuple[tuple[str, str], ...]:
+    normalized_question = question.casefold()
+    matches: list[tuple[str, str]] = []
+    for column in columns:
+        candidates = {
+            str(row.values.get(column)).strip()
+            for row in rows
+            if row.values.get(column) not in (None, "")
+        }
+        matched = [
+            value
+            for value in candidates
+            if 2 <= len(value) <= 80
+            and not value.replace(".", "", 1).isdigit()
+            and value.casefold() in normalized_question
+        ]
+        if matched:
+            matches.append((column, max(matched, key=len)))
+    return tuple(matches)
+
+
 async def _load_datasets(
-    db: AsyncSession, document_ids: Sequence[int]
+    db: AsyncSession,
+    document_ids: Sequence[int],
+    *,
+    question: str = "",
 ) -> list[TableDataset]:
     from ..models.documents import Document, DocumentVersion
 
@@ -557,6 +594,11 @@ async def _load_datasets(
                 columns=columns,
                 row_count=len(items),
                 samples=tuple(dict(row.values or {}) for row, _ in items[:3]),
+                literal_matches=_literal_matches_for_question(
+                    question,
+                    [row for row, _ in items],
+                    columns,
+                ),
             )
         )
     return datasets
@@ -573,6 +615,7 @@ metric 仅可用 rows/count/count_distinct/sum/avg/min/max。
 用户要查看、筛选或排序具体明细时用 rows，group_by=[]。
 没有分组但需要总计时 group_by=[]。
 排名时设置 group_by、sort_by=metric、sort_order=desc 和 limit。
+limit 必须是 1 到 50 之间的整数，不确定时使用 20。
 不要臆造列名或数据集。"""
 
 
@@ -585,9 +628,46 @@ async def try_structured_table_query(
 ) -> TableQueryResult | None:
     if not is_structured_table_question(question):
         return None
-    datasets = await _load_datasets(db, document_ids)
+    datasets = await _load_datasets(db, document_ids, question=question)
     if not datasets:
         return None
+    if _DETAIL_INTENT_RE.search(question):
+        matched_datasets = [dataset for dataset in datasets if dataset.literal_matches]
+        if matched_datasets:
+            dataset = max(
+                matched_datasets,
+                key=lambda item: (
+                    len(item.literal_matches),
+                    sum(len(value) for _, value in item.literal_matches),
+                ),
+            )
+            plan = TableQueryPlan(
+                document_id=dataset.document_id,
+                sheet_name=dataset.sheet_name,
+                region_index=dataset.region_index,
+                filters=tuple(
+                    TableFilter(column=column, operator="eq", value=value)
+                    for column, value in dataset.literal_matches
+                ),
+                metric="rows",
+                limit=MAX_RESULT_ROWS,
+            )
+            rows = list(
+                (
+                    await db.scalars(
+                        select(StructuredTableRow)
+                        .where(
+                            StructuredTableRow.document_version_id
+                            == dataset.document_version_id,
+                            StructuredTableRow.sheet_name == dataset.sheet_name,
+                            StructuredTableRow.region_index == dataset.region_index,
+                        )
+                        .order_by(StructuredTableRow.row_number)
+                        .limit(MAX_QUERY_ROWS)
+                    )
+                ).all()
+            )
+            return execute_query_plan(dataset, rows, plan)
     prompt = json.dumps(
         {
             "问题": question,
@@ -595,14 +675,29 @@ async def try_structured_table_query(
         },
         ensure_ascii=False,
     )
-    try:
-        raw_plan = await asyncio.to_thread(
-            provider.generate_json,
-            system=_PLAN_SYSTEM,
-            prompt=prompt,
-        )
-        plan = validate_query_plan(raw_plan, datasets)
-    except (AIProviderError, ValueError, TypeError, KeyError):
+    plan = None
+    correction = ""
+    for _attempt in range(2):
+        try:
+            raw_plan = await asyncio.to_thread(
+                provider.generate_json,
+                system=_PLAN_SYSTEM,
+                prompt=prompt + correction,
+            )
+            plan = validate_query_plan(raw_plan, datasets)
+            break
+        except AIProviderError:
+            continue
+        except (ValueError, TypeError, KeyError) as exc:
+            correction = "\n" + json.dumps(
+                {
+                    "上一次计划": raw_plan,
+                    "校验错误": str(exc),
+                    "要求": "请按原问题重新输出修正后的完整 JSON 计划。",
+                },
+                ensure_ascii=False,
+            )
+    if plan is None:
         return None
     dataset = next(
         item

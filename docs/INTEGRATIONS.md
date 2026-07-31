@@ -41,8 +41,9 @@ Authorization: Bearer ${CANGZHI_TOKEN}
 ```
 
 默认工作流是“藏知提供证据、外部 Agent 负责回答”，从而避免重复调用两次
-大模型。只有用户明确要求使用藏知所配置模型时，才调用
-`/api/v1/knowledge/ask`。
+大模型。需要藏知直接给出带引用回答，尤其是精确筛选或计算表格时，REST 调用
+`/api/v1/knowledge/ask`，MCP 调用 `knowledge_ask`；对应令牌必须包含
+`knowledge:ask`。
 
 ## 权限边界
 

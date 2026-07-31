@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..ai import build_provider_from_db
 from ..core.db import get_db
 from ..security.api_auth import APIIdentity, require_api_identity
 from ..services.knowledge_read import (
@@ -22,6 +23,7 @@ from ..services.knowledge_scopes import (
     list_facet_catalog,
     list_scope_catalog,
 )
+from ..services.qa import AskError, AskRequest, QAService
 from ..services.search import search_documents
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
@@ -40,6 +42,17 @@ class SearchArguments(BaseModel):
     query: str = Field(min_length=1, max_length=512)
     limit: int = Field(default=10, ge=1, le=50)
     offset: int = Field(default=0, ge=0, le=10_000)
+    scope_id: int | None = Field(default=None, ge=1)
+    scope_slug: str | None = Field(default=None, max_length=128)
+    category_ids: list[int] = Field(default_factory=list)
+    tag_ids: list[int] = Field(default_factory=list)
+    source_types: list[str] = Field(default_factory=list)
+    connector_ids: list[int] = Field(default_factory=list)
+    document_ids: list[int] = Field(default_factory=list)
+
+
+class AskArguments(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
     scope_id: int | None = Field(default=None, ge=1)
     scope_slug: str | None = Field(default=None, max_length=128)
     category_ids: list[int] = Field(default_factory=list)
@@ -87,6 +100,21 @@ TOOLS = [
         "title": "检索藏知",
         "description": "从藏知检索相关证据片段；适合由外部模型自行组织回答。",
         "inputSchema": SearchArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_ask",
+        "title": "询问藏知",
+        "description": (
+            "由藏知检索并回答问题，返回可核验引用。表格的筛选、明细、统计、"
+            "分组和排序会优先使用精确计算；需要完整答案时优先使用本工具。"
+        ),
+        "inputSchema": AskArguments.model_json_schema(),
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -160,9 +188,7 @@ def _tool_result(payload: dict) -> dict:
 def _tool_error(code: str, message: str) -> dict:
     payload = {"error": {"code": code, "message": message}}
     return {
-        "content": [
-            {"type": "text", "text": json.dumps(payload, ensure_ascii=False)}
-        ],
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
         "structuredContent": payload,
         "isError": True,
     }
@@ -222,6 +248,51 @@ async def _call_tool(
             }
         )
 
+    if name == "knowledge_ask":
+        forbidden = _require_scope(identity, "knowledge:ask")
+        if forbidden:
+            return forbidden
+        try:
+            args = AskArguments.model_validate(arguments)
+            scope = await KnowledgeScopeResolver(db).resolve(
+                scope_id=args.scope_id,
+                scope_slug=args.scope_slug,
+                category_ids=args.category_ids,
+                tag_ids=args.tag_ids,
+                source_types=args.source_types,
+                connector_ids=args.connector_ids,
+                document_ids=args.document_ids,
+            )
+            provider = await build_provider_from_db(db)
+            result = await QAService(provider).ask(
+                db,
+                AskRequest(
+                    question=args.question.strip(),
+                    category_ids=scope.category_ids,
+                    tag_ids=scope.tag_ids,
+                    source_types=scope.source_types,
+                    connector_ids=scope.connector_ids,
+                    document_ids=scope.document_ids,
+                    matches_none=scope.matches_none,
+                ),
+            )
+        except ValidationError as exc:
+            return _tool_error("invalid_arguments", str(exc))
+        except KnowledgeScopeError as exc:
+            return _tool_error(exc.code, str(exc))
+        except AskError as exc:
+            return _tool_error(exc.code, str(exc))
+        return _tool_result(
+            {
+                **result.to_dict(),
+                "scope": {
+                    "id": scope.scope_id,
+                    "slug": scope.scope_slug,
+                    **scope.to_filters_dict(),
+                },
+            }
+        )
+
     forbidden = _require_scope(identity, "knowledge:read")
     if forbidden:
         return forbidden
@@ -269,12 +340,13 @@ async def mcp_post(
             {
                 "protocolVersion": protocol,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "cangzhi", "version": "0.1.0"},
+                "serverInfo": {"name": "cangzhi", "version": "0.2.0"},
                 "instructions": (
                     "范围不明确时先使用 knowledge_list_scopes；需要按分类、标签、"
-                    "来源或连接器收窄时使用 knowledge_list_facets，再调用 "
-                    "knowledge_search 获取证据。需要完整上下文时，再按返回的 "
-                    "document_id 或 chunk.id 读取。"
+                    "来源或连接器收窄时使用 knowledge_list_facets。需要藏知直接"
+                    "回答或精确查询表格时使用 knowledge_ask；需要原始证据供外部"
+                    "模型自行分析时使用 knowledge_search。需要完整上下文时，再按"
+                    "返回的 document_id 或 chunk.id 读取。"
                 ),
             },
         )

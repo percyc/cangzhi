@@ -29,7 +29,7 @@ type IntegrationInfo = {
 const scopeLabels: Record<string, string> = {
   'knowledge:read': '读取文档',
   'knowledge:search': '检索知识',
-  'knowledge:ask': '调用藏知问答模型',
+  'knowledge:ask': '问知识库与表格精确计算',
 };
 
 export default function AccessSettingsPage() {
@@ -313,6 +313,14 @@ export default function AccessSettingsPage() {
                       ? ` · 最近使用 ${formatTime(item.last_used_at)}`
                       : ' · 尚未使用'}
                   </p>
+                  {!item.revoked_at &&
+                    !item.scopes.includes('knowledge:ask') && (
+                      <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+                        这枚令牌只能读取和检索，不能调用 MCP 的
+                        knowledge_ask。若需要完整问答或表格精确计算，请新建令牌并勾选
+                        “问知识库与表格精确计算”。
+                      </p>
+                    )}
                 </li>
               ))}
             </ul>
@@ -365,6 +373,12 @@ export default function AccessSettingsPage() {
               <p className="mt-1 text-xs leading-5 text-slate-500">
                 在 Hermes、OpenClaw 或其他支持远程 MCP 的平台中填写以下地址和请求头。
               </p>
+              {!scopes.includes('knowledge:ask') && (
+                <p className="mt-3 rounded-lg bg-amber-100/70 px-3 py-2 text-xs leading-5 text-amber-900">
+                  当前令牌未包含 knowledge:ask，只能使用 knowledge_search 获取片段，
+                  不能让藏知直接回答或精确计算表格。
+                </p>
+              )}
               <CopyBlock
                 className="mt-4"
                 label="MCP URL"

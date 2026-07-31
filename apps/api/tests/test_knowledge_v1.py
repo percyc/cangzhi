@@ -2,6 +2,8 @@
 
 import asyncio
 
+from apps.api.ai import AIProvider, AnswerResult
+from apps.api.api import mcp as mcp_module
 from apps.api.api.auth import require_admin, reset_auth_limiters_for_tests
 from apps.api.core.db import get_db
 from apps.api.main import app
@@ -95,12 +97,11 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         headers=headers,
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     )
-    assert {
-        item["name"] for item in tools.json()["result"]["tools"]
-    } == {
+    assert {item["name"] for item in tools.json()["result"]["tools"]} == {
         "knowledge_list_scopes",
         "knowledge_list_facets",
         "knowledge_search",
+        "knowledge_ask",
         "knowledge_get_document",
         "knowledge_get_chunk",
     }
@@ -120,6 +121,21 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     tool_result = mcp_search.json()["result"]
     assert tool_result["isError"] is False
     assert tool_result["structuredContent"]["hits"] == []
+    mcp_ask = test_client.post(
+        "/api/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {
+                "name": "knowledge_ask",
+                "arguments": {"question": "这是什么？", "scope_slug": "all"},
+            },
+        },
+    ).json()["result"]
+    assert mcp_ask["isError"] is True
+    assert mcp_ask["structuredContent"]["error"]["code"] == "insufficient_scope"
     mcp_facets = test_client.post(
         "/api/mcp",
         headers=headers,
@@ -165,10 +181,7 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     assert deleted.status_code == 204
     assert test_client.get("/api/access-tokens").json()["items"] == []
     test_client.cookies.clear()
-    assert (
-        test_client.get("/api/v1/capabilities", headers=headers).status_code
-        == 401
-    )
+    assert test_client.get("/api/v1/capabilities", headers=headers).status_code == 401
 
 
 def test_document_and_chunk_read_only_expose_current_active_knowledge(client):
@@ -225,6 +238,102 @@ def test_document_and_chunk_read_only_expose_current_active_knowledge(client):
     chunk = test_client.get(f"/api/v1/knowledge/chunks/{chunk_id}")
     assert chunk.status_code == 200
     assert chunk.json()["content_hash"] == "b" * 64
+
+
+def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
+    test_client, _ = client
+    _enable_real_login()
+    _setup_owner(test_client)
+    created = test_client.post(
+        "/api/access-tokens",
+        json={
+            "name": "MCP Ask",
+            "scopes": ["knowledge:read", "knowledge:search", "knowledge:ask"],
+        },
+    )
+    token = created.json()["token"]
+
+    async def seed():
+        async for db in app.dependency_overrides[get_db]():
+            document = Document(
+                title="中枢设计",
+                source_type=DocumentSourceType.note,
+                is_deleted=False,
+            )
+            db.add(document)
+            await db.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="mcp-ask-version",
+                raw_content="藏知是个人知识中枢。",
+                structured_content={"document_type": "note", "blocks": []},
+                processing_status="ready",
+            )
+            db.add(version)
+            await db.flush()
+            document.current_version_id = version.id
+            db.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id="mcp-ask-chunk",
+                    role="child",
+                    chunk_type="paragraph",
+                    order_index=0,
+                    content="藏知是个人知识中枢。",
+                    search_text="中枢设计 藏知是个人知识中枢。",
+                    content_hash="mcp-ask-chunk-hash",
+                    heading_path=[],
+                    char_count=11,
+                    token_estimate=6,
+                    is_current=True,
+                )
+            )
+            await db.commit()
+            return
+
+    asyncio.run(seed())
+
+    class Provider(AIProvider):
+        name = "stub"
+
+        def is_configured(self):
+            return True
+
+        def generate_understanding(self, **_):
+            raise NotImplementedError
+
+        def answer_question(self, *, question, evidence):
+            return AnswerResult(
+                answer="藏知是个人知识中枢。",
+                citation_ids=[int(evidence[0]["id"])],
+                insufficient_evidence=False,
+            )
+
+    async def provider_from_db(_db):
+        return Provider()
+
+    monkeypatch.setattr(mcp_module, "build_provider_from_db", provider_from_db)
+    test_client.cookies.clear()
+    response = test_client.post(
+        "/api/mcp",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "knowledge_ask",
+                "arguments": {"question": "藏知是什么？"},
+            },
+        },
+    )
+
+    tool_result = response.json()["result"]
+    assert tool_result["isError"] is False
+    assert tool_result["structuredContent"]["answer"] == "藏知是个人知识中枢。"
+    assert tool_result["structuredContent"]["citations"][0]["title"] == "中枢设计"
 
 
 def test_missing_saved_scope_never_broadens_to_all(client):

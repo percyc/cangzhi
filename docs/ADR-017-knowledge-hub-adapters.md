@@ -182,13 +182,15 @@ Cookie 登录的管理员拥有全部能力。`/api/v1` 使用统一的
 只读 tools：
 
 - `knowledge_search`
+- `knowledge_ask`
 - `knowledge_list_facets`
 - `knowledge_get_document`
 - `knowledge_get_chunk`
 - `knowledge_list_scopes`
 
-MCP 默认只取证，不调用藏知对话模型；显式问答先通过 REST/CLI 的
-`knowledge/ask` 提供。MCP resources 和问答 tool 在客户端兼容性验证后按需增加。
+`knowledge_search` 默认只取证，不调用藏知对话模型；`knowledge_ask` 与 REST 的
+`knowledge/ask` 复用同一问答服务、结构化表格计算和引用校验，并要求令牌显式包含
+`knowledge:ask`。MCP resources 在客户端兼容性验证后按需增加。
 
 Skill 只封装“何时调用、如何选择范围、如何呈现引用”，不包含检索逻辑。提供一份
 Hermes、OpenClaw 及兼容 Skills 平台均可使用的最小模板。
