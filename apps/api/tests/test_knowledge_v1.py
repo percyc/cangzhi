@@ -239,6 +239,34 @@ def test_document_and_chunk_read_only_expose_current_active_knowledge(client):
     assert chunk.status_code == 200
     assert chunk.json()["content_hash"] == "b" * 64
 
+    mcp_document = test_client.post(
+        "/api/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "knowledge_get_document",
+                "arguments": {
+                    "document_id": document_id,
+                    "offset": 0,
+                    "max_chars": 5,
+                },
+            },
+        },
+    ).json()["result"]["structuredContent"]
+    assert mcp_document["content"] == "藏知是个人"
+    assert mcp_document["content_window"] == {
+        "offset": 0,
+        "returned_chars": 5,
+        "total_chars": 10,
+        "truncated": True,
+        "next_offset": 5,
+        "max_chars": 5,
+    }
+    assert "structured_content" not in mcp_document
+    assert mcp_document["structure"]["document_type"] == "note"
+
 
 def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
     test_client, _ = client

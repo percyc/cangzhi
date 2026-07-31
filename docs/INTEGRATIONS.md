@@ -45,6 +45,11 @@ Authorization: Bearer ${CANGZHI_TOKEN}
 `/api/v1/knowledge/ask`，MCP 调用 `knowledge_ask`；对应令牌必须包含
 `knowledge:ask`。
 
+`knowledge_get_document` 是分页原文读取工具，默认最多返回 12000 字符，并在
+`content_window` 中给出总长度、截断状态和 `next_offset`。大型 Excel 或长文档不要
+一次读取全文：表格筛选与统计使用 `knowledge_ask`，证据定位使用
+`knowledge_search` / `knowledge_get_chunk`，确需原文时再按窗口逐页读取。
+
 ## 权限边界
 
 - `knowledge:read`：读取知识范围、文档和切片。

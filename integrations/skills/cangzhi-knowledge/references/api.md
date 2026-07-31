@@ -68,3 +68,7 @@ Supported tools:
 
 Tool results include both text content and `structuredContent`. Prefer the
 structured result.
+`knowledge_get_document` returns a bounded content window (12000 characters by
+default). Follow `content_window.next_offset` only when more source text is
+actually required; never request an entire large spreadsheet merely to answer
+a filter or aggregation question.
