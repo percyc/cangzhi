@@ -6,6 +6,7 @@ from apps.api.services.structured_table import (
     TableDataset,
     execute_query_plan,
     extract_table_row_payloads,
+    is_structured_table_question,
     validate_query_plan,
 )
 
@@ -156,6 +157,28 @@ def test_plan_accepts_model_null_limit_as_safe_default():
     assert plan.limit == 20
 
 
+def test_plan_normalizes_model_empty_optional_fields():
+    plan = validate_query_plan(
+        {
+            "document_id": 8,
+            "sheet_name": "明细",
+            "region_index": 1,
+            "filters": [],
+            "group_by": [],
+            "metric": "rows",
+            "metric_column": "",
+            "sort_by": "",
+            "sort_order": "",
+            "limit": 0,
+        },
+        [_dataset()],
+    )
+    assert plan.metric_column is None
+    assert plan.sort_by is None
+    assert plan.sort_order == "desc"
+    assert plan.limit == 20
+
+
 def test_executor_can_return_filtered_and_ranked_detail_rows():
     dataset = _dataset()
     plan = validate_query_plan(
@@ -185,3 +208,16 @@ def test_executor_can_return_filtered_and_ranked_detail_rows():
             "完成率": "25.0%（原始值：0.25）",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "2026-06-26 这一天提供了哪些项目？",
+        "列出状态为完成的记录",
+        "这个部门包含什么人员？",
+        "哪几笔交易超过了一万元？",
+    ],
+)
+def test_generic_table_detail_questions_use_structured_path(question):
+    assert is_structured_table_question(question) is True

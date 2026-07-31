@@ -24,6 +24,7 @@ _ORIGINAL_VALUE_RE = re.compile(r"（原始值：([^）]+)）$")
 _NUMBER_CLEAN_RE = re.compile(r"[,，\s￥¥$元]")
 _STRUCTURED_INTENT_RE = re.compile(
     r"(多少|几个|数量|总数|合计|总计|总和|求和|平均|均值|最大|最小|最高|最低|"
+    r"哪些|哪几|列出|罗列|包含什么|包含哪些|提供了什么|提供了哪些|"
     r"分组|各自|分别|排名|排行|前\s*\d+|后\s*\d+|筛选|过滤|占比|百分比|"
     r"count|sum|average|avg|max|min|group|rank|top\s*\d+)",
     re.IGNORECASE,
@@ -316,7 +317,8 @@ def validate_query_plan(
     if metric not in ALLOWED_METRICS:
         raise ValueError("统计方式不在白名单中")
     metric_column = raw.get("metric_column")
-    metric_column = str(metric_column) if metric_column is not None else None
+    metric_column = str(metric_column).strip() if metric_column is not None else None
+    metric_column = metric_column or None
     if metric not in {"rows", "count"} and (
         metric_column is None or metric_column not in columns
     ):
@@ -324,7 +326,8 @@ def validate_query_plan(
     if metric == "rows" and group_by:
         raise ValueError("返回明细行时不能同时分组")
     sort_by = raw.get("sort_by")
-    sort_by = str(sort_by) if sort_by is not None else None
+    sort_by = str(sort_by).strip() if sort_by is not None else None
+    sort_by = sort_by or None
     result_columns = columns | set(group_by) | {"metric", "matched_rows"}
     if sort_by is not None and sort_by not in result_columns:
         raise ValueError("排序字段无效")
@@ -332,7 +335,9 @@ def validate_query_plan(
     if sort_order not in ALLOWED_SORT_ORDERS:
         raise ValueError("排序方向无效")
     limit = raw.get("limit", 20)
-    if limit is None:
+    if limit is None or (
+        isinstance(limit, int) and not isinstance(limit, bool) and limit == 0
+    ):
         limit = 20
     if (
         isinstance(limit, bool)
