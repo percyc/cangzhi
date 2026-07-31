@@ -72,6 +72,8 @@ def test_created_webdav_source_is_returned_in_connector_list(client):
     assert response.status_code == 200
     body = response.json()
     assert body[0]["name"] == "个人云盘"
+    assert ".xlsx" in body[0]["include_extensions"]
+    assert ".xls" in body[0]["include_extensions"]
     assert body[0]["entry_counts"] == {
         "total": 0,
         "pending": 0,

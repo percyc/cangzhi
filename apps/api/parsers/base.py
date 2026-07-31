@@ -12,7 +12,17 @@ BlockType = Literal[
     "code_block",
     "blockquote",
 ]
-DocumentType = Literal["note", "txt", "markdown", "pdf", "doc", "docx", "html"]
+DocumentType = Literal[
+    "note",
+    "txt",
+    "markdown",
+    "pdf",
+    "doc",
+    "docx",
+    "xlsx",
+    "xls",
+    "html",
+]
 
 
 @dataclass
@@ -80,6 +90,7 @@ def get_parser_for_content(
     from .pdf import PdfParser
     from .doc import DocParser
     from .docx import DocxParser
+    from .spreadsheet import XlsParser, XlsxParser
     from .html import HtmlParser
 
     content_type = (content_type or "").lower()
@@ -95,6 +106,10 @@ def get_parser_for_content(
             return DocParser()
         if lower_name.endswith(".docx"):
             return DocxParser()
+        if lower_name.endswith(".xlsx"):
+            return XlsxParser()
+        if lower_name.endswith(".xls"):
+            return XlsParser()
         if lower_name.endswith((".html", ".htm")):
             return HtmlParser()
         if lower_name.endswith(".txt"):
@@ -119,6 +134,18 @@ def get_parser_for_content(
         in content_type
     ):
         return DocxParser()
+    if (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        in content_type
+    ):
+        return XlsxParser()
+    if content_type in {
+        "application/vnd.ms-excel",
+        "application/excel",
+        "application/x-excel",
+        "application/x-msexcel",
+    }:
+        return XlsParser()
     if "html" in content_type:
         return HtmlParser()
     if "text/plain" in content_type:

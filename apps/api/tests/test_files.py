@@ -95,11 +95,33 @@ def test_file_upload_validates_extension_and_mime(client):
         "/api/files/upload",
         files={"file": ("legacy.doc", BytesIO(b"word"), "application/msword")},
     )
+    xlsx = test_client.post(
+        "/api/files/upload",
+        files={
+            "file": (
+                "ledger.xlsx",
+                BytesIO(b"excel"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    xls = test_client.post(
+        "/api/files/upload",
+        files={
+            "file": (
+                "legacy.xls",
+                BytesIO(b"excel"),
+                "application/vnd.ms-excel",
+            )
+        },
+    )
 
     assert bad_extension.status_code == 415
     assert mismatch.status_code == 415
     assert octet_stream.status_code == 201
     assert legacy_doc.status_code == 201
+    assert xlsx.status_code == 201
+    assert xls.status_code == 201
 
 
 def test_file_upload_enforces_configured_limit(client, monkeypatch):

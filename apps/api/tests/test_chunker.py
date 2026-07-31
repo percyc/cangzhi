@@ -109,6 +109,30 @@ def test_hard_split_preserves_content_hash_consistency():
     assert [s.external_id for s in specs_a] == [s.external_id for s in specs_b]
 
 
+def test_long_table_splits_only_between_rows():
+    rows = [f"第{i}行\t" + chr(0x4E00 + i) * 120 for i in range(12)]
+    blocks = [
+        Block(
+            type="table",
+            text="\n".join(rows),
+            heading_path=["明细"],
+            paragraph_index=1,
+        ),
+    ]
+
+    specs = build_chunk_specs(_structured(blocks), child_overlap_chars=0)
+    children = [spec for spec in specs if spec.role == "child"]
+
+    assert len(children) > 1
+    reconstructed_rows = [
+        row
+        for child in children
+        for row in child.content.splitlines()
+    ]
+    assert reconstructed_rows == rows
+    assert all(child.chunk_type == "table" for child in children)
+
+
 def test_adjacent_children_include_bounded_semantic_overlap():
     text = "".join(
         f"第{i}句说明跨切片上下文不能丢失。" for i in range(1, 80)

@@ -1,3 +1,4 @@
+from datetime import datetime
 from io import BytesIO
 
 from apps.api.parsers import (
@@ -7,6 +8,8 @@ from apps.api.parsers import (
     NoteParser,
     PdfParser,
     TextParser,
+    XlsParser,
+    XlsxParser,
     get_parser_for_content,
 )
 
@@ -128,6 +131,74 @@ class TestStructuredContent:
 
 
 class TestOfficeParsers:
+    def test_selects_excel_parsers_by_extension_and_mime(self):
+        assert isinstance(
+            get_parser_for_content("application/octet-stream", "ledger.xlsx"),
+            XlsxParser,
+        )
+        assert isinstance(
+            get_parser_for_content(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                None,
+            ),
+            XlsxParser,
+        )
+        assert isinstance(
+            get_parser_for_content("application/vnd.ms-excel", "ledger.xls"),
+            XlsParser,
+        )
+
+    def test_parse_xlsx_preserves_sheets_rows_empty_cells_and_formula(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        summary = workbook.active
+        summary.title = "汇总"
+        summary.append(["项目", "一月", "二月", "合计"])
+        summary.append(["收入", 100, None, "=SUM(B2:C2)"])
+        summary.append([None, None, None, None])
+        details = workbook.create_sheet("明细")
+        details.append(["日期", "说明"])
+        details.append([datetime(2026, 7, 31, 8, 30), "会员收入"])
+        source = BytesIO()
+        workbook.save(source)
+
+        result = XlsxParser().parse(source.getvalue())
+
+        assert result.success is True
+        structured = result.structured_content
+        assert structured.document_type == "xlsx"
+        assert structured.metadata == {
+            "source_format": "xlsx",
+            "sheet_count": 2,
+            "sheet_names": ["汇总", "明细"],
+            "non_empty_rows": 4,
+            "non_empty_cells": 11,
+            "formula_cells": 1,
+        }
+        assert [block.type for block in structured.blocks] == [
+            "heading",
+            "table",
+            "heading",
+            "table",
+        ]
+        assert structured.blocks[1].heading_path == ["汇总"]
+        assert "收入\t100\t\t=SUM(B2:C2)" in structured.blocks[1].text
+        assert "2026-07-31 08:30:00\t会员收入" in structured.blocks[3].text
+
+    def test_parse_blank_xlsx_returns_no_fake_content(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        source = BytesIO()
+        workbook.save(source)
+
+        result = XlsxParser().parse(source.getvalue())
+
+        assert result.success is True
+        assert result.structured_content.blocks == []
+        assert result.structured_content.metadata["sheet_names"] == ["Sheet"]
+
     def test_selects_legacy_doc_parser_by_extension_and_mime(self):
         assert isinstance(
             get_parser_for_content("application/octet-stream", "legacy.doc"),

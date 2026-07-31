@@ -35,7 +35,16 @@ from ..storage.base import BlobStorage
 from .files import normalized_filename, validate_file_type
 
 router = APIRouter(prefix="/webdav", tags=["webdav"])
-DEFAULT_EXTENSIONS = [".pdf", ".doc", ".docx", ".md", ".markdown", ".txt"]
+DEFAULT_EXTENSIONS = [
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xlsx",
+    ".xls",
+    ".md",
+    ".markdown",
+    ".txt",
+]
 REMOTE_MISSING_CONFIRMATIONS = 2
 REMOTE_MISSING_GRACE = timedelta(hours=24)
 

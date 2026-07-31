@@ -30,6 +30,15 @@ _MIME_BY_EXTENSION = {
     ".docx": {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     },
+    ".xlsx": {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    },
+    ".xls": {
+        "application/vnd.ms-excel",
+        "application/excel",
+        "application/x-excel",
+        "application/x-msexcel",
+    },
     ".md": {"text/markdown", "text/plain"},
     ".markdown": {"text/markdown", "text/plain"},
     ".txt": {"text/plain"},
@@ -47,7 +56,7 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
     if allowed_mimes is None:
         raise HTTPException(
             status_code=415,
-            detail="仅支持 PDF、DOC、DOCX、Markdown 和 TXT 文件",
+            detail="仅支持 PDF、Word、Excel、Markdown 和 TXT 文件",
         )
     normalized_mime = (content_type or "application/octet-stream").lower()
     if (

@@ -30,7 +30,7 @@
 ### 采集与保存
 
 - 创建和编辑 Markdown 随手记，实质修改保留版本。
-- 上传 PDF、DOC、DOCX、Markdown 和 TXT，并下载保存的原文件。
+- 上传 PDF、DOC、DOCX、XLSX、XLS、Markdown 和 TXT，并下载保存的原文件。
 - 收藏公开网页，保存 HTML 快照并提取标题、作者、时间和正文。
 - 连接 WebDAV 目录，只读扫描并沿用统一解析、分类和索引流程。
 - 原文件按 SHA-256 去重存储；后台任务失败可见、可重试。

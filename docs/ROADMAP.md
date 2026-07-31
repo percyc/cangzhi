@@ -10,7 +10,7 @@
 ### 基线 A：可靠沉淀
 
 - 随手记、文件和网页链接采集
-- PDF、DOC、DOCX、Markdown、TXT 与 HTML 基础解析
+- PDF、DOC、DOCX、XLSX、XLS、Markdown、TXT 与 HTML 基础解析
 - 原文、网页快照、哈希去重和文档版本
 - 数据库后台任务、失败重试和处理状态
 - 单用户登录、模型密钥加密和服务端真实鉴权

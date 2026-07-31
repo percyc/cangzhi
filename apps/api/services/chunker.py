@@ -413,11 +413,19 @@ def _split_section_into_children(
         text_len = len(text)
         if text_len > hard_max:
             flush_buffer()
-            sub_pieces = _split_long_text(
-                text,
-                target=target_max,
-                hard_max=hard_max,
-                min_chars=min_chars,
+            sub_pieces = (
+                _split_table_text(
+                    text,
+                    target=target_max,
+                    hard_max=hard_max,
+                )
+                if block.type == "table"
+                else _split_long_text(
+                    text,
+                    target=target_max,
+                    hard_max=hard_max,
+                    min_chars=min_chars,
+                )
             )
             cursor_local = start
             for sub_text in sub_pieces:
@@ -567,6 +575,35 @@ def _split_sentences(text: str) -> list[str]:
         else:
             pieces.append(chunk)
     return pieces or [text.strip()]
+
+
+def _split_table_text(text: str, *, target: int, hard_max: int) -> list[str]:
+    """Split tabular text on row boundaries before falling back to hard cuts."""
+    rows = [row for row in text.splitlines() if row.strip()]
+    if len(rows) <= 1:
+        return _hard_split(text, hard_max)
+    pieces: list[str] = []
+    buffer: list[str] = []
+    buffer_length = 0
+    for row in rows:
+        if len(row) > hard_max:
+            if buffer:
+                pieces.append("\n".join(buffer))
+                buffer = []
+                buffer_length = 0
+            pieces.extend(_hard_split(row, hard_max))
+            continue
+        candidate_length = buffer_length + (1 if buffer else 0) + len(row)
+        if buffer and candidate_length > target:
+            pieces.append("\n".join(buffer))
+            buffer = [row]
+            buffer_length = len(row)
+        else:
+            buffer.append(row)
+            buffer_length = candidate_length
+    if buffer:
+        pieces.append("\n".join(buffer))
+    return pieces
 
 
 def _merge_short_pieces(

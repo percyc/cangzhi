@@ -63,6 +63,8 @@ export default function FileUploadPage() {
     { ext: '.pdf', name: 'PDF' },
     { ext: '.doc', name: 'Word DOC' },
     { ext: '.docx', name: 'Word DOCX' },
+    { ext: '.xlsx', name: 'Excel XLSX' },
+    { ext: '.xls', name: 'Excel XLS' },
     { ext: '.md', name: 'Markdown' },
     { ext: '.txt', name: '纯文本 TXT' },
   ];
@@ -73,7 +75,7 @@ export default function FileUploadPage() {
       <div className="mt-5">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">文件导入</p>
         <h1 className="mt-1 text-3xl font-semibold text-slate-950">上传本地资料</h1>
-        <p className="mt-2 text-sm text-slate-500">文档上传后会自动进入正文解析、智能切片和向量索引流程。</p>
+        <p className="mt-2 text-sm text-slate-500">文档或表格上传后会自动进入内容解析、智能切片和向量索引流程。</p>
       </div>
 
       <form onSubmit={handleSubmit} className="mt-7 space-y-5 rounded-2xl border bg-white p-5 sm:p-7">
