@@ -41,6 +41,14 @@ type AskResponse = {
   retrieval?: {
     vector_used: boolean;
     degraded_reason: string | null;
+    mode?: string;
+    structured_table?: {
+      matched_rows: number;
+      metric: string;
+      metric_column?: string | null;
+      group_by?: string[];
+      warnings?: string[];
+    };
   };
   scope?: { slug: string };
 };
@@ -485,7 +493,7 @@ function WelcomeState({
   const examples = [
     '总结我收藏过的向量检索方案',
     '我保存的资料里，如何避免知识切片截断？',
-    '比较几篇资料对个人知识管理的不同观点',
+    '按类别统计表格中的金额合计，并列出前三名',
   ];
   return (
     <div className="mx-auto flex max-w-2xl flex-col items-center py-16 text-center">
@@ -784,7 +792,11 @@ function ResultMeta({
     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
       <span>范围：{contextLabel}</span>
       <span>
-        {response.retrieval?.vector_used ? '混合检索' : '关键词检索'}
+        {response.retrieval?.mode === 'structured_table'
+          ? `表格精确计算 · ${response.retrieval.structured_table?.matched_rows ?? 0} 行`
+          : response.retrieval?.vector_used
+            ? '混合检索'
+            : '关键词检索'}
       </span>
       {response.provider && (
         <span>

@@ -39,6 +39,7 @@ from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from .search import extract_cjk_ngrams, normalize_query, table_location_from_extra
+from .structured_table import TableQueryResult, try_structured_table_query
 
 # ---- Limits ---------------------------------------------------------------
 # These constants cap what a single ask call can do. The point is to
@@ -244,6 +245,44 @@ class QAService:
             connector_ids=request.connector_ids,
             matches_none=request.matches_none,
         )
+        assert self._provider is not None  # checked above
+        candidate_table_document_ids = (
+            [] if request.matches_none else list(request.document_ids)
+        )
+        if not candidate_table_document_ids:
+            candidate_table_document_ids = list(
+                dict.fromkeys(
+                    item.document_id for item in evidence if item.table_location
+                )
+            )
+        structured_result = await try_structured_table_query(
+            db,
+            provider=self._provider,
+            question=question,
+            document_ids=candidate_table_document_ids,
+        )
+        if structured_result is not None:
+            structured_evidence = await _structured_result_to_evidence(
+                db, structured_result
+            )
+            if structured_evidence is not None:
+                evidence = [structured_evidence, *evidence[: MAX_EVIDENCE_ITEMS - 1]]
+                for evidence_id, item in enumerate(evidence, start=1):
+                    item.id = evidence_id
+                retrieval = {
+                    **retrieval,
+                    "mode": "structured_table",
+                    "structured_table": {
+                        "document_id": structured_result.dataset.document_id,
+                        "sheet_name": structured_result.dataset.sheet_name,
+                        "region_index": structured_result.dataset.region_index,
+                        "matched_rows": structured_result.matched_row_count,
+                        "metric": structured_result.plan.metric,
+                        "metric_column": structured_result.plan.metric_column,
+                        "group_by": list(structured_result.plan.group_by),
+                        "warnings": list(structured_result.warnings),
+                    },
+                }
         if not evidence:
             return AskResult(
                 question=question,
@@ -753,6 +792,76 @@ def _build_snippet(content: str, *, terms: list[str] | None) -> str:
     if end < len(content):
         snippet = snippet + "…"
     return snippet
+
+
+async def _structured_result_to_evidence(
+    db: AsyncSession,
+    result: TableQueryResult,
+) -> Evidence | None:
+    rows = (
+        await db.execute(
+            select(
+                DocumentChunk,
+                Document.source_type,
+                Document.source_url,
+            )
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(
+                DocumentChunk.document_id == result.dataset.document_id,
+                DocumentChunk.document_version_id
+                == result.dataset.document_version_id,
+                DocumentChunk.role == "child",
+                DocumentChunk.is_current.is_(True),
+            )
+            .order_by(DocumentChunk.order_index)
+        )
+    ).all()
+    selected = None
+    for chunk, source_type, source_url in rows:
+        extra = chunk.extra or {}
+        if (
+            extra.get("sheet_name") == result.dataset.sheet_name
+            and int(extra.get("region_index") or 1) == result.dataset.region_index
+            and (
+                result.source_row_start is None
+                or int(extra.get("row_end") or 0) >= result.source_row_start
+            )
+        ):
+            selected = (chunk, source_type, source_url)
+            break
+    if selected is None and rows:
+        selected = rows[0]
+    if selected is None:
+        return None
+    chunk, source_type, source_url = selected
+    location = {
+        "sheet_name": result.dataset.sheet_name,
+        "region_index": result.dataset.region_index,
+        "row_start": result.source_row_start,
+        "row_end": result.source_row_end,
+        "column_names": list(result.dataset.columns),
+    }
+    return Evidence(
+        id=1,
+        document_id=result.dataset.document_id,
+        document_version_id=result.dataset.document_version_id,
+        chunk_id=chunk.id,
+        title=result.dataset.title,
+        heading_path=[
+            result.dataset.sheet_name,
+            f"数据区域 {result.dataset.region_index}",
+            "精确计算结果",
+        ],
+        page=None,
+        paragraph_index=chunk.paragraph_index,
+        source_start=chunk.source_start,
+        source_end=chunk.source_end,
+        table_location=location,
+        snippet=result.summary[:3_500],
+        score=10.0,
+        source_type=_source_type_label(source_type),
+        source_url=source_url,
+    )
 
 
 async def _expanded_chunk_context(

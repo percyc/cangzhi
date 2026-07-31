@@ -45,6 +45,7 @@ from apps.api.security import (
     looks_like_access_block,
 )
 from apps.api.services import build_chunk_specs
+from apps.api.services.structured_table import replace_version_table_rows
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings
 
@@ -57,7 +58,7 @@ BATCH_SIZE = 10
 UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
-CHUNKING_IDEMPOTENCY = "chunking:m3-v4"
+CHUNKING_IDEMPOTENCY = "chunking:m3-v5"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
@@ -580,6 +581,12 @@ def _process_chunking(
         return False
 
     _replace_version_chunks(session, document, version, specs, profile, chunking_config)
+    table_row_count = replace_version_table_rows(
+        session,
+        document_id=document.id,
+        document_version_id=version.id,
+        structured_content=structured,
+    )
 
     job.status = "completed"
     job.finished_at = utc_now()
@@ -590,8 +597,7 @@ def _process_chunking(
     if version.processing_status in ("ready", "chunking", "processing"):
         version.processing_status = "ready"
 
-    # Write detection results and config to DocumentVersion.meta
-    # Idempotent: always overwrite with latest detection
+    # Write detection results and config to DocumentVersion.meta.
     meta = dict(version.meta or {})
     meta["document_profile"] = profile.to_dict()
     meta["chunking_config"] = chunking_config.to_dict()
@@ -599,6 +605,7 @@ def _process_chunking(
     meta["chunk_count"] = sum(1 for spec in specs if spec.role == "child")
     meta["parent_count"] = sum(1 for spec in specs if spec.role == "parent")
     meta["chunk_config_version"] = CHUNKING_IDEMPOTENCY
+    meta["structured_table_row_count"] = table_row_count
     version.meta = meta
     session.add(version)
 

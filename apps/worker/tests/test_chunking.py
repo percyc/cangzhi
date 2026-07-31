@@ -11,6 +11,7 @@ from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
+from apps.api.models.table_rows import StructuredTableRow
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings as worker_settings
@@ -456,3 +457,57 @@ class TestChunkerIntegration:
         # the parent chunk.
         assert "藏知路线图" in rows[0].search_text
         assert "搜索" in rows[0].search_text
+
+    def test_spreadsheet_chunking_persists_addressable_rows(self, session):
+        document = Document(title="采购表", source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        structured = StructuredContent(
+            document_type="xlsx",
+            blocks=[
+                Block(
+                    type="table",
+                    text="行 2｜品类=水果｜金额=12\n行 3｜金额=9",
+                    heading_path=["明细", "数据区域 1"],
+                    paragraph_index=0,
+                    extra={
+                        "sheet_name": "明细",
+                        "region_index": 1,
+                        "row_start": 2,
+                        "row_end": 3,
+                        "column_names": ["品类", "金额"],
+                    },
+                )
+            ],
+        )
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="table-seed",
+            structured_content=structured.to_dict(),
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        document.current_version_id = version.id
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=(
+                f"{version.id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}"
+            ),
+            config_version=CHUNKING_IDEMPOTENCY,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is True
+        rows = session.scalars(
+            select(StructuredTableRow)
+            .where(StructuredTableRow.document_version_id == version.id)
+            .order_by(StructuredTableRow.row_number)
+        ).all()
+        assert [row.row_number for row in rows] == [2, 3]
+        assert rows[1].values == {"品类": None, "金额": "9"}
+        assert version.meta["structured_table_row_count"] == 2

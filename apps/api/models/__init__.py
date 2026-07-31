@@ -5,6 +5,7 @@ from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from .knowledge_scopes import KnowledgeScope
 from .processing import ProcessingJob
+from .table_rows import StructuredTableRow
 from .taxonomy import (
     DEFAULT_CATEGORY_SLUGS,
     Category,
@@ -21,7 +22,6 @@ __all__ = [
     "AIRuntimeConfig",
     "Admin",
     "AuthSession",
-    "PersonalAccessToken",
     "Blob",
     "Category",
     "ChunkEmbedding",
@@ -35,7 +35,9 @@ __all__ = [
     "EmbeddingProfile",
     "ExternalItemExclusion",
     "KnowledgeScope",
+    "PersonalAccessToken",
     "ProcessingJob",
+    "StructuredTableRow",
     "Tag",
     "TagMergeRecord",
     "WebDAVEntry",

@@ -21,6 +21,7 @@ from apps.api.core.db import Base, get_db
 from apps.api.main import app
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
+from apps.api.models.table_rows import StructuredTableRow
 from apps.api.models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
@@ -93,6 +94,8 @@ class StubProvider(AIProvider):
         self.responses: list[AnswerResult] = []
         self.errors: list[Exception] = []
         self.calls: list[dict] = []
+        self.json_calls: list[dict] = []
+        self.json_responses: list[dict] = []
         self._configured = True
 
     @property
@@ -113,6 +116,12 @@ class StubProvider(AIProvider):
 
     def generate_understanding(self, **_):  # pragma: no cover - unused here
         raise NotImplementedError
+
+    def generate_json(self, *, system: str, prompt: str) -> dict:
+        self.json_calls.append({"system": system, "prompt": prompt})
+        if not self.json_responses:
+            raise AIProviderError("no queued json response")
+        return self.json_responses.pop(0)
 
     def answer_question(
         self,
@@ -357,6 +366,109 @@ def test_qa_service_returns_cited_answer(qa_db):
     assert citation["document_id"]
     assert citation["title"] == "向量检索"
     assert "向量检索" in citation["snippet"]
+
+
+def test_qa_service_uses_exact_structured_table_calculation(qa_db):
+    async def _run():
+        async with qa_db() as session:
+            document = Document(title="采购明细", source_type=DocumentSourceType.file)
+            session.add(document)
+            await session.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="table-question",
+                processing_status="ready",
+            )
+            session.add(version)
+            await session.flush()
+            document.current_version_id = version.id
+            chunk = DocumentChunk(
+                document_id=document.id,
+                document_version_id=version.id,
+                external_id="table-child",
+                role="child",
+                chunk_type="table",
+                order_index=0,
+                content="行 2｜品类=水果｜金额=1200\n行 3｜品类=水果｜金额=800",
+                search_text="采购明细 水果 金额 1200 800",
+                content_hash="table-chunk",
+                heading_path=["明细"],
+                char_count=40,
+                token_estimate=20,
+                extra={
+                    "sheet_name": "明细",
+                    "region_index": 1,
+                    "row_start": 2,
+                    "row_end": 3,
+                    "column_names": ["品类", "金额"],
+                },
+                is_current=True,
+            )
+            session.add(chunk)
+            session.add_all(
+                [
+                    StructuredTableRow(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        sheet_name="明细",
+                        region_index=1,
+                        row_number=2,
+                        values={"品类": "水果", "金额": "1200"},
+                    ),
+                    StructuredTableRow(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        sheet_name="明细",
+                        region_index=1,
+                        row_number=3,
+                        values={"品类": "水果", "金额": "800"},
+                    ),
+                ]
+            )
+            await session.commit()
+            document_id = document.id
+
+        provider = StubProvider()
+        provider.json_responses.append(
+            {
+                "document_id": document_id,
+                "sheet_name": "明细",
+                "region_index": 1,
+                "filters": [
+                    {"column": "品类", "operator": "eq", "value": "水果"}
+                ],
+                "group_by": [],
+                "metric": "sum",
+                "metric_column": "金额",
+                "sort_by": "metric",
+                "sort_order": "desc",
+                "limit": 10,
+            }
+        )
+        provider.queue(
+            AnswerResult(
+                answer="水果采购金额合计为 2000。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            result = await QAService(provider).ask(
+                session,
+                AskRequest(
+                    question="水果的采购金额合计是多少？",
+                    document_ids=[document_id],
+                ),
+            )
+        return result, provider
+
+    result, provider = asyncio.run(_run())
+    assert result.retrieval["mode"] == "structured_table"
+    assert result.retrieval["structured_table"]["matched_rows"] == 2
+    assert '"metric": 2000' in provider.calls[0]["evidence"][0]["snippet"]
+    assert result.citations[0]["table_location"]["row_start"] == 2
+    assert result.citations[0]["table_location"]["row_end"] == 3
 
 
 def test_qa_service_skips_model_when_no_evidence(qa_db):
