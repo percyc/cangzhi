@@ -19,6 +19,7 @@ from apps.api.documents import (
     detect_document_type,
     get_chunking_config,
 )
+from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.extractors import extract_xinhua_html
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
@@ -54,14 +55,17 @@ logger = structlog.get_logger()
 MAX_RETRIES = 3
 BASE_RETRY_DELAY_MINUTES = 5
 BATCH_SIZE = 10
+LARGE_TABLE_EMBEDDING_THRESHOLD = 1_000
+LARGE_TABLE_EMBEDDING_SAMPLE_SIZE = 256
 
 UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
-CHUNKING_IDEMPOTENCY = "chunking:m3-v5"
+CHUNKING_IDEMPOTENCY = "chunking:m3-v6"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
+TERMINAL_PARSE_FAILURE_REASONS = frozenset({"spreadsheet_limit_exceeded"})
 
 
 def utc_now() -> datetime.datetime:
@@ -140,6 +144,13 @@ def _mark_parse_failure(
     session.add_all([job, version])
     session.commit()
     return False
+
+
+def _is_terminal_parse_failure(details: dict | None) -> bool:
+    return bool(
+        isinstance(details, dict)
+        and details.get("reason") in TERMINAL_PARSE_FAILURE_REASONS
+    )
 
 
 def _load_content_for_parsing(
@@ -679,7 +690,29 @@ def _enqueue_embedding_jobs_for_new_chunks(
     if not child_chunks:
         return
 
-    for chunk in child_chunks:
+    total_child_chunks = len(child_chunks)
+    table_row_count = int((version.meta or {}).get("structured_table_row_count") or 0)
+    use_sampling = (
+        table_row_count > LARGE_TABLE_EMBEDDING_THRESHOLD
+        and total_child_chunks > LARGE_TABLE_EMBEDDING_THRESHOLD
+    )
+    selected_chunks = (
+        evenly_sample_chunks(child_chunks, LARGE_TABLE_EMBEDDING_SAMPLE_SIZE)
+        if use_sampling
+        else child_chunks
+    )
+    version.meta = {
+        **(version.meta or {}),
+        "embedding_strategy": {
+            "mode": "sampled" if use_sampling else "full",
+            "total_child_chunks": total_child_chunks,
+            "selected_chunks": len(selected_chunks),
+            "structured_table_rows": table_row_count,
+        },
+    }
+    session.add(version)
+
+    for chunk in selected_chunks:
         for profile in profiles:
             key = (
                 f"{profile.id}:{chunk.id}:{EMBEDDING_STAGE}:"
@@ -1226,6 +1259,14 @@ def _process_parsing(
             )
 
         if not result.success or result.structured_content is None:
+            if _is_terminal_parse_failure(result.error_details):
+                return _mark_terminal_failure(
+                    session,
+                    job,
+                    version,
+                    result.error_message or "解析失败",
+                    details=result.error_details,
+                )
             return _mark_parse_failure(
                 session,
                 job,

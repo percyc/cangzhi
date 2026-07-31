@@ -1,13 +1,20 @@
 import datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
+
 from apps.api.core.db import Base
+from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.taxonomy import DocumentCategory, DocumentSummary
-from apps.worker.services.processor import calculate_next_retry_at, process_single_job
+from apps.worker.services.processor import (
+    _is_terminal_parse_failure,
+    calculate_next_retry_at,
+    process_single_job,
+)
 
 
 @pytest.fixture
@@ -41,6 +48,29 @@ class TestCalculateNextRetry:
         assert calculate_next_retry_at(0, now=now) - now == datetime.timedelta(minutes=5)
         assert calculate_next_retry_at(1, now=now) - now == datetime.timedelta(minutes=10)
         assert calculate_next_retry_at(2, now=now) - now == datetime.timedelta(minutes=20)
+
+    def test_spreadsheet_limit_is_not_retried(self):
+        assert _is_terminal_parse_failure(
+            {"reason": "spreadsheet_limit_exceeded"}
+        )
+        assert not _is_terminal_parse_failure({"reason": "xlsx_parse_failed"})
+
+    def test_large_table_embedding_sample_is_even_and_keeps_edges(self):
+        chunks = [SimpleNamespace(id=index + 1, order_index=index) for index in range(13_151)]
+
+        selected = evenly_sample_chunks(chunks, 256)
+
+        assert len(selected) == 256
+        assert selected[0].order_index == 0
+        assert selected[-1].order_index == 13_150
+        assert [item.order_index for item in selected] == sorted(
+            item.order_index for item in selected
+        )
+
+    def test_small_chunk_collection_is_not_sampled(self):
+        chunks = [SimpleNamespace(id=index + 1, order_index=index) for index in range(10)]
+
+        assert evenly_sample_chunks(chunks, 256) == chunks
 
 
 class TestJobProcessing:

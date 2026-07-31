@@ -1,6 +1,8 @@
 from datetime import datetime
 from io import BytesIO
 
+import pytest
+
 from apps.api.parsers import (
     DocParser,
     DocxParser,
@@ -12,6 +14,7 @@ from apps.api.parsers import (
     XlsxParser,
     get_parser_for_content,
 )
+from apps.api.parsers import spreadsheet as spreadsheet_parser
 
 
 class TestNoteParser:
@@ -120,7 +123,7 @@ def hello():
 
 class TestStructuredContent:
     def test_to_dict_has_correct_schema(self):
-        from apps.api.parsers.base import StructuredContent, Block
+        from apps.api.parsers.base import Block, StructuredContent
         blocks = [Block(type="paragraph", text="test", heading_path=[])]
         sc = StructuredContent(document_type="txt", blocks=blocks)
         data = sc.to_dict()
@@ -131,6 +134,23 @@ class TestStructuredContent:
 
 
 class TestOfficeParsers:
+    def test_spreadsheet_limits_accept_current_large_personal_tables(self):
+        assert spreadsheet_parser.MAX_ROWS_PER_SHEET >= 102_966
+        assert spreadsheet_parser.MAX_CELLS_TOTAL >= 1_750_422
+
+    def test_spreadsheet_row_limit_remains_enforced(self, monkeypatch):
+        monkeypatch.setattr(spreadsheet_parser, "MAX_ROWS_PER_SHEET", 3)
+
+        with pytest.raises(
+            spreadsheet_parser.SpreadsheetLimitError,
+            match="超过 3 行限制",
+        ):
+            spreadsheet_parser._sheet_blocks(
+                "大表",
+                [["列"]] * 4,
+                paragraph_offset=0,
+            )
+
     def test_selects_excel_parsers_by_extension_and_mime(self):
         assert isinstance(
             get_parser_for_content("application/octet-stream", "ledger.xlsx"),
@@ -256,6 +276,7 @@ class TestOfficeParsers:
 
     def test_doc_parser_converts_then_preserves_structure(self, monkeypatch):
         from types import SimpleNamespace
+
         from docx import Document
 
         def fake_run(arguments, **_kwargs):

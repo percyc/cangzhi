@@ -37,6 +37,7 @@ _DETAIL_INTENT_RE = re.compile(
     r"有哪些|有哪几|有啥)",
     re.IGNORECASE,
 )
+_COUNT_INTENT_RE = re.compile(r"(多少|几个|数量|总数|count)", re.IGNORECASE)
 _DATE_VALUE_RE = re.compile(
     r"^(?P<year>\d{4})[-/.\u5e74](?P<month>\d{1,2})[-/.\u6708]"
     r"(?P<day>\d{1,2})(?:\u65e5)?(?:[T\s].*)?$"
@@ -49,7 +50,7 @@ _DATE_QUERY_RE = re.compile(
 ALLOWED_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"}
 ALLOWED_METRICS = {"rows", "count", "count_distinct", "sum", "avg", "min", "max"}
 ALLOWED_SORT_ORDERS = {"asc", "desc"}
-MAX_QUERY_ROWS = 100_000
+MAX_QUERY_ROWS = 150_000
 MAX_RESULT_ROWS = 50
 MAX_GROUP_COLUMNS = 3
 MAX_FILTERS = 8
@@ -68,6 +69,9 @@ class TableDataset:
     semantic_summary: str = ""
     samples: tuple[dict[str, Any], ...] = ()
     literal_matches: tuple[tuple[str, str], ...] = ()
+    records: tuple[StructuredTableRow, ...] = field(
+        default=(), repr=False, compare=False
+    )
 
     @property
     def key(self) -> tuple[int, str, int]:
@@ -578,6 +582,24 @@ def _literal_matches_for_question(
             for row in rows
             if row.values.get(column) not in (None, "")
         }
+        # One-character categorical values such as 是/否 are too ambiguous for
+        # a global substring match. They are safe when the question explicitly
+        # binds the value to its column, for example “是否更新为否”.
+        explicitly_bound = [
+            value
+            for value in candidates
+            if 1 <= len(value) <= 80
+            and not value.replace(".", "", 1).isdigit()
+            and re.search(
+                rf"{re.escape(column)}\s*(?:为|是|等于|属于|：|:|=)\s*"
+                rf"{re.escape(value)}(?:\s|的|、|，|。|？|\?|$)",
+                question,
+                re.IGNORECASE,
+            )
+        ]
+        if explicitly_bound:
+            matches.append((column, max(explicitly_bound, key=len)))
+            continue
         matched = [
             value
             for value in candidates
@@ -712,6 +734,7 @@ async def _load_datasets(
                     [row for row, _, _ in items],
                     columns,
                 ),
+                records=tuple(row for row, _, _ in items),
             )
         )
     return datasets
@@ -773,22 +796,32 @@ async def try_structured_table_query(
                 metric="rows",
                 limit=MAX_RESULT_ROWS,
             )
-            rows = list(
-                (
-                    await db.scalars(
-                        select(StructuredTableRow)
-                        .where(
-                            StructuredTableRow.document_version_id
-                            == dataset.document_version_id,
-                            StructuredTableRow.sheet_name == dataset.sheet_name,
-                            StructuredTableRow.region_index == dataset.region_index,
-                        )
-                        .order_by(StructuredTableRow.row_number)
-                        .limit(MAX_QUERY_ROWS)
-                    )
-                ).all()
+            return execute_query_plan(dataset, dataset.records, plan)
+    if _COUNT_INTENT_RE.search(question):
+        matched_datasets = [
+            dataset
+            for dataset in datasets
+            if _literal_detail_plan_is_complete(question, dataset)
+        ]
+        if matched_datasets:
+            dataset = max(
+                matched_datasets,
+                key=lambda item: (
+                    len(item.literal_matches),
+                    sum(len(value) for _, value in item.literal_matches),
+                ),
             )
-            return execute_query_plan(dataset, rows, plan)
+            plan = TableQueryPlan(
+                document_id=dataset.document_id,
+                sheet_name=dataset.sheet_name,
+                region_index=dataset.region_index,
+                filters=tuple(
+                    TableFilter(column=column, operator="eq", value=value)
+                    for column, value in dataset.literal_matches
+                ),
+                metric="count",
+            )
+            return execute_query_plan(dataset, dataset.records, plan)
     prompt = json.dumps(
         {
             "问题": question,
@@ -829,19 +862,4 @@ async def try_structured_table_query(
         for item in datasets
         if item.key == (plan.document_id, plan.sheet_name, plan.region_index)
     )
-    rows = list(
-        (
-            await db.scalars(
-                select(StructuredTableRow)
-                .where(
-                    StructuredTableRow.document_version_id
-                    == dataset.document_version_id,
-                    StructuredTableRow.sheet_name == dataset.sheet_name,
-                    StructuredTableRow.region_index == dataset.region_index,
-                )
-                .order_by(StructuredTableRow.row_number)
-                .limit(MAX_QUERY_ROWS)
-            )
-        ).all()
-    )
-    return execute_query_plan(dataset, rows, plan)
+    return execute_query_plan(dataset, dataset.records, plan)

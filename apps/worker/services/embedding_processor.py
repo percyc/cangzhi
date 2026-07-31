@@ -72,7 +72,6 @@ from apps.api.security.secrets import (
     decrypt_secret,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -718,7 +717,7 @@ def reconcile_profile_progress(session: Session, profile_id: int) -> None:
     ):
         return
     remains_active = profile.status == "active"
-    current_chunks = list(
+    all_current_chunks = list(
         session.execute(
             select(DocumentChunk).where(
                 DocumentChunk.role == "child",
@@ -726,6 +725,28 @@ def reconcile_profile_progress(session: Session, profile_id: int) -> None:
             )
         ).scalars().all()
     )
+    all_current_ids = {chunk.id for chunk in all_current_chunks}
+    jobs = list(
+        session.execute(
+            select(ProcessingJob).where(
+                and_(
+                    ProcessingJob.embedding_profile_id == profile.id,
+                    ProcessingJob.stage == EMBEDDING_STAGE,
+                    ProcessingJob.embedding_chunk_id.in_(all_current_ids)
+                    if all_current_ids
+                    else False,
+                )
+            )
+        ).scalars().all()
+    )
+    # A profile covers the chunks for which its build/incremental pipeline
+    # created jobs. Large structured tables intentionally sample embeddings;
+    # their remaining rows stay available through lexical and exact-table
+    # indexes and must not leave the vector profile permanently "incomplete".
+    eligible_ids = {job.embedding_chunk_id for job in jobs}
+    current_chunks = [
+        chunk for chunk in all_current_chunks if chunk.id in eligible_ids
+    ]
     current_ids = {chunk.id for chunk in current_chunks}
     embeddings = list(
         session.execute(
@@ -743,19 +764,6 @@ def reconcile_profile_progress(session: Session, profile_id: int) -> None:
         and isinstance(row.vector, list)
         and len(row.vector) == profile.dim
         and _is_finite_vector(row.vector)
-    )
-    jobs = list(
-        session.execute(
-            select(ProcessingJob).where(
-                and_(
-                    ProcessingJob.embedding_profile_id == profile.id,
-                    ProcessingJob.stage == EMBEDDING_STAGE,
-                    ProcessingJob.embedding_chunk_id.in_(current_ids)
-                    if current_ids
-                    else False,
-                )
-            )
-        ).scalars().all()
     )
     failed = sum(1 for job in jobs if job.status == "failed")
     pending = sum(

@@ -37,6 +37,7 @@ CHILD_TARGET_MAX_CHARS = 600
 CHILD_HARD_MAX_CHARS = 900
 CHILD_TARGET_MIN_CHARS = 80
 CHILD_OVERLAP_CHARS = 120
+PARENT_MAX_CHARS = 80_000
 
 # Sentence boundary detectors. Chinese punctuation first so we don't
 # split on the ASCII period inside a number; newline is always a
@@ -124,24 +125,32 @@ def build_chunk_specs(
         if not section_text.strip():
             continue
         parent_external_id = f"{seed}:p:{section_index}"
-        parent_hash = chunk_content_hash(section_text)
+        parent_content, parent_truncated = _bounded_parent_content(section_text)
+        parent_extra = _merge_block_extras(section.blocks)
+        if parent_truncated:
+            parent_extra = {
+                **parent_extra,
+                "parent_content_truncated": True,
+                "original_char_count": len(section_text),
+            }
+        parent_hash = chunk_content_hash(parent_content)
         parent = ChunkSpec(
             external_id=parent_external_id,
             parent_external_id=None,
             order_index=parent_index,
             role=_CHUNK_ROLE_PARENT,
             chunk_type="section",
-            content=section_text,
+            content=parent_content,
             content_hash=parent_hash,
             heading_path=list(section.heading_path),
             page=section.page,
             paragraph_index=section.start_paragraph_index,
             source_start=section.source_start,
             source_end=section.source_end,
-            char_count=len(section_text),
-            token_estimate=_estimate_tokens(section_text),
+            char_count=len(parent_content),
+            token_estimate=_estimate_tokens(parent_content),
             language=metadata.get("language") if isinstance(metadata, dict) else None,
-            extra=_merge_block_extras(section.blocks),
+            extra=parent_extra,
         )
         specs.append(parent)
         parent_index += 1
@@ -174,6 +183,18 @@ def build_chunk_specs(
             specs.append(child)
             child_counter += 1
     return specs
+
+
+def _bounded_parent_content(content: str) -> tuple[str, bool]:
+    """Bound non-retrieval parent text while retaining both source edges."""
+
+    if len(content) <= PARENT_MAX_CHARS:
+        return content, False
+    marker = "\n\n…父级上下文过长，中间内容已省略；完整内容请读取原文或子切片…\n\n"
+    available = PARENT_MAX_CHARS - len(marker)
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return f"{content[:head_chars]}{marker}{content[-tail_chars:]}", True
 
 
 @dataclass

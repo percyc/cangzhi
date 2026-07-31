@@ -1,6 +1,7 @@
 """Unit tests for the structure-prioritized chunker."""
 
 from apps.api.parsers.base import Block, StructuredContent
+from apps.api.services import chunker as chunker_module
 from apps.api.services.chunker import (
     build_chunk_specs,
     chunk_content_hash,
@@ -68,7 +69,6 @@ def test_subheading_updates_path_without_splitting_section():
 
 
 def test_long_section_splits_by_sentence_boundaries():
-    body = "这是第一句。".split("。")
     paragraphs = []
     for i in range(20):
         paragraphs.append(
@@ -107,6 +107,23 @@ def test_hard_split_preserves_content_hash_consistency():
     specs_b = build_chunk_specs(_structured(blocks))
     assert [s.content_hash for s in specs_a] == [s.content_hash for s in specs_b]
     assert [s.external_id for s in specs_a] == [s.external_id for s in specs_b]
+
+
+def test_oversized_parent_is_bounded_but_children_keep_full_coverage(monkeypatch):
+    monkeypatch.setattr(chunker_module, "PARENT_MAX_CHARS", 1_000)
+    text = "甲" * 2_500 + "乙" * 2_500
+    specs = build_chunk_specs(
+        _structured([Block(type="table", text=text, heading_path=["大表"])]),
+        child_overlap_chars=0,
+    )
+
+    parent = next(spec for spec in specs if spec.role == "parent")
+    children = [spec for spec in specs if spec.role == "child"]
+    assert len(parent.content) == 1_000
+    assert parent.content.startswith("甲") and parent.content.endswith("乙")
+    assert parent.extra["parent_content_truncated"] is True
+    assert parent.extra["original_char_count"] == 5_000
+    assert "".join(child.content for child in children) == text
 
 
 def test_long_table_splits_only_between_rows():

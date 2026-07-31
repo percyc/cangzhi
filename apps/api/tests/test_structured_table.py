@@ -318,6 +318,28 @@ def test_literal_inference_does_not_guess_year_for_ambiguous_date_alias():
     assert matches == (("字段乙", "早餐"),)
 
 
+def test_literal_inference_accepts_one_character_value_when_bound_to_column():
+    rows = [
+        StructuredTableRow(
+            document_id=8,
+            document_version_id=12,
+            sheet_name="任意数据",
+            region_index=1,
+            row_number=index,
+            values={"是否更新": value, "指标": f"指标 {index}"},
+        )
+        for index, value in enumerate(["是", "否", "否"], start=2)
+    ]
+
+    matches = _literal_matches_for_question(
+        "是否更新为否的记录有多少条？",
+        rows,
+        ["是否更新", "指标"],
+    )
+
+    assert matches == (("是否更新", "否"),)
+
+
 def test_weak_detail_phrase_needs_complete_literal_constraints():
     incidental = TableDataset(
         document_id=8,

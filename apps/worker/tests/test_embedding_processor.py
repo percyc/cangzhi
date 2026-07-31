@@ -54,7 +54,6 @@ from apps.worker.services.embedding_processor import (
 )
 from apps.worker.services.processor import process_single_job
 
-
 # --- helpers --------------------------------------------------------------
 
 
@@ -629,6 +628,45 @@ class TestProcessEmbeddingJob:
 
 
 class TestReconcileProgress:
+    def test_counts_only_chunks_selected_by_profile_jobs(self, session):
+        _make_config(session)
+        profile = _make_profile(session, dim=4)
+        document, version, selected_chunk = _make_doc_and_chunk(session)
+        unselected_chunk = DocumentChunk(
+            document_id=document.id,
+            document_version_id=version.id,
+            external_id="chunk-unselected",
+            role="child",
+            chunk_type="table",
+            order_index=1,
+            content="未向量化的大表行",
+            search_text="未向量化的大表行",
+            content_hash="unselected-hash",
+            char_count=9,
+            token_estimate=5,
+            is_current=True,
+        )
+        session.add(unselected_chunk)
+        job = _make_embedding_job(
+            session,
+            profile=profile,
+            chunk=selected_chunk,
+            document=document,
+            version=version,
+        )
+        job.status = "created"
+        profile.status = "active"
+        session.add_all([job, profile])
+        session.commit()
+
+        reconcile_profile_progress(session, profile.id)
+        session.commit()
+        session.refresh(profile)
+
+        assert profile.total_chunks == 1
+        assert profile.completed_chunks == 0
+        assert profile.status == "active"
+
     def test_active_profile_keeps_serving_while_progress_updates(self, session):
         _make_config(session)
         profile = _make_profile(session, dim=4)

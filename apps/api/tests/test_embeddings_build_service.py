@@ -21,7 +21,7 @@ import asyncio
 import threading
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -29,17 +29,17 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
-from apps.api.core.db import Base
 import apps.api.models  # noqa: F401 - register all tables
+from apps.api.core.db import Base
 from apps.api.embeddings import compute_config_fingerprint
 from apps.api.embeddings.build_service import (
     BUILDABLE_STATUSES,
     EMBEDDING_STAGE,
+    RETRYABLE_STATUSES,
     ProfileNotActivatable,
     ProfileNotBuildable,
     ProfileNotFound,
     ProfileNotReady,
-    RETRYABLE_STATUSES,
     activate_profile,
     enqueue_embedding_jobs_for_chunk,
     get_profile_summaries,
@@ -53,8 +53,6 @@ from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
-from sqlalchemy import select
-
 
 # --- fixtures -------------------------------------------------------------
 
@@ -348,6 +346,42 @@ class TestStartBuild:
                 await _commit(session)
                 result = await start_build(session, profile.id)
                 assert result.enqueued == 2
+
+        _run_async(_run())
+
+    def test_large_table_build_uses_version_sampling_strategy(self, session_factory):
+        async def _run():
+            async with session_factory() as session:
+                profile = await _seed_profile(session, status="tested")
+                _document, version, _children = await _make_doc_and_chunks(
+                    session, count=10
+                )
+                version.meta = {
+                    "embedding_strategy": {
+                        "mode": "sampled",
+                        "total_child_chunks": 10,
+                        "selected_chunks": 3,
+                        "structured_table_rows": 10_000,
+                    }
+                }
+                session.add(version)
+                await _commit(session)
+
+                result = await start_build(session, profile.id)
+
+                assert result.total_chunks == 3
+                assert result.enqueued == 3
+                jobs = list(
+                    (
+                        await session.execute(
+                            select(ProcessingJob)
+                            .where(ProcessingJob.embedding_profile_id == profile.id)
+                            .order_by(ProcessingJob.embedding_chunk_id)
+                        )
+                    ).scalars()
+                )
+                assert len(jobs) == 3
+                assert jobs[0].embedding_chunk_id != jobs[-1].embedding_chunk_id
 
         _run_async(_run())
 

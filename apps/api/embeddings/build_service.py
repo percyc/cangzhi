@@ -70,17 +70,20 @@ this contract.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.auth import AIRuntimeConfig
 from ..models.chunks import DocumentChunk
+from ..models.documents import DocumentVersion
 from ..models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from ..models.processing import ProcessingJob
+from .sampling import evenly_sample_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +285,11 @@ async def _current_child_chunks(db: AsyncSession) -> list[DocumentChunk]:
 
     rows = (
         await db.execute(
-            select(DocumentChunk)
+            select(DocumentChunk, DocumentVersion.meta)
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentChunk.document_version_id,
+            )
             .where(
                 and_(
                     DocumentChunk.role == "child",
@@ -291,8 +298,24 @@ async def _current_child_chunks(db: AsyncSession) -> list[DocumentChunk]:
             )
             .order_by(DocumentChunk.id)
         )
-    ).scalars().all()
-    return list(rows)
+    ).all()
+    grouped: dict[int, list[DocumentChunk]] = defaultdict(list)
+    strategies: dict[int, dict] = {}
+    for chunk, version_meta in rows:
+        grouped[chunk.document_version_id].append(chunk)
+        strategy = (version_meta or {}).get("embedding_strategy") or {}
+        strategies[chunk.document_version_id] = (
+            strategy if isinstance(strategy, dict) else {}
+        )
+    selected: list[DocumentChunk] = []
+    for version_id, chunks in grouped.items():
+        strategy = strategies.get(version_id) or {}
+        if strategy.get("mode") == "sampled":
+            sample_size = int(strategy.get("selected_chunks") or 0)
+            selected.extend(evenly_sample_chunks(chunks, sample_size))
+        else:
+            selected.extend(chunks)
+    return selected
 
 
 async def _load_active_config(
@@ -550,32 +573,12 @@ async def _verify_profile_is_complete(
     a stale vector.
     """
 
-    current = (
-        await db.execute(
-            select(func.count(DocumentChunk.id)).where(
-                and_(
-                    DocumentChunk.role == "child",
-                    DocumentChunk.is_current.is_(True),
-                )
-            )
-        )
-    ).scalar_one()
+    current_chunks = await _current_child_chunks(db)
+    current = len(current_chunks)
     if current == 0:
         return True, 0, 0
 
-    chunk_id_to_hash = {
-        row.id: row.content_hash
-        for row in (
-            await db.execute(
-                select(DocumentChunk.id, DocumentChunk.content_hash).where(
-                    and_(
-                        DocumentChunk.role == "child",
-                        DocumentChunk.is_current.is_(True),
-                    )
-                )
-            )
-        ).all()
-    }
+    chunk_id_to_hash = {row.id: row.content_hash for row in current_chunks}
     stored = list(
         (
             await db.execute(
