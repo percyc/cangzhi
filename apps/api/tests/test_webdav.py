@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from apps.api.api.webdav import _matches_ignore_pattern
 from apps.api.services.webdav import (
     RemoteEntry,
@@ -75,6 +77,8 @@ def test_created_webdav_source_is_returned_in_connector_list(client):
         "pending": 0,
         "failed": 0,
         "synced": 0,
+        "suspected_missing": 0,
+        "missing": 0,
     }
 
     deleted = test_client.delete(f"/api/webdav/{body[0]['id']}")
@@ -211,7 +215,9 @@ def test_deleted_webdav_document_is_not_rediscovered(client, monkeypatch):
     assert test_client.post(f"/api/webdav/{source['id']}/sync").json()["imported"] == 0
 
 
-def test_webdav_restore_preserves_remote_missing_state(client, monkeypatch):
+def test_webdav_remote_missing_is_confirmed_then_trashed_and_can_be_kept(
+    client, monkeypatch
+):
     test_client, _storage = client
     source = test_client.post(
         "/api/webdav",
@@ -242,6 +248,9 @@ def test_webdav_restore_preserves_remote_missing_state(client, monkeypatch):
 
     monkeypatch.setattr("apps.api.api.webdav.propfind", fake_propfind)
     monkeypatch.setattr("apps.api.api.webdav.download_file", fake_download)
+    monkeypatch.setattr(
+        "apps.api.api.webdav.REMOTE_MISSING_GRACE", timedelta(0)
+    )
     test_client.post(f"/api/webdav/{source['id']}/scan")
     test_client.post(f"/api/webdav/{source['id']}/sync")
     entry = test_client.get(f"/api/webdav/{source['id']}/entries").json()[0]
@@ -249,13 +258,57 @@ def test_webdav_restore_preserves_remote_missing_state(client, monkeypatch):
     test_client.post(f"/api/webdav/{source['id']}/scan")
     assert test_client.get(
         f"/api/webdav/{source['id']}/entries"
-    ).json()[0]["state"] == "missing"
+    ).json()[0]["state"] == "suspected_missing"
+    confirmed = test_client.post(f"/api/webdav/{source['id']}/scan").json()
+    assert confirmed["trashed"] == 1
+    missing_entry = test_client.get(
+        f"/api/webdav/{source['id']}/entries"
+    ).json()[0]
+    assert missing_entry["state"] == "ignored"
+    assert len(test_client.get("/api/documents?deleted=true").json()) == 1
 
-    test_client.delete(f"/api/documents/{entry['document_id']}")
-    test_client.post(f"/api/documents/{entry['document_id']}/restore")
+    remote.extend(
+        [
+            RemoteEntry(
+                path="/knowledge/missing.md",
+                is_collection=False,
+                etag='"v2"',
+                last_modified="tomorrow",
+                size=13,
+                content_type="text/markdown",
+            )
+        ]
+    )
+    returned = test_client.post(f"/api/webdav/{source['id']}/scan").json()
+    assert returned["restored"] == 1
     assert test_client.get(
         f"/api/webdav/{source['id']}/entries"
-    ).json()[0]["state"] == "missing"
+    ).json()[0]["state"] == "changed"
+
+    remote.clear()
+    test_client.post(f"/api/webdav/{source['id']}/scan")
+    test_client.post(f"/api/webdav/{source['id']}/scan")
+    missing_entry = test_client.get(
+        f"/api/webdav/{source['id']}/entries"
+    ).json()[0]
+    assert missing_entry["state"] == "ignored"
+    kept = test_client.post(
+        f"/api/webdav/{source['id']}/entries/{missing_entry['id']}/keep-snapshot"
+    )
+    assert kept.status_code == 200
+    kept_entry = test_client.get(
+        f"/api/webdav/{source['id']}/entries"
+    ).json()[0]
+    assert kept_entry["state"] == "missing"
+    assert kept_entry["keep_snapshot"] is True
+    assert test_client.get("/api/documents?deleted=false").status_code == 200
+
+    test_client.post(f"/api/webdav/{source['id']}/scan")
+    kept_missing = test_client.get(
+        f"/api/webdav/{source['id']}/entries"
+    ).json()[0]
+    assert kept_missing["state"] == "missing"
+    assert kept_missing["keep_snapshot"] is True
 
 
 def test_permanently_deleted_webdav_file_stays_excluded_after_reconnect(

@@ -19,13 +19,13 @@ type Item = {
 const ITEMS: Item[] = [
   {
     id: 'chat',
-    href: '/settings#chat',
+    href: '/settings?section=chat',
     title: '对话模型',
     defaultHint: '分类、摘要与知识问答',
   },
   {
     id: 'embedding',
-    href: '/settings#embedding',
+    href: '/settings?section=embedding',
     title: '向量与索引',
     defaultHint: '语义检索与索引版本',
   },

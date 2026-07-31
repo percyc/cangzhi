@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from io import BytesIO
 from pathlib import PurePosixPath
@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
@@ -26,13 +26,18 @@ from ..services.webdav import (
     validate_webdav_url,
     webdav_external_identity,
 )
-from ..services.document_lifecycle import trash_documents as trash_document_records
+from ..services.document_lifecycle import (
+    restore_documents as restore_document_records,
+    trash_documents as trash_document_records,
+)
 from ..storage import get_storage
 from ..storage.base import BlobStorage
 from .files import normalized_filename, validate_file_type
 
 router = APIRouter(prefix="/webdav", tags=["webdav"])
 DEFAULT_EXTENSIONS = [".pdf", ".doc", ".docx", ".md", ".markdown", ".txt"]
+REMOTE_MISSING_CONFIRMATIONS = 2
+REMOTE_MISSING_GRACE = timedelta(hours=24)
 
 
 class SourceConfig(BaseModel):
@@ -48,6 +53,7 @@ class SourceConfig(BaseModel):
     ignore_patterns: list[str] = Field(
         default_factory=lambda: [".*", "~$*", "*.tmp", "@eaDir"]
     )
+    remote_delete_policy: Literal["trash", "keep"] = "trash"
 
     @field_validator("include_extensions")
     @classmethod
@@ -109,8 +115,10 @@ async def list_sources(db: AsyncSession = Depends(get_db)):
             "pending": pending,
             "failed": failed,
             "synced": synced,
+            "suspected_missing": suspected_missing,
+            "missing": missing,
         }
-        for source_id, total, pending, failed, synced in (
+        for source_id, total, pending, failed, synced, suspected_missing, missing in (
             await db.execute(
                 select(
                     WebDAVEntry.source_id,
@@ -120,6 +128,22 @@ async def list_sources(db: AsyncSession = Depends(get_db)):
                     ),
                     func.count(WebDAVEntry.id).filter(WebDAVEntry.state == "failed"),
                     func.count(WebDAVEntry.id).filter(WebDAVEntry.state == "synced"),
+                    func.count(WebDAVEntry.id).filter(
+                        WebDAVEntry.state == "suspected_missing"
+                    ),
+                    func.count(WebDAVEntry.id).filter(
+                        or_(
+                            WebDAVEntry.state == "missing",
+                            (
+                                (WebDAVEntry.state == "ignored")
+                                & (WebDAVEntry.resume_state == "missing")
+                                & (
+                                    WebDAVEntry.ignore_reason
+                                    == "document_trashed"
+                                )
+                            ),
+                        )
+                    ),
                 ).group_by(WebDAVEntry.source_id)
             )
         ).all()
@@ -128,7 +152,15 @@ async def list_sources(db: AsyncSession = Depends(get_db)):
     for row in rows:
         item = row.to_public_dict()
         item["entry_counts"] = counts.get(
-            row.id, {"total": 0, "pending": 0, "failed": 0, "synced": 0}
+            row.id,
+            {
+                "total": 0,
+                "pending": 0,
+                "failed": 0,
+                "synced": 0,
+                "suspected_missing": 0,
+                "missing": 0,
+            },
         )
         result.append(item)
     return result
@@ -158,6 +190,15 @@ async def list_entries(source_id: int, db: AsyncSession = Depends(get_db)):
             "last_error": entry.last_error,
             "synced_at": entry.synced_at.isoformat() if entry.synced_at else None,
             "ignore_reason": entry.ignore_reason,
+            "resume_state": entry.resume_state,
+            "last_seen_at": (
+                entry.last_seen_at.isoformat() if entry.last_seen_at else None
+            ),
+            "missing_since": (
+                entry.missing_since.isoformat() if entry.missing_since else None
+            ),
+            "missing_count": entry.missing_count or 0,
+            "keep_snapshot": bool(entry.keep_snapshot),
         }
         for entry in entries
     ]
@@ -197,8 +238,52 @@ async def allow_entry_reimport(
     entry.ignore_reason = None
     entry.ignored_at = None
     entry.resume_state = None
+    entry.missing_since = None
+    entry.missing_count = 0
+    entry.keep_snapshot = False
     await db.commit()
     return {"ok": True, "message": "已允许该文件重新入库"}
+
+
+@router.post(
+    "/{source_id}/entries/{entry_id}/keep-snapshot",
+    response_model=dict[str, Any],
+)
+async def keep_entry_snapshot(
+    source_id: int,
+    entry_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Keep a local knowledge snapshot even when its remote file is absent."""
+
+    await _source_or_404(db, source_id)
+    entry = await db.get(WebDAVEntry, entry_id)
+    if entry is None or entry.source_id != source_id:
+        raise HTTPException(status_code=404, detail="远端文件记录不存在")
+    document = (
+        await db.get(Document, entry.document_id)
+        if entry.document_id is not None
+        else None
+    )
+    if document is None:
+        raise HTTPException(status_code=409, detail="该远端文件还没有可保留的知识快照")
+    entry.keep_snapshot = True
+    if document.is_deleted:
+        if document.delete_reason != "remote_missing":
+            raise HTTPException(
+                status_code=409,
+                detail="该资料不是因远端删除进入回收站，请在回收站中恢复",
+            )
+        await restore_document_records(db, [document], commit=False)
+    entry.state = "missing"
+    entry.resume_state = None
+    entry.ignore_reason = None
+    entry.ignored_at = None
+    meta = dict(document.meta or {})
+    meta["webdav_keep_snapshot"] = True
+    document.meta = meta
+    await db.commit()
+    return {"ok": True, "message": "已保留为本地知识快照，不再随远端删除回收"}
 
 
 @router.post("", response_model=dict[str, Any], status_code=201)
@@ -221,6 +306,7 @@ async def create_source(payload: SourceCreate, db: AsyncSession = Depends(get_db
         trusted_private_network=payload.trusted_private_network,
         include_extensions=payload.include_extensions,
         ignore_patterns=payload.ignore_patterns,
+        remote_delete_policy=payload.remote_delete_policy,
         sync_status="idle",
     )
     db.add(source)
@@ -267,6 +353,7 @@ async def update_source(
     source.trusted_private_network = payload.trusted_private_network
     source.include_extensions = payload.include_extensions
     source.ignore_patterns = payload.ignore_patterns
+    source.remote_delete_policy = payload.remote_delete_policy
     if payload.clear_password:
         source.password_cipher = encrypt_secret("")
         source.has_password = False
@@ -480,6 +567,9 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
 
     now = datetime.now(timezone.utc)
     extensions = set(source.include_extensions or DEFAULT_EXTENSIONS)
+    remote_file_paths = {
+        entry.path for entry in remote if not entry.is_collection
+    }
     files = [
         entry
         for entry in remote
@@ -495,7 +585,26 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
             )
         ).scalars()
     }
-    discovered = changed = unchanged = ignored = 0
+    linked_document_ids = {
+        entry.document_id
+        for entry in existing.values()
+        if entry.document_id is not None
+    }
+    linked_documents = (
+        {
+            document.id: document
+            for document in (
+                await db.execute(
+                    select(Document).where(Document.id.in_(linked_document_ids))
+                )
+            )
+            .scalars()
+            .all()
+        }
+        if linked_document_ids
+        else {}
+    )
+    discovered = changed = unchanged = ignored = restored = 0
     seen: set[str] = set()
     for remote_entry in files:
         seen.add(remote_entry.path)
@@ -535,8 +644,23 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
             else:
                 discovered += 1
         elif entry.state == "ignored":
-            ignored += 1
+            document = linked_documents.get(entry.document_id)
+            if (
+                entry.ignore_reason == "document_trashed"
+                and document is not None
+                and document.is_deleted
+                and document.delete_reason == "remote_missing"
+            ):
+                await restore_document_records(db, [document], commit=False)
+                entry.state = "changed"
+                entry.keep_snapshot = False
+                restored += 1
+                changed += 1
+            else:
+                ignored += 1
         elif (
+            entry.state in ("missing", "suspected_missing")
+            or
             entry.etag != remote_entry.etag
             or entry.last_modified != remote_entry.last_modified
             or entry.file_size != remote_entry.size
@@ -551,11 +675,52 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         entry.file_size = remote_entry.size
         entry.content_type = remote_entry.content_type
         entry.last_seen_at = now
-    missing = 0
+        entry.missing_since = None
+        entry.missing_count = 0
+        if entry.state != "ignored":
+            entry.keep_snapshot = False
+    suspected_missing = confirmed_missing = trashed = 0
+    documents_to_trash: list[Document] = []
     for path, entry in existing.items():
-        if path not in seen and entry.state != "ignored":
-            entry.state = "missing"
-            missing += 1
+        # A file excluded by a changed extension or ignore rule still exists
+        # remotely and must never be interpreted as a remote deletion.
+        if path in remote_file_paths or entry.state == "ignored":
+            continue
+        if entry.missing_since is None:
+            entry.missing_since = now
+            entry.missing_count = 1
+            entry.state = "suspected_missing"
+            suspected_missing += 1
+            continue
+        entry.missing_count = (entry.missing_count or 0) + 1
+        missing_since = entry.missing_since
+        if missing_since.tzinfo is None:
+            missing_since = missing_since.replace(tzinfo=timezone.utc)
+        confirmed = (
+            entry.missing_count >= REMOTE_MISSING_CONFIRMATIONS
+            and now - missing_since >= REMOTE_MISSING_GRACE
+        )
+        if not confirmed:
+            entry.state = "suspected_missing"
+            suspected_missing += 1
+            continue
+        entry.state = "missing"
+        confirmed_missing += 1
+        document = linked_documents.get(entry.document_id)
+        if (
+            source.remote_delete_policy == "trash"
+            and not entry.keep_snapshot
+            and document is not None
+            and not document.is_deleted
+        ):
+            documents_to_trash.append(document)
+    if documents_to_trash:
+        trashed = await trash_document_records(
+            db,
+            documents_to_trash,
+            reason="remote_missing",
+            commit=False,
+        )
     source.sync_status = "idle"
     source.last_scan_at = now
     await db.commit()
@@ -565,7 +730,10 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         "changed": changed,
         "unchanged": unchanged,
         "ignored": ignored,
-        "missing": missing,
+        "suspected_missing": suspected_missing,
+        "missing": confirmed_missing,
+        "trashed": trashed,
+        "restored": restored,
         "eligible_files": len(files),
     }
 

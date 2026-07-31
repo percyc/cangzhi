@@ -37,6 +37,9 @@ class WebDAVSource(BaseModel):
     )
     include_extensions = Column(_JSON_TYPE, nullable=False)
     ignore_patterns = Column(_JSON_TYPE, nullable=False)
+    remote_delete_policy = Column(
+        String(16), nullable=False, server_default=text("'trash'")
+    )
     is_enabled = Column(Boolean, nullable=False, server_default=text("true"), index=True)
     sync_status = Column(
         String(32), nullable=False, server_default=text("'idle'"), index=True
@@ -57,6 +60,7 @@ class WebDAVSource(BaseModel):
             "trusted_private_network": bool(self.trusted_private_network),
             "include_extensions": list(self.include_extensions or []),
             "ignore_patterns": list(self.ignore_patterns or []),
+            "remote_delete_policy": self.remote_delete_policy or "trash",
             "is_enabled": bool(self.is_enabled),
             "sync_status": self.sync_status,
             "last_error": self.last_error,
@@ -100,6 +104,9 @@ class WebDAVEntry(BaseModel):
     ignore_reason = Column(String(64), nullable=True)
     ignored_at = Column(DateTime(timezone=True), nullable=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    missing_since = Column(DateTime(timezone=True), nullable=True)
+    missing_count = Column(Integer, nullable=False, server_default=text("0"))
+    keep_snapshot = Column(Boolean, nullable=False, server_default=text("false"))
     synced_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
 

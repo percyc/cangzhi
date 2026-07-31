@@ -14,20 +14,19 @@ export default function DataSettingsPage() {
   });
 
   return (
-    <main className="mx-auto max-w-5xl px-4 sm:px-6">
-      <h1 className="text-2xl font-semibold text-slate-900">设置</h1>
-      <p className="mt-2 text-sm text-slate-500">
-        管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
+    <main className="mx-auto max-w-5xl px-5 py-9">
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+        系统设置
+      </p>
+      <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
+        数据与备份
+      </h1>
+      <p className="mt-2 text-sm leading-6 text-slate-500">
+        导出、迁移和保护个人知识资产。
       </p>
       <SettingsSectionNav active="data" />
 
-      <div className="mt-8">
-        <p className="text-xs font-semibold uppercase tracking-wide text-violet-600">
-          数据主权
-        </p>
-        <h2 className="mt-1 text-xl font-semibold text-slate-900">
-          数据与备份
-        </h2>
+      <div className="mt-6">
         <p className="mt-1 text-sm leading-6 text-slate-500">
           导出包不依赖藏知即可阅读。Markdown 用于日常迁移，JSON 保留完整结构和处理元数据。
         </p>

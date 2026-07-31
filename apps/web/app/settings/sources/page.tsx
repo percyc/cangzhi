@@ -5,7 +5,14 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 
 import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 
-type Counts = { total: number; pending: number; failed: number; synced: number };
+type Counts = {
+  total: number;
+  pending: number;
+  failed: number;
+  synced: number;
+  suspected_missing: number;
+  missing: number;
+};
 type Source = {
   id: number;
   name: string;
@@ -17,6 +24,7 @@ type Source = {
   trusted_private_network: boolean;
   include_extensions: string[];
   ignore_patterns: string[];
+  remote_delete_policy: 'trash' | 'keep';
   is_enabled: boolean;
   sync_status: string;
   last_error: string | null;
@@ -32,6 +40,10 @@ type Entry = {
   document_id: number | null;
   last_error: string | null;
   ignore_reason: string | null;
+  resume_state: string | null;
+  missing_since: string | null;
+  missing_count: number;
+  keep_snapshot: boolean;
 };
 type DeleteImpact = {
   entry_count: number;
@@ -56,6 +68,7 @@ type SourceForm = {
   include_extensions: string;
   ignore_patterns: string;
   clear_password: boolean;
+  remote_delete_policy: 'trash' | 'keep';
 };
 
 const DEFAULT_EXTENSIONS = '.pdf, .doc, .docx, .md, .markdown, .txt';
@@ -71,6 +84,7 @@ const EMPTY: SourceForm = {
   include_extensions: DEFAULT_EXTENSIONS,
   ignore_patterns: DEFAULT_IGNORE_PATTERNS,
   clear_password: false,
+  remote_delete_policy: 'trash',
 };
 
 export default function SourcesPage() {
@@ -134,6 +148,7 @@ export default function SourcesPage() {
       include_extensions: source.include_extensions.join(', '),
       ignore_patterns: source.ignore_patterns.join('\n'),
       clear_password: false,
+      remote_delete_policy: source.remote_delete_policy,
     });
     setMessage('');
     setError('');
@@ -179,7 +194,7 @@ export default function SourcesPage() {
       if (kind === 'test') setMessage(`${source.name}：连接正常`);
       if (kind === 'scan')
         setMessage(
-          `${source.name}：扫描到 ${String(result.eligible_files ?? 0)} 个可导入文件`,
+          `${source.name}：可导入 ${String(result.eligible_files ?? 0)} 个，待确认缺失 ${String(result.suspected_missing ?? 0)} 个，已确认缺失 ${String(result.missing ?? 0)} 个，移入回收站 ${String(result.trashed ?? 0)} 个，自动恢复 ${String(result.restored ?? 0)} 个`,
         );
       if (kind === 'sync')
         setMessage(
@@ -234,6 +249,34 @@ export default function SourcesPage() {
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '重新纳入失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const keepSnapshot = async (sourceId: number, entry: Entry) => {
+    setBusy(`${sourceId}:snapshot:${entry.id}`);
+    setError('');
+    try {
+      const response = await fetch(
+        `/api/webdav/${sourceId}/entries/${entry.id}/keep-snapshot`,
+        { method: 'POST' },
+      );
+      if (!response.ok) throw new Error(await readError(response, '保留快照失败'));
+      const entriesResponse = await fetch(`/api/webdav/${sourceId}/entries`, {
+        cache: 'no-store',
+      });
+      if (!entriesResponse.ok)
+        throw new Error(await readError(entriesResponse, '文件清单读取失败'));
+      const items = (await entriesResponse.json()) as Entry[];
+      setEntries((current) => ({
+        ...current,
+        [sourceId]: items,
+      }));
+      setMessage('已保留为本地知识快照；远端继续缺失也不会再次移入回收站。');
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '保留快照失败');
     } finally {
       setBusy('');
     }
@@ -311,20 +354,13 @@ export default function SourcesPage() {
   };
 
   return (
-    <main className="mx-auto max-w-5xl px-4 sm:px-6">
-      <h1 className="text-2xl font-semibold text-slate-900">设置</h1>
-      <p className="mt-2 text-sm text-slate-500">
-        管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
+    <main className="mx-auto max-w-5xl px-5 py-9">
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">系统设置</p>
+      <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">知识源</h1>
+      <p className="mt-2 text-sm leading-6 text-slate-500">
+        连接外部文件夹，并统一管理扫描、同步及远端文件生命周期。
       </p>
       <SettingsSectionNav active="sources" />
-
-      <div className="mt-8">
-        <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600">外部知识来源</p>
-        <h2 className="mt-1 text-xl font-semibold text-slate-900">知识源</h2>
-      </div>
-      <p className="mt-1 text-sm text-slate-500">
-        连接外部文件夹，藏知只读扫描远端文件，下载后沿用正文解析、智能切片和向量流程。
-      </p>
 
       <details className="mt-6 rounded-2xl border bg-white">
         <summary className="flex cursor-pointer items-center justify-between gap-4 px-5 py-4 hover:bg-slate-50">
@@ -386,7 +422,7 @@ export default function SourcesPage() {
                     <h2 className="font-semibold">{source.name}</h2>
                     <p className="mt-1 break-all text-xs text-slate-500">{source.base_url}{source.root_path}</p>
                     <p className="mt-2 text-sm text-slate-600">
-                      文件 {source.entry_counts.total} · 已同步 {source.entry_counts.synced} · 待同步 {source.entry_counts.pending} · 失败 {source.entry_counts.failed}
+                      文件 {source.entry_counts.total} · 已同步 {source.entry_counts.synced} · 待同步 {source.entry_counts.pending} · 待确认缺失 {source.entry_counts.suspected_missing} · 已缺失 {source.entry_counts.missing} · 失败 {source.entry_counts.failed}
                     </p>
                     <p className="mt-1 text-xs text-slate-500">
                       {source.username || '匿名访问'} · {source.recursive ? '包含子目录' : '仅当前目录'} · {source.include_extensions.join('、') || '未配置文件类型'}
@@ -398,7 +434,7 @@ export default function SourcesPage() {
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   {(['test', 'scan', 'sync'] as const).map((kind) => (
-                    <button key={kind} type="button" disabled={Boolean(busy) || (!source.is_enabled && kind !== 'test')} onClick={() => void action(source, kind)} className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40">
+                    <button key={kind} type="button" disabled={Boolean(busy) || (!source.is_enabled && kind !== 'test')} onClick={() => void action(source, kind)} className={`rounded-xl px-3 py-2 text-sm font-medium disabled:opacity-40 ${kind === 'sync' ? 'bg-slate-950 text-white hover:bg-slate-800' : 'border border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
                       {busy === `${source.id}:${kind}` ? '执行中…' : { test: '测试连接', scan: '扫描文件', sync: '同步入库' }[kind]}
                     </button>
                   ))}
@@ -416,7 +452,7 @@ export default function SourcesPage() {
                   </button>
                 </div>
                 {source.last_error && <p className="mt-3 text-sm text-red-700">{source.last_error}</p>}
-                {entries[source.id] && <EntryTable entries={entries[source.id]} sourceId={source.id} busy={busy} onAllowReimport={allowReimport} />}
+                {entries[source.id] && <EntryTable entries={entries[source.id]} sourceId={source.id} busy={busy} onAllowReimport={allowReimport} onKeepSnapshot={keepSnapshot} />}
               </>
             )}
           </section>
@@ -507,6 +543,25 @@ function SourceFields({
         <input type="checkbox" checked={form.trusted_private_network} onChange={(event) => setForm({ ...form, trusted_private_network: event.target.checked })} />
         允许连接可信内网地址
       </label>
+      <label className="text-sm text-slate-700 md:col-span-2">
+        远端文件删除后的处理
+        <select
+          value={form.remote_delete_policy}
+          onChange={(event) =>
+            setForm({
+              ...form,
+              remote_delete_policy: event.target.value as 'trash' | 'keep',
+            })
+          }
+          className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2"
+        >
+          <option value="trash">确认远端已删除后移入回收站（推荐）</option>
+          <option value="keep">始终保留本地知识快照</option>
+        </select>
+        <span className="mt-1 block text-xs leading-5 text-slate-500">
+          藏知会先连续确认，并保留至少 24 小时保护期；任何情况都不会删除 WebDAV 远端文件或自动永久清除知识。
+        </span>
+      </label>
       {editing && hasPassword && (
         <label className="flex items-center gap-2 text-sm text-red-700 md:col-span-2">
           <input
@@ -525,15 +580,15 @@ function Field({ label, value, onChange, type = 'text', placeholder = '', requir
   return <label className="text-sm text-slate-700">{label}<input required={required} disabled={disabled} value={value} type={type} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 disabled:bg-slate-100" /></label>;
 }
 
-function EntryTable({ entries, sourceId, busy, onAllowReimport }: { entries: Entry[]; sourceId: number; busy: string; onAllowReimport: (sourceId: number, entry: Entry) => Promise<void> }) {
-  return <div className="mt-4 overflow-x-auto border-t pt-3"><table className="min-w-full text-left text-xs"><thead className="text-slate-500"><tr><th className="py-2">远端文件</th><th>状态</th><th>大小</th><th>资料</th></tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="border-t"><td className="max-w-xl break-all py-2 pr-4">{entry.remote_path}</td><td>{entryState(entry.state)}</td><td>{formatSize(entry.file_size)}</td><td>{entry.document_id ? <Link className="text-blue-700 hover:underline" href={`/documents/${entry.document_id}`}>查看</Link> : entry.ignore_reason === 'permanent_deleted' ? <button type="button" disabled={Boolean(busy)} onClick={() => void onAllowReimport(sourceId, entry)} className="text-blue-700 hover:underline disabled:opacity-40">{busy === `${sourceId}:entry:${entry.id}` ? '处理中…' : '允许重新入库'}</button> : '—'}</td></tr>)}</tbody></table></div>;
+function EntryTable({ entries, sourceId, busy, onAllowReimport, onKeepSnapshot }: { entries: Entry[]; sourceId: number; busy: string; onAllowReimport: (sourceId: number, entry: Entry) => Promise<void>; onKeepSnapshot: (sourceId: number, entry: Entry) => Promise<void> }) {
+  return <div className="mt-4 overflow-x-auto border-t pt-3"><table className="min-w-full text-left text-xs"><thead className="text-slate-500"><tr><th className="py-2">远端文件</th><th>状态</th><th>大小</th><th>操作</th></tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="border-t"><td className="max-w-xl break-all py-2 pr-4">{entry.remote_path}</td><td>{entry.state === 'ignored' && entry.ignore_reason === 'document_trashed' && entry.resume_state === 'missing' ? '远端已确认删除 · 已入回收站' : entryState(entry.state)}{entry.keep_snapshot ? ' · 已保留快照' : ''}</td><td>{formatSize(entry.file_size)}</td><td><div className="flex items-center gap-3">{entry.document_id && <Link className="text-blue-700 hover:underline" href={`/documents/${entry.document_id}`}>查看</Link>}{entry.document_id && !entry.keep_snapshot && (entry.state === 'missing' || (entry.state === 'ignored' && entry.ignore_reason === 'document_trashed')) && <button type="button" disabled={Boolean(busy)} onClick={() => void onKeepSnapshot(sourceId, entry)} className="text-blue-700 hover:underline disabled:opacity-40">{busy === `${sourceId}:snapshot:${entry.id}` ? '处理中…' : '保留知识快照'}</button>}{entry.ignore_reason === 'permanent_deleted' && <button type="button" disabled={Boolean(busy)} onClick={() => void onAllowReimport(sourceId, entry)} className="text-blue-700 hover:underline disabled:opacity-40">{busy === `${sourceId}:entry:${entry.id}` ? '处理中…' : '允许重新入库'}</button>}{!entry.document_id && entry.ignore_reason !== 'permanent_deleted' ? '—' : null}</div></td></tr>)}</tbody></table></div>;
 }
 
 function statusLabel(value: string) {
   return ({ idle: '空闲', scanning: '扫描中', syncing: '同步中', failed: '有失败' } as Record<string, string>)[value] ?? value;
 }
 function entryState(value: string) {
-  return ({ discovered: '待同步', changed: '有更新', synced: '已同步', failed: '失败', missing: '远端已删除', ignored: '已从知识库排除' } as Record<string, string>)[value] ?? value;
+  return ({ discovered: '待同步', changed: '有更新', synced: '已同步', failed: '失败', suspected_missing: '远端缺失，待确认', missing: '远端已确认删除', ignored: '已从知识库排除' } as Record<string, string>)[value] ?? value;
 }
 function formatSize(value: number | null) {
   if (value == null) return '—';

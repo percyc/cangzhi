@@ -108,12 +108,21 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    const syncPanelFromHash = () => {
-      setActivePanel(window.location.hash === '#embedding' ? 'embedding' : 'chat');
+    const syncPanelFromLocation = () => {
+      const requested = new URLSearchParams(window.location.search).get('section');
+      setActivePanel(
+        requested === 'embedding' || window.location.hash === '#embedding'
+          ? 'embedding'
+          : 'chat',
+      );
     };
-    syncPanelFromHash();
-    window.addEventListener('hashchange', syncPanelFromHash);
-    return () => window.removeEventListener('hashchange', syncPanelFromHash);
+    syncPanelFromLocation();
+    window.addEventListener('popstate', syncPanelFromLocation);
+    window.addEventListener('hashchange', syncPanelFromLocation);
+    return () => {
+      window.removeEventListener('popstate', syncPanelFromLocation);
+      window.removeEventListener('hashchange', syncPanelFromLocation);
+    };
   }, []);
 
   useEffect(() => {
@@ -365,10 +374,17 @@ export default function SettingsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-5xl px-4 sm:px-6">
-      <h1 className="text-2xl font-semibold text-slate-900">设置</h1>
-      <p className="mt-2 text-sm text-slate-500">
-        管理模型、知识来源和系统处理能力。日常整理请前往知识库或收件箱。
+    <main className="mx-auto max-w-5xl px-5 py-9">
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+        系统设置
+      </p>
+      <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
+        {activePanel === 'chat' ? '对话模型' : '向量与索引'}
+      </h1>
+      <p className="mt-2 text-sm leading-6 text-slate-500">
+        {activePanel === 'chat'
+          ? '配置用于分类、摘要、整理和知识问答的大模型。'
+          : '配置语义向量渠道，并管理全库索引版本与切换。'}
       </p>
       <SettingsSectionNav
         active={activePanel}
@@ -388,7 +404,7 @@ export default function SettingsPage() {
           }
         }}
         beforeNavigate={(section) =>
-          (section !== 'sources' && section !== 'data') ||
+          section === activePanel ||
           !anyDirty ||
           window.confirm('模型设置还有未保存的修改，确定离开当前页面吗？')
         }
