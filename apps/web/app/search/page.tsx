@@ -212,19 +212,16 @@ function SearchClient() {
 
   return (
     <main className="container mx-auto max-w-5xl p-4">
-      <Link href="/documents" className="text-blue-600 hover:underline">
-        ← 返回资料列表
-      </Link>
+      <h1 className="text-2xl font-bold text-slate-900">搜索知识库</h1>
+      <p className="mt-1 text-sm text-slate-500">
+        用关键词找到之前保存的资料。每个结果会显示命中片段、章节路径以及定位信息，点击可进入资料详情。
+      </p>
       <div className="mt-4 flex w-fit rounded-lg border border-slate-300 bg-white p-1 text-sm">
         <span className="rounded bg-slate-900 px-3 py-1.5 text-white">找资料</span>
         <Link href={debouncedQuery ? `/ask?q=${encodeURIComponent(debouncedQuery)}` : '/ask'} className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100">
           问知识库
         </Link>
       </div>
-      <h1 className="mt-4 text-2xl font-bold text-slate-900">搜索知识库</h1>
-      <p className="mt-1 text-sm text-slate-500">
-        用关键词找到之前保存的资料。每个结果会显示命中片段、章节路径以及定位信息，点击可进入资料详情。
-      </p>
 
       <form
         className="mt-6"
