@@ -4,13 +4,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import build_provider_from_db
 from ..core.db import get_db
+from ..models.datasets import KnowledgeDataset
+from ..models.documents import Document
 from ..security.api_auth import APIIdentity, require_api_identity
+from ..services.dataset_execution import (
+    DatasetExecutionError,
+    execute_dataset_query,
+    get_dataset_schema,
+    preview_dataset,
+)
 from ..services.knowledge_read import (
     KnowledgeReadError,
     read_current_chunk,
@@ -52,6 +61,18 @@ class KnowledgeAskPayload(ScopeSelector):
     question: str = Field(min_length=1, max_length=500)
 
 
+class DatasetQueryPayload(BaseModel):
+    filters: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    columns: list[str] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list, max_length=3)
+    metric: str = "rows"
+    metric_column: str | None = None
+    sort_by: str | None = None
+    sort_order: str = "asc"
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+
+
 def _scope_error(exc: KnowledgeScopeError) -> HTTPException:
     status = 404 if exc.code == "scope_not_found" else 400
     return HTTPException(
@@ -91,11 +112,103 @@ async def capabilities(
             "vector_search": True,
             "cited_qa": True,
             "structured_table_qa": True,
+            "dataset_catalog": True,
+            "dataset_query": True,
+            "dataset_execution_backend": "duckdb_parquet",
             "mcp_ask": True,
             "document_read": True,
             "chunk_read": True,
         },
     }
+
+
+def _dataset_http_error(exc: DatasetExecutionError) -> HTTPException:
+    status = {
+        "dataset_not_found": 404,
+        "artifact_unavailable": 409,
+        "artifact_missing": 409,
+        "query_timeout": 408,
+    }.get(exc.code, 400)
+    return HTTPException(
+        status_code=status, detail={"code": exc.code, "message": str(exc)}
+    )
+
+
+@router.get("/knowledge/datasets", response_model=dict[str, Any])
+async def list_datasets_v1(
+    document_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=200),
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    statement = (
+        select(KnowledgeDataset)
+        .join(Document, Document.id == KnowledgeDataset.document_id)
+        .where(
+            Document.is_deleted.is_(False),
+            Document.current_version_id == KnowledgeDataset.document_version_id,
+        )
+        .order_by(KnowledgeDataset.id.desc())
+        .limit(limit)
+    )
+    if document_id is not None:
+        statement = statement.where(KnowledgeDataset.document_id == document_id)
+    datasets = list((await db.scalars(statement)).all())
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "document_id": item.document_id,
+                "name": item.name,
+                "sheet_name": item.sheet_name,
+                "region_index": item.region_index,
+                "row_count": item.row_count,
+                "column_count": item.column_count,
+                "status": item.status,
+            }
+            for item in datasets
+        ],
+        "limit": limit,
+    }
+
+
+@router.get("/knowledge/datasets/{dataset_id}/schema", response_model=dict[str, Any])
+async def get_dataset_schema_v1(
+    dataset_id: int,
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        return await get_dataset_schema(db, dataset_id)
+    except DatasetExecutionError as exc:
+        raise _dataset_http_error(exc) from None
+
+
+@router.get("/knowledge/datasets/{dataset_id}/rows", response_model=dict[str, Any])
+async def preview_dataset_v1(
+    dataset_id: int,
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    limit: int = Query(default=50, ge=1, le=200),
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        return await preview_dataset(db, dataset_id, offset=offset, limit=limit)
+    except DatasetExecutionError as exc:
+        raise _dataset_http_error(exc) from None
+
+
+@router.post("/knowledge/datasets/{dataset_id}/query", response_model=dict[str, Any])
+async def query_dataset_v1(
+    dataset_id: int,
+    payload: DatasetQueryPayload,
+    _identity: APIIdentity = Depends(_search_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        return await execute_dataset_query(db, dataset_id, payload.model_dump())
+    except DatasetExecutionError as exc:
+        raise _dataset_http_error(exc) from None
 
 
 @router.get("/knowledge/scopes", response_model=dict[str, Any])

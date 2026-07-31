@@ -50,6 +50,9 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
       STORAGE_PATH: /app/storage
       MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}
+      DATASET_QUERY_MEMORY_LIMIT: ${DATASET_QUERY_MEMORY_LIMIT:-512MB}
+      DATASET_QUERY_THREADS: ${DATASET_QUERY_THREADS:-2}
+      DATASET_QUERY_TIMEOUT_SECONDS: ${DATASET_QUERY_TIMEOUT_SECONDS:-20}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -72,6 +75,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cangzhi}:${POSTGRES_PASSWORD:-cangzhi-dev}@postgres:5432/${POSTGRES_DB:-cangzhi}
       POLL_INTERVAL: ${POLL_INTERVAL:-5}
       STORAGE_PATH: /app/storage
+      DATASET_QUERY_MEMORY_LIMIT: ${DATASET_QUERY_MEMORY_LIMIT:-512MB}
+      DATASET_QUERY_THREADS: ${DATASET_QUERY_THREADS:-2}
       AI_PROVIDER: ${AI_PROVIDER:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

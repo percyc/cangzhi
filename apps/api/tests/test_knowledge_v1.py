@@ -104,6 +104,10 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "knowledge_ask",
         "knowledge_get_document",
         "knowledge_get_chunk",
+        "knowledge_list_datasets",
+        "knowledge_get_dataset_schema",
+        "knowledge_preview_dataset_rows",
+        "knowledge_query_dataset",
     }
     mcp_search = test_client.post(
         "/api/mcp",

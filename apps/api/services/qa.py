@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ from typing import Any
 
 from sqlalchemy import and_, case, false, func, or_, select
 from sqlalchemy.exc import ProgrammingError
+
+logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
 
@@ -278,12 +281,23 @@ class QAService:
                     "matches_none": request.matches_none,
                 },
             )
-        structured_result = await try_structured_table_query(
-            db,
-            provider=self._provider,
-            question=question,
-            document_ids=candidate_table_document_ids,
-        )
+        from .dataset_execution import DatasetExecutionError
+
+        try:
+            structured_result = await try_structured_table_query(
+                db,
+                provider=self._provider,
+                question=question,
+                document_ids=candidate_table_document_ids,
+            )
+        except DatasetExecutionError as exc:
+            # Dataset execution is an optimisation over the normal evidence
+            # path. A corrupt/missing artifact must not turn an otherwise
+            # answerable knowledge question into a 500 response.
+            logger.warning(
+                "structured dataset query degraded to semantic retrieval: %s", exc
+            )
+            structured_result = None
         if structured_result is not None:
             structured_evidence = await _structured_result_to_evidence(
                 db, structured_result
@@ -837,8 +851,7 @@ async def _structured_result_to_evidence(
             .join(Document, Document.id == DocumentChunk.document_id)
             .where(
                 DocumentChunk.document_id == result.dataset.document_id,
-                DocumentChunk.document_version_id
-                == result.dataset.document_version_id,
+                DocumentChunk.document_version_id == result.dataset.document_version_id,
                 DocumentChunk.role == "child",
                 DocumentChunk.is_current.is_(True),
             )
@@ -959,6 +972,7 @@ def _structured_provider_summary(
 
     summary = render(selected_columns)
     while len(summary) > max_chars and len(selected_columns) > 1:
+
         def column_score(column: str) -> tuple[float, float]:
             values = [
                 str(value)
@@ -1047,9 +1061,7 @@ async def _expanded_chunk_context(
 ) -> str:
     if chunk is None or chunk.parent_id is None:
         return fallback.strip()
-    if (chunk.extra or {}).get("sheet_name") or (chunk.extra or {}).get(
-        "table_ranges"
-    ):
+    if (chunk.extra or {}).get("sheet_name") or (chunk.extra or {}).get("table_ranges"):
         # Spreadsheet rows are self-describing and must never receive a
         # character tail that starts or ends halfway through another row.
         return (chunk.content or fallback).strip()

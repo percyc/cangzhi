@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 50
     log_level: str = "info"
 
+    dataset_query_memory_limit: str = "512MB"
+    dataset_query_threads: int = 2
+    dataset_query_timeout_seconds: float = 20.0
+
     ai_provider: Literal["", "openai", "ollama"] = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""

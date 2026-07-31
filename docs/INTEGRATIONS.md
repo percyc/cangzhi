@@ -50,6 +50,17 @@ Authorization: Bearer ${CANGZHI_TOKEN}
 一次读取全文：表格筛选与统计使用 `knowledge_ask`，证据定位使用
 `knowledge_search` / `knowledge_get_chunk`，确需原文时再按窗口逐页读取。
 
+结构化数据也提供独立的发现和执行工具：
+
+- `knowledge_list_datasets`：发现当前有效数据集；
+- `knowledge_get_dataset_schema`：读取字段类型、画像与样例；
+- `knowledge_preview_dataset_rows`：只分页预览少量行；
+- `knowledge_query_dataset`：用白名单计划执行筛选、投影、排序、分组和聚合。
+
+外部 Agent 应先读 schema 再生成计划。`knowledge_query_dataset` 不接收 SQL，查询由
+DuckDB 在 Parquet 上下推执行，最多返回 200 行。不要循环调用预览工具把大型 Excel
+全部塞进模型上下文；需要完整导出时应使用未来的异步导出接口，而不是 MCP 对话。
+
 ## 权限边界
 
 - `knowledge:read`：读取知识范围、文档和切片。

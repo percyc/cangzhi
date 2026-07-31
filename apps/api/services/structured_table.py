@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from ..ai import AIProvider, AIProviderError
-from ..models.datasets import DatasetField, KnowledgeDataset
+from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.table_rows import StructuredTableRow
 from ..parsers.base import StructuredContent
 
@@ -76,6 +76,7 @@ class TableDataset:
     records: tuple[StructuredTableRow, ...] = field(
         default=(), repr=False, compare=False
     )
+    dataset_id: int | None = None
 
     @property
     def key(self) -> tuple[int, str, int]:
@@ -279,9 +280,7 @@ def replace_version_table_rows(
         )
         session.add(dataset)
         session.flush()
-        session.add_all(
-            _profile_dataset_fields(dataset.id, rows, columns)
-        )
+        session.add_all(_profile_dataset_fields(dataset.id, rows, columns))
         session.add_all(
             [
                 StructuredTableRow(
@@ -327,7 +326,9 @@ def _semantic_role(column: str) -> str | None:
         ("status", r"状态|是否|标志|结果|status|flag"),
         ("category", r"类型|类别|分类|部门|地区|城市|category|type|department"),
     )
-    return next((role for role, pattern in patterns if re.search(pattern, lowered)), None)
+    return next(
+        (role for role, pattern in patterns if re.search(pattern, lowered)), None
+    )
 
 
 def _profile_dataset_fields(
@@ -364,8 +365,12 @@ def _profile_dataset_fields(
             numeric = _numeric(text_value)
             if numeric is not None:
                 numeric_count += 1
-                numeric_min = numeric if numeric_min is None else min(numeric_min, numeric)
-                numeric_max = numeric if numeric_max is None else max(numeric_max, numeric)
+                numeric_min = (
+                    numeric if numeric_min is None else min(numeric_min, numeric)
+                )
+                numeric_max = (
+                    numeric if numeric_max is None else max(numeric_max, numeric)
+                )
             if _date_parts(text_value) is not None:
                 date_count += 1
             if text_value.casefold() in {"true", "false", "yes", "no", "是", "否"}:
@@ -387,10 +392,12 @@ def _profile_dataset_fields(
             "non_empty_count": non_empty_count,
             "distinct_count_capped": distinct_overflow,
         }
-        if inferred_type == "number" and numeric_min is not None and numeric_max is not None:
-            statistics.update(
-                {"min": float(numeric_min), "max": float(numeric_max)}
-            )
+        if (
+            inferred_type == "number"
+            and numeric_min is not None
+            and numeric_max is not None
+        ):
+            statistics.update({"min": float(numeric_min), "max": float(numeric_max)})
         fields.append(
             DatasetField(
                 dataset_id=dataset_id,
@@ -399,7 +406,10 @@ def _profile_dataset_fields(
                 inferred_type=inferred_type,
                 semantic_role=semantic_role,
                 confidence=(
-                    round(max(numeric_count, date_count, boolean_count) / non_empty_count, 3)
+                    round(
+                        max(numeric_count, date_count, boolean_count) / non_empty_count,
+                        3,
+                    )
                     if non_empty_count
                     else None
                 ),
@@ -417,17 +427,13 @@ def _dataset_quality(
 ) -> dict[str, Any]:
     total_cells = len(rows) * len(columns)
     empty_cells = sum(
-        value in (None, "")
-        for row in rows
-        for value in row["values"].values()
+        value in (None, "") for row in rows for value in row["values"].values()
     )
     return {
         "total_cells": total_cells,
         "empty_cells": empty_cells,
         "completeness": (
-            round((total_cells - empty_cells) / total_cells, 4)
-            if total_cells
-            else 1.0
+            round((total_cells - empty_cells) / total_cells, 4) if total_cells else 1.0
         ),
     }
 
@@ -842,8 +848,7 @@ def _literal_matches_for_question(
         date_matches = [
             (alias, next(iter(values)))
             for alias, values in alias_values.items()
-            if len(values) == 1
-            and _question_contains_alias(normalized_question, alias)
+            if len(values) == 1 and _question_contains_alias(normalized_question, alias)
         ]
         if date_matches:
             _, resolved_value = max(date_matches, key=lambda item: len(item[0]))
@@ -891,73 +896,233 @@ async def _load_datasets(
     *,
     question: str = "",
 ) -> list[TableDataset]:
-    from ..models.documents import Document, DocumentVersion
+    from ..models.documents import Document
     from ..models.taxonomy import DocumentSummary
 
     if not document_ids:
         return []
     result = await db.execute(
-        select(StructuredTableRow, Document.title, DocumentSummary.summary)
-        .join(Document, Document.id == StructuredTableRow.document_id)
-        .join(
-            DocumentVersion,
-            DocumentVersion.id == StructuredTableRow.document_version_id,
-        )
+        select(KnowledgeDataset, Document.title, DocumentSummary.summary)
+        .join(Document, Document.id == KnowledgeDataset.document_id)
         .where(
-            StructuredTableRow.document_id.in_(list(document_ids)),
-            Document.current_version_id == StructuredTableRow.document_version_id,
+            KnowledgeDataset.document_id.in_(list(document_ids)),
+            Document.current_version_id == KnowledgeDataset.document_version_id,
             Document.is_deleted.is_(False),
         )
         .outerjoin(
             DocumentSummary,
-            DocumentSummary.document_version_id
-            == StructuredTableRow.document_version_id,
+            DocumentSummary.document_version_id == KnowledgeDataset.document_version_id,
         )
         .order_by(
-            StructuredTableRow.document_id,
-            StructuredTableRow.sheet_name,
-            StructuredTableRow.region_index,
-            StructuredTableRow.row_number,
+            KnowledgeDataset.document_id,
+            KnowledgeDataset.sheet_name,
+            KnowledgeDataset.region_index,
         )
-        .limit(MAX_QUERY_ROWS + 1)
     )
-    loaded_rows = result.all()
-    if len(loaded_rows) > MAX_QUERY_ROWS:
-        # Never return a plausible-looking partial aggregate. A future
-        # DuckDB/Polars backend will handle datasets above this boundary.
-        return []
-    grouped: dict[
-        tuple[int, str, int],
-        list[tuple[StructuredTableRow, str, str]],
-    ] = defaultdict(list)
-    for row, title, semantic_summary in loaded_rows:
-        grouped[(row.document_id, row.sheet_name, row.region_index)].append(
-            (row, title, semantic_summary or "")
+    catalogs = result.all()
+    if not catalogs:
+        # Compatibility for pre-0020 rows and lightweight test fixtures. New
+        # ingestion always creates first-class dataset catalog records.
+        legacy = await db.execute(
+            select(StructuredTableRow, Document.title, DocumentSummary.summary)
+            .join(Document, Document.id == StructuredTableRow.document_id)
+            .where(
+                StructuredTableRow.document_id.in_(list(document_ids)),
+                Document.current_version_id == StructuredTableRow.document_version_id,
+                Document.is_deleted.is_(False),
+            )
+            .outerjoin(
+                DocumentSummary,
+                DocumentSummary.document_version_id
+                == StructuredTableRow.document_version_id,
+            )
+            .order_by(
+                StructuredTableRow.document_id,
+                StructuredTableRow.sheet_name,
+                StructuredTableRow.region_index,
+                StructuredTableRow.row_number,
+            )
+            .limit(MAX_QUERY_ROWS + 1)
         )
-    datasets: list[TableDataset] = []
-    for (document_id, sheet_name, region_index), items in grouped.items():
-        first, title, semantic_summary = items[0]
-        columns = tuple(str(column) for column in (first.values or {}))
-        datasets.append(
+        legacy_rows = legacy.all()
+        if len(legacy_rows) > MAX_QUERY_ROWS:
+            return []
+        grouped: dict[
+            tuple[int, str, int],
+            list[tuple[StructuredTableRow, str, str]],
+        ] = defaultdict(list)
+        for row, title, semantic_summary in legacy_rows:
+            grouped[(row.document_id, row.sheet_name, row.region_index)].append(
+                (row, title, semantic_summary or "")
+            )
+        return [
             TableDataset(
                 document_id=document_id,
-                document_version_id=first.document_version_id,
-                title=title,
+                document_version_id=items[0][0].document_version_id,
+                title=items[0][1],
                 sheet_name=sheet_name,
                 region_index=region_index,
-                columns=columns,
+                columns=tuple(str(name) for name in (items[0][0].values or {})),
                 row_count=len(items),
-                semantic_summary=semantic_summary,
+                semantic_summary=items[0][2],
                 samples=tuple(dict(row.values or {}) for row, _, _ in items[:3]),
                 literal_matches=_literal_matches_for_question(
                     question,
                     [row for row, _, _ in items],
-                    columns,
+                    tuple(str(name) for name in (items[0][0].values or {})),
                 ),
                 records=tuple(row for row, _, _ in items),
             )
+            for (document_id, sheet_name, region_index), items in grouped.items()
+        ]
+    catalog_ids = [catalog.id for catalog, _, _ in catalogs]
+    artifact_dataset_ids = (
+        set(
+            (
+                await db.scalars(
+                    select(DatasetArtifact.dataset_id).where(
+                        DatasetArtifact.dataset_id.in_(catalog_ids),
+                        DatasetArtifact.is_active.is_(True),
+                        DatasetArtifact.status == "ready",
+                    )
+                )
+            ).all()
+        )
+        if catalog_ids
+        else set()
+    )
+    datasets: list[TableDataset] = []
+    for catalog, title, semantic_summary in catalogs:
+        fields = list(
+            (
+                await db.scalars(
+                    select(DatasetField)
+                    .where(DatasetField.dataset_id == catalog.id)
+                    .order_by(DatasetField.position)
+                )
+            ).all()
+        )
+        records = list(
+            (
+                await db.scalars(
+                    select(StructuredTableRow)
+                    .where(StructuredTableRow.dataset_id == catalog.id)
+                    .order_by(StructuredTableRow.row_number)
+                    .limit(
+                        4 if catalog.id in artifact_dataset_ids else MAX_QUERY_ROWS + 1
+                    )
+                )
+            ).all()
+        )
+        complete_records = (
+            []
+            if catalog.id in artifact_dataset_ids
+            else records
+            if len(records) <= MAX_QUERY_ROWS
+            else []
+        )
+        artifact_literals: tuple[tuple[str, str], ...] = ()
+        if catalog.id in artifact_dataset_ids and question:
+            from .dataset_execution import discover_dataset_literals
+
+            artifact_literals = await discover_dataset_literals(
+                db, catalog.id, question
+            )
+        samples = tuple(dict(row.values or {}) for row in records[:3])
+        columns = tuple(field.name for field in fields) or tuple(
+            str(column) for column in ((records[0].values or {}) if records else {})
+        )
+        datasets.append(
+            TableDataset(
+                document_id=catalog.document_id,
+                document_version_id=catalog.document_version_id,
+                title=title,
+                sheet_name=catalog.sheet_name,
+                region_index=catalog.region_index,
+                columns=columns,
+                row_count=catalog.row_count,
+                semantic_summary=semantic_summary or "",
+                samples=samples,
+                literal_matches=(
+                    _literal_matches_for_question(
+                        question,
+                        complete_records,
+                        columns,
+                    )
+                    if complete_records
+                    else artifact_literals
+                ),
+                records=tuple(complete_records),
+                dataset_id=catalog.id,
+            )
         )
     return datasets
+
+
+async def _execute_dataset_plan(
+    db: AsyncSession,
+    dataset: TableDataset,
+    plan: TableQueryPlan,
+) -> TableQueryResult:
+    """Prefer the columnar engine and preserve the proven row fallback."""
+
+    from .dataset_execution import DatasetExecutionError, execute_dataset_query
+
+    if dataset.dataset_id is not None:
+        payload = {
+            "filters": [
+                {"column": item.column, "operator": item.operator, "value": item.value}
+                for item in plan.filters
+            ],
+            "group_by": list(plan.group_by),
+            "metric": plan.metric,
+            "metric_column": plan.metric_column,
+            "sort_by": plan.sort_by,
+            "sort_order": plan.sort_order,
+            "limit": plan.limit,
+        }
+        try:
+            result = await execute_dataset_query(db, dataset.dataset_id, payload)
+            rows = result["rows"]
+            warnings = (
+                [f"结果共 {result['matched_row_count']} 行，仅返回前 {plan.limit} 行"]
+                if result.get("truncated")
+                else []
+            )
+            summary = json.dumps(
+                {
+                    "数据集": f"{dataset.title} / {dataset.sheet_name} / 区域 {dataset.region_index}",
+                    "执行后端": "DuckDB / Parquet",
+                    "筛选后行数": result["matched_row_count"],
+                    "统计方式": plan.metric,
+                    "统计列": plan.metric_column,
+                    "分组列": list(plan.group_by),
+                    "计算结果": rows,
+                    "提示": warnings,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            return TableQueryResult(
+                dataset=dataset,
+                plan=plan,
+                rows=rows,
+                source_rows=result.get("source_rows") or [],
+                source_row_start=result.get("source_row_start"),
+                source_row_end=result.get("source_row_end"),
+                matched_row_count=result["matched_row_count"],
+                summary=summary,
+                warnings=warnings,
+            )
+        except DatasetExecutionError as exc:
+            if exc.code not in {"artifact_unavailable", "artifact_missing"}:
+                raise
+    if not dataset.records:
+        raise DatasetExecutionError(
+            "artifact_unavailable",
+            "大型数据集列式产物尚未就绪，无法安全执行不完整查询",
+        )
+    return execute_query_plan(dataset, dataset.records, plan)
 
 
 _PLAN_SYSTEM = """你是藏知的表格查询规划器。
@@ -1016,7 +1181,7 @@ async def try_structured_table_query(
                 metric="rows",
                 limit=MAX_RESULT_ROWS,
             )
-            return execute_query_plan(dataset, dataset.records, plan)
+            return await _execute_dataset_plan(db, dataset, plan)
     if _COUNT_INTENT_RE.search(question):
         matched_datasets = [
             dataset
@@ -1041,7 +1206,7 @@ async def try_structured_table_query(
                 ),
                 metric="count",
             )
-            return execute_query_plan(dataset, dataset.records, plan)
+            return await _execute_dataset_plan(db, dataset, plan)
     prompt = json.dumps(
         {
             "问题": question,
@@ -1082,4 +1247,4 @@ async def try_structured_table_query(
         for item in datasets
         if item.key == (plan.document_id, plan.sheet_name, plan.region_index)
     )
-    return execute_query_plan(dataset, dataset.records, plan)
+    return await _execute_dataset_plan(db, dataset, plan)

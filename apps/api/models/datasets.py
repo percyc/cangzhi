@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -83,7 +85,36 @@ class DatasetField(BaseModel):
     statistics = Column(_JSON_TYPE, nullable=False, default=dict)
 
     __table_args__ = (
+        UniqueConstraint("dataset_id", "position", name="uq_dataset_field_position"),
+    )
+
+
+class DatasetArtifact(BaseModel):
+    """A rebuildable columnar snapshot used by the dataset execution layer."""
+
+    __tablename__ = "dataset_artifacts"
+
+    dataset_id = Column(
+        Integer,
+        ForeignKey("knowledge_datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version_number = Column(Integer, nullable=False)
+    format = Column(String(16), nullable=False, default="parquet")
+    status = Column(String(32), nullable=False, default="building")
+    storage_key = Column(String(1024), nullable=True)
+    checksum = Column(String(64), nullable=True)
+    byte_size = Column(Integer, nullable=False, default=0)
+    row_count = Column(Integer, nullable=False, default=0)
+    schema_snapshot = Column(_JSON_TYPE, nullable=False, default=dict)
+    is_active = Column(Boolean, nullable=False, default=False)
+    built_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(String(2000), nullable=True)
+
+    __table_args__ = (
         UniqueConstraint(
-            "dataset_id", "position", name="uq_dataset_field_position"
+            "dataset_id", "version_number", name="uq_dataset_artifact_version"
         ),
+        Index("ix_dataset_artifact_active", "dataset_id", "is_active"),
     )

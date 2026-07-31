@@ -137,6 +137,13 @@ type KnowledgeDataset = {
   source_row_start: number | null;
   source_row_end: number | null;
   profile: { quality?: { completeness?: number; empty_cells?: number } };
+  execution: {
+    backend: 'duckdb' | 'postgresql_fallback';
+    artifact_status: string;
+    artifact_version: number | null;
+    format: string | null;
+    byte_size: number;
+  };
   fields: DatasetField[];
 };
 
@@ -652,6 +659,11 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
 
   if (!dataset) return null;
   const completeness = dataset.profile.quality?.completeness;
+  const executionLabel = dataset.execution?.backend === 'duckdb'
+    ? `DuckDB · Parquet v${dataset.execution.artifact_version ?? '-'}`
+    : dataset.execution?.artifact_status === 'failed'
+      ? '列式构建失败 · 兼容模式'
+      : '列式构建中 · 兼容模式';
   const typeLabels: Record<string, string> = {
     text: '文本', number: '数值', date: '日期', boolean: '布尔', identifier: '标识符', unknown: '待分析',
   };
@@ -671,10 +683,11 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
             </select>
           )}
         </div>
-        <div className="mt-4 grid gap-3 sm:grid-cols-4">
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <DatasetMetric label="数据行" value={dataset.row_count.toLocaleString('zh-CN')} />
           <DatasetMetric label="字段" value={String(dataset.column_count)} />
           <DatasetMetric label="完整度" value={typeof completeness === 'number' ? `${(completeness * 100).toFixed(1)}%` : '待分析'} />
+          <DatasetMetric label="查询执行" value={executionLabel} />
           <DatasetMetric label="来源位置" value={`${dataset.sheet_name} · ${dataset.source_row_start ?? '-'}–${dataset.source_row_end ?? '-'}`} />
         </div>
       </div>

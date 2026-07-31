@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+from pathlib import Path
 
 import structlog
 from sqlalchemy import delete, func, select, update
@@ -48,6 +49,10 @@ from apps.api.security import (
     looks_like_access_block,
 )
 from apps.api.services import build_chunk_specs
+from apps.api.services.dataset_execution import (
+    DatasetExecutionError,
+    build_dataset_parquet,
+)
 from apps.api.services.structured_table import (
     _dataset_quality,
     _profile_dataset_fields,
@@ -68,6 +73,8 @@ UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
 DATASET_CATALOG_STAGE = "dataset_catalog"
+DATASET_ARTIFACT_STAGE = "dataset_artifact"
+DATASET_ARTIFACT_VERSION = "dataset-parquet:v1"
 CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
@@ -637,6 +644,9 @@ def _process_chunking(
 
     session.commit()
 
+    if table_row_count:
+        _enqueue_dataset_artifact_job(session, document, version)
+
     # Auto-enqueue embedding work for the freshly-materialised
     # child chunks. The enqueue is a no-op when no profile is
     # currently ``active`` or ``building``; otherwise every
@@ -657,6 +667,31 @@ def _process_chunking(
         anomaly=structure_anomaly,
     )
     return True
+
+
+def _enqueue_dataset_artifact_job(
+    session: Session, document: Document, version: DocumentVersion
+) -> None:
+    key = f"{version.id}:{DATASET_ARTIFACT_STAGE}:{DATASET_ARTIFACT_VERSION}"
+    existing = session.scalar(
+        select(ProcessingJob).where(ProcessingJob.idempotency_key == key)
+    )
+    if existing is None:
+        session.add(
+            ProcessingJob(
+                document_id=document.id,
+                document_version_id=version.id,
+                stage=DATASET_ARTIFACT_STAGE,
+                status="created",
+                idempotency_key=key,
+                retry_count=0,
+                max_retries=MAX_RETRIES,
+                config_version=DATASET_ARTIFACT_VERSION,
+            )
+        )
+    elif existing.status in {"failed", "completed"}:
+        _reset_processing_job(existing)
+        session.add(existing)
 
 
 def _enqueue_embedding_jobs_for_new_chunks(
@@ -913,7 +948,9 @@ def _build_ai_input(title: str, raw_text: str, metadata: dict) -> str:
         for region in regions[:20]:
             if not isinstance(region, dict):
                 continue
-            columns = "、".join(str(value) for value in region.get("column_names") or [])
+            columns = "、".join(
+                str(value) for value in region.get("column_names") or []
+            )
             structure_lines.append(
                 f"- 工作表 {region.get('sheet_name') or '未命名'}，"
                 f"第 {region.get('row_start')}–{region.get('row_end')} 行，"
@@ -1193,6 +1230,9 @@ def process_single_job(session: Session, job_id: int) -> bool:
     if stage == DATASET_CATALOG_STAGE:
         return _process_dataset_catalog(session, job, version)
 
+    if stage == DATASET_ARTIFACT_STAGE:
+        return _process_dataset_artifacts(session, job, version)
+
     if stage == "embedding":
         # Lazy import: ``embedding_processor`` imports
         # ``calculate_next_retry_at`` from this module, so a
@@ -1267,6 +1307,77 @@ def _process_dataset_catalog(
     session.add(job)
     session.commit()
     return True
+
+
+def _process_dataset_artifacts(
+    session: Session,
+    job: ProcessingJob,
+    version: DocumentVersion,
+) -> bool:
+    """Build every dataset snapshot before marking the stage completed."""
+
+    datasets = list(
+        session.scalars(
+            select(KnowledgeDataset)
+            .where(KnowledgeDataset.document_version_id == version.id)
+            .order_by(KnowledgeDataset.id)
+        ).all()
+    )
+    published_paths: list[Path] = []
+    try:
+        for dataset in datasets:
+            artifact = build_dataset_parquet(
+                session,
+                dataset,
+                storage_root=settings.storage_path,
+            )
+            if artifact.storage_key:
+                published_paths.append(
+                    (
+                        Path(settings.storage_path).resolve() / artifact.storage_key
+                    ).resolve()
+                )
+        job.status = "completed"
+        job.finished_at = utc_now()
+        job.next_retry_at = None
+        job.last_error = None
+        job.error_details = {
+            "dataset_count": len(datasets),
+            "backend": "duckdb",
+            "format": "parquet",
+        }
+        session.add(job)
+        session.commit()
+        return True
+    except Exception as exc:
+        session.rollback()
+        storage_root = Path(settings.storage_path).resolve()
+        for artifact_path in published_paths:
+            if storage_root in artifact_path.parents and artifact_path.is_file():
+                artifact_path.unlink()
+        job = session.get(ProcessingJob, job.id)
+        if job is None:
+            return False
+        job.retry_count += 1
+        job.finished_at = utc_now()
+        job.last_error = str(exc)
+        job.error_details = {
+            "code": (
+                exc.code
+                if isinstance(exc, DatasetExecutionError)
+                else "artifact_build_failed"
+            ),
+            "exception": str(exc),
+        }
+        if job.retry_count >= (job.max_retries or MAX_RETRIES):
+            job.status = "failed"
+            job.next_retry_at = None
+        else:
+            job.status = "retry"
+            job.next_retry_at = calculate_next_retry_at(job.retry_count - 1)
+        session.add(job)
+        session.commit()
+        return False
 
 
 def _process_parsing(
@@ -1427,10 +1538,9 @@ def _release_webdav_source_blob(
 ) -> None:
     """Release the temporary WebDAV original after parsed content is durable."""
 
-    if (
-        (version.meta or {}).get("external_source") != "webdav"
-        or version.blob_id is None
-    ):
+    if (version.meta or {}).get(
+        "external_source"
+    ) != "webdav" or version.blob_id is None:
         return
     blob = session.get(Blob, version.blob_id)
     if blob is None:
@@ -1443,9 +1553,7 @@ def _release_webdav_source_blob(
     session.add(version)
     session.commit()
     remaining = session.scalar(
-        select(func.count(DocumentVersion.id)).where(
-            DocumentVersion.blob_id == blob_id
-        )
+        select(func.count(DocumentVersion.id)).where(DocumentVersion.blob_id == blob_id)
     )
     if remaining:
         return

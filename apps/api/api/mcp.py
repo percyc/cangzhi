@@ -12,6 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..ai import build_provider_from_db
 from ..core.db import get_db
 from ..security.api_auth import APIIdentity, require_api_identity
+from ..services.dataset_execution import (
+    DatasetExecutionError,
+    execute_dataset_query,
+    get_dataset_schema,
+    list_visible_datasets,
+    preview_dataset,
+)
 from ..services.knowledge_read import (
     KnowledgeReadError,
     read_current_chunk,
@@ -66,6 +73,32 @@ class DocumentReadArguments(BaseModel):
     document_id: int = Field(ge=1)
     offset: int = Field(default=0, ge=0)
     max_chars: int = Field(default=12_000, ge=1, le=50_000)
+
+
+class DatasetListArguments(BaseModel):
+    document_id: int | None = Field(default=None, ge=1)
+    limit: int = Field(default=100, ge=1, le=200)
+
+
+class DatasetIdArguments(BaseModel):
+    dataset_id: int = Field(ge=1)
+
+
+class DatasetPreviewArguments(DatasetIdArguments):
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class DatasetQueryArguments(DatasetIdArguments):
+    filters: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    columns: list[str] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list, max_length=3)
+    metric: str = "rows"
+    metric_column: str | None = None
+    sort_by: str | None = None
+    sort_order: str = "asc"
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0, le=1_000_000)
 
 
 TOOLS = [
@@ -155,6 +188,57 @@ TOOLS = [
             "required": ["chunk_id"],
             "additionalProperties": False,
         },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_list_datasets",
+        "title": "列出结构化数据集",
+        "description": "列出当前有效文档中的二维数据集。先发现数据集，再读取字段或执行查询。",
+        "inputSchema": DatasetListArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_get_dataset_schema",
+        "title": "读取数据集结构",
+        "description": "读取字段类型、语义角色、样例、统计画像和执行后端；规划查询前应先调用。",
+        "inputSchema": DatasetIdArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_preview_dataset_rows",
+        "title": "预览数据集行",
+        "description": "分页预览少量行。禁止用它逐页抓取整个大表；筛选、统计和分组请使用 knowledge_query_dataset。",
+        "inputSchema": DatasetPreviewArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_query_dataset",
+        "title": "精确查询数据集",
+        "description": (
+            "通过受控计划执行投影、筛选、排序、分组和聚合，由 DuckDB/Parquet 下推计算。"
+            "不接受 SQL，最多返回 200 行，适合大型 Excel，避免把整表放入模型上下文。"
+        ),
+        "inputSchema": DatasetQueryArguments.model_json_schema(),
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -360,6 +444,21 @@ async def _call_tool(
             }
         )
 
+    if name == "knowledge_query_dataset":
+        forbidden = _require_scope(identity, "knowledge:search")
+        if forbidden:
+            return forbidden
+        try:
+            args = DatasetQueryArguments.model_validate(arguments)
+            payload = args.model_dump(exclude={"dataset_id"})
+            return _tool_result(
+                await execute_dataset_query(db, args.dataset_id, payload)
+            )
+        except ValidationError as exc:
+            return _tool_error("invalid_arguments", str(exc))
+        except DatasetExecutionError as exc:
+            return _tool_error(exc.code, str(exc))
+
     forbidden = _require_scope(identity, "knowledge:read")
     if forbidden:
         return forbidden
@@ -377,12 +476,33 @@ async def _call_tool(
             if chunk_id <= 0:
                 raise ValueError
             return _tool_result(await read_current_chunk(db, chunk_id))
+        if name == "knowledge_list_datasets":
+            args = DatasetListArguments.model_validate(arguments)
+            return _tool_result(
+                {
+                    "items": await list_visible_datasets(
+                        db, document_id=args.document_id, limit=args.limit
+                    )
+                }
+            )
+        if name == "knowledge_get_dataset_schema":
+            args = DatasetIdArguments.model_validate(arguments)
+            return _tool_result(await get_dataset_schema(db, args.dataset_id))
+        if name == "knowledge_preview_dataset_rows":
+            args = DatasetPreviewArguments.model_validate(arguments)
+            return _tool_result(
+                await preview_dataset(
+                    db, args.dataset_id, offset=args.offset, limit=args.limit
+                )
+            )
     except (TypeError, ValueError, ValidationError):
         return _tool_error(
             "invalid_arguments",
             "读取参数无效，请检查 ID、offset 和 max_chars",
         )
     except KnowledgeReadError as exc:
+        return _tool_error(exc.code, str(exc))
+    except DatasetExecutionError as exc:
         return _tool_error(exc.code, str(exc))
     return _tool_error("tool_not_found", f"未知工具：{name}")
 
@@ -417,6 +537,9 @@ async def mcp_post(
                     "模型自行分析时使用 knowledge_search。需要完整上下文时，再按"
                     "返回的 chunk.id 读取。完整文档必须通过 knowledge_get_document "
                     "按 content_window.next_offset 分页读取，避免大型文档挤占上下文。"
+                    "发现表格后先用 knowledge_list_datasets 和 "
+                    "knowledge_get_dataset_schema，再用 knowledge_query_dataset 做筛选聚合；"
+                    "不要通过预览工具遍历整个数据集。"
                 ),
             },
         )

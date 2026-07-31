@@ -8,9 +8,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
-from ..models.datasets import DatasetField, KnowledgeDataset
+from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document
 from ..models.table_rows import StructuredTableRow
+from ..services.dataset_execution import (
+    DatasetExecutionError,
+    execute_dataset_query,
+    preview_dataset,
+)
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -48,6 +53,7 @@ class DatasetResponse(BaseModel):
     source_row_end: int | None
     profile: dict[str, Any] = Field(default_factory=dict)
     fields: list[DatasetFieldResponse] = Field(default_factory=list)
+    execution: dict[str, Any] = Field(default_factory=dict)
 
 
 class DatasetRowsResponse(BaseModel):
@@ -70,6 +76,12 @@ async def _dataset_response(
                 .order_by(DatasetField.position)
             )
         ).all()
+    )
+    artifact = await db.scalar(
+        select(DatasetArtifact).where(
+            DatasetArtifact.dataset_id == dataset.id,
+            DatasetArtifact.is_active.is_(True),
+        )
     )
     return DatasetResponse(
         **{
@@ -94,6 +106,15 @@ async def _dataset_response(
             }
         },
         fields=[DatasetFieldResponse.model_validate(field) for field in fields],
+        execution={
+            "backend": "duckdb"
+            if artifact and artifact.status == "ready"
+            else "postgresql_fallback",
+            "artifact_status": artifact.status if artifact else "pending",
+            "artifact_version": artifact.version_number if artifact else None,
+            "format": artifact.format if artifact else None,
+            "byte_size": artifact.byte_size if artifact else 0,
+        },
     )
 
 
@@ -160,6 +181,28 @@ async def preview_dataset_rows(
             )
         ).all()
     )
+    artifact = await db.scalar(
+        select(DatasetArtifact).where(
+            DatasetArtifact.dataset_id == dataset.id,
+            DatasetArtifact.is_active.is_(True),
+            DatasetArtifact.status == "ready",
+        )
+    )
+    if artifact is not None:
+        try:
+            result = await preview_dataset(db, dataset.id, offset=offset, limit=limit)
+            return DatasetRowsResponse(
+                dataset_id=dataset.id,
+                offset=offset,
+                limit=limit,
+                total=result["matched_row_count"],
+                columns=[field.name for field in fields],
+                rows=result["rows"],
+            )
+        except DatasetExecutionError:
+            # The catalog remains usable if a local artifact is temporarily
+            # missing; the background job can rebuild it without data loss.
+            pass
     rows = list(
         (
             await db.scalars(
@@ -184,3 +227,37 @@ async def preview_dataset_rows(
         columns=[field.name for field in fields],
         rows=[{"row_number": row.row_number, **(row.values or {})} for row in rows],
     )
+
+
+class DatasetQueryPayload(BaseModel):
+    filters: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    columns: list[str] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list, max_length=3)
+    metric: str = "rows"
+    metric_column: str | None = None
+    sort_by: str | None = None
+    sort_order: str = "asc"
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+
+
+@router.post("/{dataset_id}/query", response_model=dict[str, Any])
+async def query_dataset(
+    dataset_id: int,
+    payload: DatasetQueryPayload,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return await execute_dataset_query(db, dataset_id, payload.model_dump())
+    except DatasetExecutionError as exc:
+        status = (
+            404
+            if exc.code == "dataset_not_found"
+            else 409
+            if exc.code == "artifact_unavailable"
+            else 400
+        )
+        raise HTTPException(
+            status_code=status,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
