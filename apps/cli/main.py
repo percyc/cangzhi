@@ -131,7 +131,7 @@ def _add_scope_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cangzhi",
-        description="藏知个人知识中枢 CLI（标准输出始终为 JSON）",
+        description="藏知 Cangzhi｜个人可控的 AI 知识中枢 CLI（标准输出始终为 JSON）",
     )
     parser.add_argument(
         "--url",

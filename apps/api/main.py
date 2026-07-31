@@ -42,7 +42,11 @@ from .core.config import settings
 logger = logging.getLogger(__name__)
 
 
-app = FastAPI(title="藏知 API", version="0.1.0")
+app = FastAPI(
+    title="藏知 Cangzhi API",
+    description="藏有所知，问有所据。个人可控的 AI 知识中枢。",
+    version="0.1.0",
+)
 
 # CORS: the API is consumed by the Next.js front end in the same
 # deployment. Origins are enumerated explicitly (no wildcard) and

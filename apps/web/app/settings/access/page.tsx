@@ -174,7 +174,7 @@ export default function AccessSettingsPage() {
         外部接入
       </h1>
       <p className="mt-2 text-sm leading-6 text-slate-500">
-        让 Hermes、OpenClaw、CLI 或其他 Agent 将藏知作为个人知识中枢。
+        让 Hermes、OpenClaw、CLI 或其他 Agent 将藏知作为个人可控的 AI 知识中枢。
         每个客户端使用独立令牌，可以随时撤销。
       </p>
 

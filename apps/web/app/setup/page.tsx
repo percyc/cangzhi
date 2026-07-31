@@ -93,13 +93,16 @@ export default function SetupPage() {
       <div className="w-full max-w-md">
         <div className="mb-7 flex items-center justify-center gap-3">
           <span className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-950 text-lg font-semibold text-white shadow-lg shadow-slate-950/15">藏</span>
-          <span className="text-xl font-semibold tracking-tight text-slate-950">藏知</span>
+          <span>
+            <span className="block text-xl font-semibold tracking-tight text-slate-950">藏知</span>
+            <span className="block text-[10px] font-medium uppercase tracking-[0.2em] text-slate-400">Cangzhi</span>
+          </span>
         </div>
       <form className="space-y-5 rounded-2xl border bg-white p-6 sm:p-8" onSubmit={handleSubmit}>
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">只需一分钟</p>
           <h1 className="mt-1 text-2xl font-semibold text-slate-950">创建管理员账户</h1>
-          <p className="mt-2 text-sm text-slate-500">这是藏知唯一的本地管理账户，请妥善保存密码。</p>
+          <p className="mt-2 text-sm text-slate-500">开始使用个人可控的 AI 知识中枢。这是藏知唯一的本地管理账户，请妥善保存密码。</p>
         </div>
         <div>
           <label htmlFor="username" className="block text-sm text-slate-700">

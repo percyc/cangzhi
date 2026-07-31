@@ -70,7 +70,8 @@ export function TopNav() {
         <Link
           href="/documents"
           className="group flex shrink-0 items-center gap-2.5"
-          aria-label="藏知首页"
+          aria-label="藏知 Cangzhi 首页"
+          title="藏知 Cangzhi｜藏有所知，问有所据"
         >
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-slate-950 text-base font-semibold text-white shadow-sm transition-transform group-hover:-rotate-3">
             藏

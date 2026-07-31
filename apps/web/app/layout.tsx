@@ -5,8 +5,12 @@ import { TopNav } from '@/components/TopNav';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: '藏知 - 个人知识库',
-  description: '低打扰、自动沉淀的个人知识库',
+  applicationName: 'Cangzhi',
+  title: {
+    default: '藏知 Cangzhi｜个人可控的 AI 知识中枢',
+    template: '%s｜藏知 Cangzhi',
+  },
+  description: '藏有所知，问有所据。个人可控的 AI 知识中枢。',
 };
 
 export const viewport: Viewport = {
