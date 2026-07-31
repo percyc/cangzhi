@@ -2,7 +2,15 @@
 
 ## 1. 架构目标
 
-首版面向个人部署，优先降低组件数量和运维成本，同时保留未来迁移到团队版、对象存储、独立搜索引擎和分布式任务队列的边界。
+藏知在架构上是“知识事实源 + 可重建理解与索引 + 多入口取证服务”，而不是围绕某个
+聊天页面搭建的一次性 RAG 管线。
+
+当前面向个人部署，优先降低组件数量和运维成本，同时保持四项不变量：
+
+1. 原文和文档版本是事实源，模型输出和索引都是可重建派生数据。
+2. 采集、解析、检索或模型失败不能导致已经接收的原文丢失。
+3. 网页、REST、CLI 和 MCP 复用同一服务层、知识范围和引用语义。
+4. 外部来源和模型可以替换，不能成为知识资产的锁定点。
 
 ```text
 Browser
@@ -18,6 +26,12 @@ Browser
   │                    └── Ollama/local model
   │
   └── Search / Ask / Manage
+
+CLI / Hermes / OpenClaw / Other Agents
+  │
+  └── REST v1 / MCP
+             │
+             └── Shared knowledge services
 ```
 
 ## 2. 代码目录建议
@@ -145,6 +159,28 @@ query
 
 回答规则：检索证据不足时必须明确说明，不允许用模型常识伪装成知识库内容。
 
+### 3.6 知识服务与接入层
+
+搜索、文档读取、知识范围解析、问答和引用校验由 API 服务层统一实现。浏览器业务
+接口、REST v1、CLI 和 MCP 只是不同适配器，不各自实现检索 SQL 或模型调用。
+
+```text
+Browser API ─┐
+REST v1 ─────┼─> KnowledgeScope -> retrieval/read/ask services -> evidence
+CLI ─────────┤
+MCP ─────────┘
+```
+
+外部 Agent 默认使用只读取证能力：
+
+- 列出可用知识范围；
+- 执行混合检索；
+- 读取指定文档或切片；
+- 获得结构化定位和原文片段。
+
+只有调用方明确希望由藏知模型回答时，才使用 `knowledge:ask`。这种边界避免 Hermes、
+OpenClaw 等已有推理模型的平台重复调用模型，同时让网页和 Agent 获得一致证据。
+
 ## 4. 核心数据模型
 
 ### 4.1 内容与版本
@@ -177,6 +213,14 @@ query
 - `citations`：回答句子与 chunk/source span 的对应关系
 - `user_corrections`：分类、标签、摘要和切片纠正
 
+### 4.4 外部来源与接入
+
+- `webdav_sources`：加密凭据、扫描范围、远端删除策略和运行状态
+- `webdav_entries`：远端稳定身份、同步状态、缺失确认和关联文档
+- `external_item_exclusions`：永久删除后保留的外部来源排除记录
+- `knowledge_scopes`：网页与外部客户端共享的知识范围
+- `personal_access_tokens`：外部客户端令牌摘要、权限、撤销和使用时间
+
 ## 5. 后台任务状态机
 
 ```text
@@ -202,25 +246,18 @@ created
 
 ## 6. API 边界
 
-首版主要接口：
+接口分为三类：
 
-- `POST /sources/url`
-- `POST /sources/files`
-- `POST /notes`
-- `GET /documents`
-- `GET /documents/{id}`
-- `PATCH /documents/{id}`
-- `POST /documents/{id}/reprocess`
-- `GET /jobs/{id}`
-- `POST /search`
-- `POST /ask`
-- `GET/POST/PATCH/DELETE /categories`
-- `GET/POST/DELETE /tags`
-- `PATCH /chunks/{id}`
-- `POST /chunks/{id}/split`
-- `POST /chunks/merge`
-- `GET/PATCH /settings/models`
-- `POST /exports`
+1. **浏览器业务 API**：采集、知识管理、分类标签、任务、模型配置、连接器和导出，
+   使用管理员 Cookie，允许随产品界面共同演进。
+2. **稳定 REST v1**：`/api/v1` 下的能力、知识范围、搜索、问答、文档和切片读取，
+   使用管理员 Cookie 或 Bearer PAT；同一主版本只增加兼容字段。
+3. **MCP**：`/api/mcp` 下的 Streamable HTTP 取证工具，复用 REST v1 服务与 PAT
+   权限，不复制业务逻辑。
+
+CLI 是 REST v1 的薄客户端，不直连数据库。稳定只读契约和接入示例见
+[外部接入](INTEGRATIONS.md)及
+[ADR-017](ADR-017-knowledge-hub-adapters.md)。
 
 ## 7. 安全与隐私
 
@@ -233,6 +270,7 @@ created
 - 所有知识删除先进入回收站；永久删除只允许从回收站发起，并级联清理版本、切片、向量、任务和分类关系。
 - Blob 按内容哈希共享，永久删除后仅清理已经没有任何版本引用的原文。
 - WebDAV 远端始终只读。远端文件使用“规范化来源 + 绝对路径”的稳定身份；永久删除会保留外部排除记录，避免连接器重建或重新扫描后自动复活。
+- 单次成功扫描未发现文件时只标记为“待确认缺失”；连续成功扫描且超过保护期后才确认远端删除。默认仅把对应知识移入回收站，不自动永久删除；远端文件恢复时自动恢复知识，用户也可以将其保留为独立本地快照。
 - 删除 WebDAV 连接器默认保留已入库知识，也可选择移入回收站；停用连接器只暂停扫描同步，不删除配置或知识。
 
 ## 8. 可观测性
