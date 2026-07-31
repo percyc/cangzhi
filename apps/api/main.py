@@ -23,6 +23,7 @@ from .api import (
     ask,
     auth,
     categories,
+    datasets,
     documents,
     embeddings,
     exports,
@@ -94,6 +95,7 @@ app.include_router(access_tokens.router, prefix="/api")
 app.include_router(notes.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(files.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(documents.router, prefix="/api", dependencies=_admin_dep)
+app.include_router(datasets.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(sources.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(categories.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(categories.tags_router, prefix="/api", dependencies=_admin_dep)

@@ -74,6 +74,7 @@ class DocumentResponse(BaseModel):
     description: str | None
     source_type: str
     source_url: str | None
+    content_kind: str = "document"
     origin: DocumentOriginResponse | None = None
     is_deleted: bool
     deleted_at: datetime | None = None

@@ -33,6 +33,12 @@ class StructuredTableRow(BaseModel):
         nullable=False,
         index=True,
     )
+    dataset_id = Column(
+        Integer,
+        ForeignKey("knowledge_datasets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     sheet_name = Column(String(256), nullable=False)
     region_index = Column(Integer, nullable=False)
     row_number = Column(Integer, nullable=False)

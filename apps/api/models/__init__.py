@@ -1,6 +1,7 @@
 from .auth import Admin, AIRuntimeConfig, AuthSession, PersonalAccessToken
 from .blobs import Blob
 from .chunks import DocumentChunk
+from .datasets import DatasetField, KnowledgeDataset
 from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from .knowledge_scopes import KnowledgeScope
@@ -28,6 +29,8 @@ __all__ = [
     "Document",
     "DocumentCategory",
     "DocumentChunk",
+    "KnowledgeDataset",
+    "DatasetField",
     "DocumentSourceType",
     "DocumentSummary",
     "DocumentTag",

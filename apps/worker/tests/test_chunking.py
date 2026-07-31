@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from apps.api.core.db import Base
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
+from apps.api.models.datasets import DatasetField, KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.table_rows import StructuredTableRow
@@ -18,6 +19,7 @@ from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
     CHUNKING_STAGE,
     CHUNKING_IDEMPOTENCY,
+    DATASET_CATALOG_STAGE,
     UNDERSTANDING_IDEMPOTENCY,
     UNDERSTANDING_STAGE,
     _clear_understanding_results,
@@ -511,3 +513,98 @@ class TestChunkerIntegration:
         assert [row.row_number for row in rows] == [2, 3]
         assert rows[1].values == {"品类": None, "金额": "9"}
         assert version.meta["structured_table_row_count"] == 2
+        dataset = session.scalar(
+            select(KnowledgeDataset).where(
+                KnowledgeDataset.document_version_id == version.id
+            )
+        )
+        assert dataset is not None
+        assert dataset.name == "明细"
+        assert dataset.row_count == 2
+        assert dataset.column_count == 2
+        assert dataset.profile["quality"]["completeness"] == 0.75
+        fields = session.scalars(
+            select(DatasetField)
+            .where(DatasetField.dataset_id == dataset.id)
+            .order_by(DatasetField.position)
+        ).all()
+        assert [(field.name, field.inferred_type) for field in fields] == [
+            ("品类", "text"),
+            ("金额", "number"),
+        ]
+        assert all(row.dataset_id == dataset.id for row in rows)
+
+    def test_dataset_catalog_job_profiles_existing_rows_without_rechunking(
+        self, session
+    ):
+        document = Document(title="存量表格", source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="catalog-backfill",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        document.current_version_id = version.id
+        dataset = KnowledgeDataset(
+            document_id=document.id,
+            document_version_id=version.id,
+            name="状态表",
+            sheet_name="状态表",
+            region_index=1,
+            dataset_kind="table",
+            status="ready",
+            row_count=2,
+            column_count=2,
+            profile={"catalog_source": "migration"},
+        )
+        session.add(dataset)
+        session.flush()
+        session.add_all(
+            [
+                StructuredTableRow(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    dataset_id=dataset.id,
+                    sheet_name="状态表",
+                    region_index=1,
+                    row_number=index,
+                    values={"编号": code, "是否完成": status},
+                )
+                for index, (code, status) in enumerate(
+                    [("001", "是"), ("002", "否")], start=2
+                )
+            ]
+        )
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=DATASET_CATALOG_STAGE,
+            status="created",
+            idempotency_key=f"{version.id}:dataset_catalog:dataset-catalog:v1",
+            config_version="dataset-catalog:v1",
+        )
+        session.add(job)
+        session.commit()
+
+        assert process_single_job(session, job.id) is True
+
+        session.refresh(job)
+        session.refresh(dataset)
+        fields = list(
+            session.scalars(
+                select(DatasetField)
+                .where(DatasetField.dataset_id == dataset.id)
+                .order_by(DatasetField.position)
+            ).all()
+        )
+        assert job.status == "completed"
+        assert version.processing_status == "ready"
+        assert dataset.profile["quality"]["completeness"] == 1.0
+        assert [(field.name, field.inferred_type) for field in fields] == [
+            ("编号", "identifier"),
+            ("是否完成", "boolean"),
+        ]

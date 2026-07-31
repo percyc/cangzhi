@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from ..ai import AIProvider, AIProviderError
+from ..models.datasets import DatasetField, KnowledgeDataset
 from ..models.table_rows import StructuredTableRow
 from ..parsers.base import StructuredContent
 
@@ -55,6 +56,8 @@ MAX_RESULT_ROWS = 50
 MAX_GROUP_COLUMNS = 3
 MAX_FILTERS = 8
 MAX_REFERENCE_ROWS = 200
+MAX_PROFILE_DISTINCT_VALUES = 500
+MAX_PROFILE_SAMPLES = 8
 
 
 @dataclass(frozen=True)
@@ -199,17 +202,207 @@ def replace_version_table_rows(
         )
     )
     payloads = extract_table_row_payloads(structured_content)
-    session.add_all(
-        [
-            StructuredTableRow(
-                document_id=document_id,
-                document_version_id=document_version_id,
-                **payload,
+    existing_dataset_ids = list(
+        session.scalars(
+            select(KnowledgeDataset.id).where(
+                KnowledgeDataset.document_version_id == document_version_id
             )
-            for payload in payloads
-        ]
+        ).all()
     )
+    if existing_dataset_ids:
+        session.execute(
+            delete(DatasetField).where(
+                DatasetField.dataset_id.in_(existing_dataset_ids)
+            )
+        )
+    session.execute(
+        delete(KnowledgeDataset).where(
+            KnowledgeDataset.document_version_id == document_version_id
+        )
+    )
+
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+    for payload in payloads:
+        grouped[(payload["sheet_name"], payload["region_index"])].append(payload)
+    region_metadata = _region_metadata(structured_content)
+    for (sheet_name, region_index), rows in grouped.items():
+        columns = tuple(str(item) for item in rows[0]["values"])
+        region = region_metadata.get((sheet_name, region_index), {})
+        dataset = KnowledgeDataset(
+            document_id=document_id,
+            document_version_id=document_version_id,
+            name=(
+                sheet_name
+                if region_index == 1
+                else f"{sheet_name} · 数据区域 {region_index}"
+            ),
+            sheet_name=sheet_name,
+            region_index=region_index,
+            dataset_kind="table",
+            status="ready",
+            row_count=len(rows),
+            column_count=len(columns),
+            header_row=region.get("header_row"),
+            source_row_start=min(row["row_number"] for row in rows),
+            source_row_end=max(row["row_number"] for row in rows),
+            profile={
+                "profile_version": 1,
+                "quality": _dataset_quality(rows, columns),
+            },
+        )
+        session.add(dataset)
+        session.flush()
+        session.add_all(
+            _profile_dataset_fields(dataset.id, rows, columns)
+        )
+        session.add_all(
+            [
+                StructuredTableRow(
+                    document_id=document_id,
+                    document_version_id=document_version_id,
+                    dataset_id=dataset.id,
+                    **payload,
+                )
+                for payload in rows
+            ]
+        )
     return len(payloads)
+
+
+def _region_metadata(
+    structured_content: StructuredContent,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    result: dict[tuple[str, int], dict[str, Any]] = {}
+    for block in structured_content.blocks:
+        if block.type != "table":
+            continue
+        extra = block.extra or {}
+        key = (
+            str(extra.get("sheet_name") or "工作表"),
+            int(extra.get("region_index") or 1),
+        )
+        result.setdefault(key, dict(extra))
+    return result
+
+
+def _semantic_role(column: str) -> str | None:
+    lowered = column.casefold()
+    patterns = (
+        ("time", r"日期|时间|年月|数据期|统计期|时期|年度|月份|date|time|period"),
+        (
+            "measure",
+            (
+                r"金额|数量|单价|合计|总额|比例|比率|完成率|占比|"
+                r"amount|price|count|total|ratio|rate"
+            ),
+        ),
+        ("identifier", r"编号|序号|代码|编码|id|code"),
+        ("status", r"状态|是否|标志|结果|status|flag"),
+        ("category", r"类型|类别|分类|部门|地区|城市|category|type|department"),
+    )
+    return next((role for role, pattern in patterns if re.search(pattern, lowered)), None)
+
+
+def _profile_dataset_fields(
+    dataset_id: int,
+    rows: Sequence[dict[str, Any]],
+    columns: Sequence[str],
+) -> list[DatasetField]:
+    fields: list[DatasetField] = []
+    for position, column in enumerate(columns):
+        semantic_role = _semantic_role(column)
+        null_count = 0
+        non_empty_count = 0
+        numeric_count = 0
+        date_count = 0
+        boolean_count = 0
+        samples: list[str] = []
+        distinct: set[str] = set()
+        distinct_overflow = False
+        numeric_min: Decimal | None = None
+        numeric_max: Decimal | None = None
+        for row in rows:
+            value = row["values"].get(column)
+            if value in (None, ""):
+                null_count += 1
+                continue
+            text_value = str(value).strip()
+            non_empty_count += 1
+            if len(samples) < MAX_PROFILE_SAMPLES and text_value not in samples:
+                samples.append(text_value)
+            if len(distinct) < MAX_PROFILE_DISTINCT_VALUES:
+                distinct.add(text_value)
+            elif text_value not in distinct:
+                distinct_overflow = True
+            numeric = _numeric(text_value)
+            if numeric is not None:
+                numeric_count += 1
+                numeric_min = numeric if numeric_min is None else min(numeric_min, numeric)
+                numeric_max = numeric if numeric_max is None else max(numeric_max, numeric)
+            if _date_parts(text_value) is not None:
+                date_count += 1
+            if text_value.casefold() in {"true", "false", "yes", "no", "是", "否"}:
+                boolean_count += 1
+        threshold = max(1, int(non_empty_count * 0.9))
+        if semantic_role == "identifier":
+            inferred_type = "identifier"
+        elif semantic_role == "time" and date_count < threshold:
+            inferred_type = "text"
+        elif date_count >= threshold:
+            inferred_type = "date"
+        elif boolean_count >= threshold:
+            inferred_type = "boolean"
+        elif numeric_count >= threshold:
+            inferred_type = "number"
+        else:
+            inferred_type = "text"
+        statistics: dict[str, Any] = {
+            "non_empty_count": non_empty_count,
+            "distinct_count_capped": distinct_overflow,
+        }
+        if inferred_type == "number" and numeric_min is not None and numeric_max is not None:
+            statistics.update(
+                {"min": float(numeric_min), "max": float(numeric_max)}
+            )
+        fields.append(
+            DatasetField(
+                dataset_id=dataset_id,
+                position=position,
+                name=column,
+                inferred_type=inferred_type,
+                semantic_role=semantic_role,
+                confidence=(
+                    round(max(numeric_count, date_count, boolean_count) / non_empty_count, 3)
+                    if non_empty_count
+                    else None
+                ),
+                null_count=null_count,
+                distinct_count=None if distinct_overflow else len(distinct),
+                sample_values=samples,
+                statistics=statistics,
+            )
+        )
+    return fields
+
+
+def _dataset_quality(
+    rows: Sequence[dict[str, Any]], columns: Sequence[str]
+) -> dict[str, Any]:
+    total_cells = len(rows) * len(columns)
+    empty_cells = sum(
+        value in (None, "")
+        for row in rows
+        for value in row["values"].values()
+    )
+    return {
+        "total_cells": total_cells,
+        "empty_cells": empty_cells,
+        "completeness": (
+            round((total_cells - empty_cells) / total_cells, 4)
+            if total_cells
+            else 1.0
+        ),
+    }
 
 
 def _numeric(value: Any) -> Decimal | None:

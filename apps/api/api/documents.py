@@ -11,6 +11,7 @@ from ..core.db import get_db
 from ..models.auth import AIRuntimeConfig
 from ..models.blobs import Blob
 from ..models.chunks import DocumentChunk
+from ..models.datasets import KnowledgeDataset
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from ..models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from ..models.processing import ProcessingJob
@@ -231,12 +232,28 @@ async def build_document_response(
             "source_status": source_entry.state if source_entry else None,
         }
 
+    has_dataset = bool(
+        version_id
+        and await db.scalar(
+            select(KnowledgeDataset.id)
+            .where(KnowledgeDataset.document_version_id == version_id)
+            .limit(1)
+        )
+    )
+    content_kind = (
+        "note"
+        if document.source_type == DocumentSourceType.note
+        else "dataset"
+        if has_dataset
+        else "document"
+    )
     return DocumentResponse(
         id=document.id,
         title=document.title,
         description=document.description,
         source_type=document.source_type.value,
         source_url=document.source_url,
+        content_kind=content_kind,
         origin=origin,
         is_deleted=document.is_deleted,
         deleted_at=document.deleted_at,

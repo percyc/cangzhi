@@ -23,12 +23,14 @@ from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.extractors import extract_xinhua_html
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
+from apps.api.models.datasets import DatasetField, KnowledgeDataset
 from apps.api.models.documents import (
     Document,
     DocumentSourceType,
     DocumentVersion,
 )
 from apps.api.models.processing import ProcessingJob
+from apps.api.models.table_rows import StructuredTableRow
 from apps.api.models.taxonomy import (
     Category,
     DocumentCategory,
@@ -46,7 +48,11 @@ from apps.api.security import (
     looks_like_access_block,
 )
 from apps.api.services import build_chunk_specs
-from apps.api.services.structured_table import replace_version_table_rows
+from apps.api.services.structured_table import (
+    _dataset_quality,
+    _profile_dataset_fields,
+    replace_version_table_rows,
+)
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings
 
@@ -61,6 +67,7 @@ LARGE_TABLE_EMBEDDING_SAMPLE_SIZE = 256
 UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
+DATASET_CATALOG_STAGE = "dataset_catalog"
 CHUNKING_IDEMPOTENCY = "chunking:m3-v6"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
@@ -1175,6 +1182,9 @@ def process_single_job(session: Session, job_id: int) -> bool:
     if stage == CHUNKING_STAGE:
         return _process_chunking(session, job, document, version)
 
+    if stage == DATASET_CATALOG_STAGE:
+        return _process_dataset_catalog(session, job, version)
+
     if stage == "embedding":
         # Lazy import: ``embedding_processor`` imports
         # ``calculate_next_retry_at`` from this module, so a
@@ -1196,6 +1206,59 @@ def process_single_job(session: Session, job_id: int) -> bool:
         return False
 
     return _process_parsing(session, job, document, version)
+
+
+def _process_dataset_catalog(
+    session: Session,
+    job: ProcessingJob,
+    version: DocumentVersion,
+) -> bool:
+    """Backfill field profiles without rebuilding chunks or vectors."""
+
+    datasets = list(
+        session.scalars(
+            select(KnowledgeDataset)
+            .where(KnowledgeDataset.document_version_id == version.id)
+            .order_by(KnowledgeDataset.id)
+        ).all()
+    )
+    for dataset in datasets:
+        rows = list(
+            session.scalars(
+                select(StructuredTableRow)
+                .where(StructuredTableRow.dataset_id == dataset.id)
+                .order_by(StructuredTableRow.row_number)
+            ).all()
+        )
+        if not rows:
+            continue
+        payloads = [
+            {"row_number": row.row_number, "values": dict(row.values or {})}
+            for row in rows
+        ]
+        columns = tuple(str(item) for item in payloads[0]["values"])
+        session.execute(
+            delete(DatasetField).where(DatasetField.dataset_id == dataset.id)
+        )
+        session.add_all(_profile_dataset_fields(dataset.id, payloads, columns))
+        dataset.row_count = len(rows)
+        dataset.column_count = len(columns)
+        dataset.source_row_start = rows[0].row_number
+        dataset.source_row_end = rows[-1].row_number
+        dataset.profile = {
+            "profile_version": 1,
+            "quality": _dataset_quality(payloads, columns),
+            "catalog_source": "background_backfill",
+        }
+        session.add(dataset)
+    job.status = "completed"
+    job.finished_at = utc_now()
+    job.next_retry_at = None
+    job.last_error = None
+    job.error_details = None
+    session.add(job)
+    session.commit()
+    return True
 
 
 def _process_parsing(

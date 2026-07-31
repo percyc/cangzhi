@@ -98,6 +98,7 @@ type Document = {
   description: string | null;
   source_type: string;
   source_url: string | null;
+  content_kind: 'document' | 'dataset' | 'note';
   origin: {
     kind: string;
     label: string;
@@ -111,6 +112,32 @@ type Document = {
   categories: DocumentCategory[];
   tags: DocumentTag[];
   summary: DocumentSummary | null;
+};
+
+type DatasetField = {
+  id: number;
+  position: number;
+  name: string;
+  inferred_type: string;
+  semantic_role: string | null;
+  null_count: number;
+  distinct_count: number | null;
+  sample_values: string[];
+  statistics: Record<string, unknown>;
+};
+
+type KnowledgeDataset = {
+  id: number;
+  name: string;
+  sheet_name: string;
+  region_index: number;
+  status: string;
+  row_count: number;
+  column_count: number;
+  source_row_start: number | null;
+  source_row_end: number | null;
+  profile: { quality?: { completeness?: number; empty_cells?: number } };
+  fields: DatasetField[];
 };
 
 const statusLabels: Record<string, string> = {
@@ -159,6 +186,7 @@ export default function DocumentDetailPage() {
   const [draftTagIds, setDraftTagIds] = useState<number[]>([]);
   const [pipelineExpanded, setPipelineExpanded] = useState(false);
   const [returnToAsk, setReturnToAsk] = useState(false);
+  const [datasets, setDatasets] = useState<KnowledgeDataset[]>([]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -187,7 +215,7 @@ export default function DocumentDetailPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [documentResponse, jobResponse, pipelineResponse, categoriesResponse, tagsResponse] =
+      const [documentResponse, jobResponse, pipelineResponse, categoriesResponse, tagsResponse, datasetsResponse] =
         await Promise.all([
           fetch(`/api/documents/${params.id}`, { cache: 'no-store' }),
           fetch(`/api/documents/${params.id}/latest-job`, { cache: 'no-store' }),
@@ -196,6 +224,7 @@ export default function DocumentDetailPage() {
           }),
           fetch(`/api/categories`, { cache: 'no-store' }),
           fetch(`/api/tags`, { cache: 'no-store' }),
+          fetch(`/api/datasets?document_id=${params.id}`, { cache: 'no-store' }),
         ]);
       if (!documentResponse.ok) {
         throw new Error(documentResponse.status === 404 ? '资料不存在' : '读取失败');
@@ -204,6 +233,7 @@ export default function DocumentDetailPage() {
       if (!pipelineResponse.ok) throw new Error('读取处理进度失败');
       if (!categoriesResponse.ok) throw new Error('读取分类失败');
       if (!tagsResponse.ok) throw new Error('读取标签失败');
+      if (!datasetsResponse.ok) throw new Error('读取数据集失败');
       const documentBody = (await documentResponse.json()) as Document;
       setDocument(documentBody);
       setLatestJob(await jobResponse.json());
@@ -211,6 +241,7 @@ export default function DocumentDetailPage() {
       const categoryBody = (await categoriesResponse.json()) as CategoryOption[];
       setCategories(categoryBody);
       setTagOptions((await tagsResponse.json()) as TagOption[]);
+      setDatasets((await datasetsResponse.json()) as KnowledgeDataset[]);
       setSelectedCategoryId(documentBody.primary_category?.id ?? '');
       setDraftTitle(documentBody.title);
       setDraftSummary(documentBody.summary?.summary ?? '');
@@ -365,6 +396,9 @@ export default function DocumentDetailPage() {
         <span className={`rounded-full bg-slate-100 px-2.5 py-1 ${statusColors[status] || 'text-slate-700'}`}>
           正文{statusLabels[status] || status}
         </span>
+        {document.content_kind === 'dataset' && (
+          <span className="rounded-full bg-cyan-100 px-2.5 py-1 text-cyan-800">结构化数据集</span>
+        )}
         {pipeline && (
           <span
             className={`rounded-full px-2.5 py-1 ${
@@ -556,7 +590,9 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
-      {version?.raw_content ? (
+      {datasets.length > 0 ? (
+        <DatasetWorkspace datasets={datasets} />
+      ) : version?.raw_content ? (
         rendersAsMarkdown ? (
           <MarkdownBody content={version.raw_content} />
         ) : (
@@ -577,6 +613,112 @@ export default function DocumentDetailPage() {
 
     </main>
   );
+}
+
+function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
+  const [selectedId, setSelectedId] = useState(datasets[0]?.id ?? 0);
+  const [tab, setTab] = useState<'data' | 'fields'>('data');
+  const [offset, setOffset] = useState(0);
+  const [preview, setPreview] = useState<{
+    total: number;
+    columns: string[];
+    rows: Array<Record<string, unknown>>;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const pageSize = 50;
+  const dataset = datasets.find((item) => item.id === selectedId) ?? datasets[0];
+
+  useEffect(() => {
+    if (!dataset) return;
+    const controller = new AbortController();
+    fetch(`/api/datasets/${dataset.id}/rows?offset=${offset}&limit=${pageSize}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('数据预览读取失败')))
+      .then((body) => {
+        setPreview(body);
+        setError('');
+      })
+      .catch((caught) => {
+        if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : '数据预览读取失败');
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [dataset, offset]);
+
+  if (!dataset) return null;
+  const completeness = dataset.profile.quality?.completeness;
+  const typeLabels: Record<string, string> = {
+    text: '文本', number: '数值', date: '日期', boolean: '布尔', identifier: '标识符', unknown: '待分析',
+  };
+
+  return (
+    <section className="mt-6 overflow-hidden rounded-2xl border border-cyan-200 bg-white shadow-sm">
+      <div className="border-b border-slate-200 bg-gradient-to-r from-cyan-50 to-white p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-700">Queryable dataset</p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-950">数据集工作区</h2>
+            <p className="mt-1 text-sm text-slate-600">表格使用结构化查询，不再把全部内容作为长文档渲染。</p>
+          </div>
+          {datasets.length > 1 && (
+            <select value={dataset.id} onChange={(event) => { setLoading(true); setSelectedId(Number(event.target.value)); setOffset(0); }} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
+              {datasets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+          )}
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-4">
+          <DatasetMetric label="数据行" value={dataset.row_count.toLocaleString('zh-CN')} />
+          <DatasetMetric label="字段" value={String(dataset.column_count)} />
+          <DatasetMetric label="完整度" value={typeof completeness === 'number' ? `${(completeness * 100).toFixed(1)}%` : '待分析'} />
+          <DatasetMetric label="来源位置" value={`${dataset.sheet_name} · ${dataset.source_row_start ?? '-'}–${dataset.source_row_end ?? '-'}`} />
+        </div>
+      </div>
+      <div className="flex gap-1 border-b border-slate-200 px-4 pt-3">
+        {([['data', '数据预览'], ['fields', '字段画像']] as const).map(([key, label]) => (
+          <button key={key} type="button" onClick={() => setTab(key)} className={`rounded-t-lg px-4 py-2 text-sm ${tab === key ? 'border border-b-white border-slate-200 bg-white font-medium text-slate-900 -mb-px' : 'text-slate-500'}`}>{label}</button>
+        ))}
+      </div>
+      {tab === 'data' ? (
+        <div className="p-4">
+          {loading && <p className="py-8 text-center text-sm text-slate-500">正在读取当前页…</p>}
+          {error && <p className="py-4 text-sm text-red-700">{error}</p>}
+          {!loading && preview && (
+            <>
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="min-w-full whitespace-nowrap text-left text-sm">
+                  <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-3 py-2">原始行</th>{preview.columns.map((column) => <th key={column} className="px-3 py-2 font-medium">{column}</th>)}</tr></thead>
+                  <tbody className="divide-y divide-slate-100">{preview.rows.map((row, index) => <tr key={`${String(row.row_number)}-${index}`} className="hover:bg-cyan-50/40"><td className="px-3 py-2 font-mono text-xs text-slate-400">{String(row.row_number ?? '')}</td>{preview.columns.map((column) => <td key={column} className="max-w-72 truncate px-3 py-2 text-slate-700" title={String(row[column] ?? '')}>{String(row[column] ?? '') || '—'}</td>)}</tr>)}</tbody>
+                </table>
+              </div>
+              <div className="mt-3 flex items-center justify-between text-sm text-slate-500">
+                <span>第 {offset + 1}–{Math.min(offset + pageSize, preview.total)} 行，共 {preview.total.toLocaleString('zh-CN')} 行</span>
+                <div className="flex gap-2"><button type="button" disabled={offset === 0} onClick={() => { setLoading(true); setOffset(Math.max(0, offset - pageSize)); }} className="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40">上一页</button><button type="button" disabled={offset + pageSize >= preview.total} onClick={() => { setLoading(true); setOffset(offset + pageSize); }} className="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40">下一页</button></div>
+              </div>
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="grid gap-3 p-4 md:grid-cols-2">
+          {dataset.fields.map((field) => (
+            <div key={field.id} className="rounded-xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-2"><h3 className="font-medium text-slate-900">{field.name}</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{typeLabels[field.inferred_type] || field.inferred_type}</span></div>
+              <p className="mt-2 text-xs text-slate-500">空值 {field.null_count.toLocaleString('zh-CN')} · 唯一值 {field.distinct_count === null ? '较多' : field.distinct_count.toLocaleString('zh-CN')}{field.semantic_role ? ` · ${field.semantic_role}` : ''}</p>
+              {field.sample_values.length > 0 && <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-600">样例：{field.sample_values.slice(0, 5).join('、')}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DatasetMetric({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-xl border border-white/80 bg-white/80 p-3"><p className="text-xs text-slate-500">{label}</p><p className="mt-1 truncate text-sm font-semibold text-slate-900" title={value}>{value}</p></div>;
 }
 
 function MarkdownBody({ content }: { content: string }) {
