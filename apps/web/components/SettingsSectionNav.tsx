@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 
-export type SettingsSection = 'chat' | 'embedding' | 'sources';
+export type SettingsSection = 'chat' | 'embedding' | 'sources' | 'data';
 
 type Item = {
   id: SettingsSection;
@@ -30,6 +30,12 @@ const ITEMS: Item[] = [
     title: '知识源',
     defaultHint: 'WebDAV 连接与同步',
   },
+  {
+    id: 'data',
+    href: '/settings/data',
+    title: '数据与备份',
+    defaultHint: '导出、备份与恢复',
+  },
 ];
 
 export function SettingsSectionNav({
@@ -48,7 +54,7 @@ export function SettingsSectionNav({
   return (
     <nav
       aria-label="设置分类"
-      className="mt-6 grid grid-cols-3 gap-2 rounded-2xl border border-slate-200 bg-white p-2"
+      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 md:grid-cols-4"
     >
       {ITEMS.map((item) => {
         const selected = active === item.id;

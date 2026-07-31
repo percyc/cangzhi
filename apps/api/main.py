@@ -24,6 +24,7 @@ from .api import (
     categories,
     documents,
     embeddings,
+    exports,
     files,
     health,
     notes,
@@ -90,6 +91,7 @@ app.include_router(search.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(ask.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(embeddings.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(webdav.router, prefix="/api", dependencies=_admin_dep)
+app.include_router(exports.router, prefix="/api", dependencies=_admin_dep)
 
 
 @app.get("/")

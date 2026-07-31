@@ -388,6 +388,12 @@ export default function DocumentDetailPage() {
             {document.origin?.kind === 'webdav' ? '下载远端原文件' : '下载原文件'}
           </a>
         )}
+        <a href={`/api/exports/documents/${document.id}/markdown`} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+          导出 Markdown
+        </a>
+        <a href={`/api/exports/documents/${document.id}/json`} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+          导出 JSON
+        </a>
         {canRetry && (
           <button type="button" onClick={handleRetry} disabled={retrying} className="rounded border border-amber-500 px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-50">
             {retrying ? '正在提交…' : '重新处理'}

@@ -48,3 +48,4 @@ postgres_data/
 .env
 .env.local
 .env.*.local
+backups/

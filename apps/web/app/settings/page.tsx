@@ -27,7 +27,7 @@ type Provider = AIConfig['provider'];
 type EmbeddingProvider = AIConfig['embedding_provider'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type FetchState = 'idle' | 'fetching' | 'success' | 'error';
-type SettingsPanel = Exclude<SettingsSection, 'sources'>;
+type SettingsPanel = Extract<SettingsSection, 'chat' | 'embedding'>;
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -383,12 +383,14 @@ export default function SettingsPage() {
         }}
         dirty={{ chat: chatDirty, embedding: embeddingDirty }}
         onSelect={(section) => {
-          if (section !== 'sources') setActivePanel(section);
+          if (section === 'chat' || section === 'embedding') {
+            setActivePanel(section);
+          }
         }}
         beforeNavigate={(section) =>
-          section !== 'sources' ||
+          (section !== 'sources' && section !== 'data') ||
           !anyDirty ||
-          window.confirm('模型设置还有未保存的修改，确定离开并前往知识源吗？')
+          window.confirm('模型设置还有未保存的修改，确定离开当前页面吗？')
         }
       />
 
