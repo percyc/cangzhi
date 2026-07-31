@@ -7,7 +7,7 @@ and through the FastAPI app (with a real SQLite test database).
 from __future__ import annotations
 
 import asyncio
-from typing import Sequence
+from collections.abc import Sequence
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,7 +32,6 @@ from apps.api.services.qa import (
     _expanded_chunk_context,
     _merge_neighbor_context,
 )
-
 
 # --- fixtures -------------------------------------------------------------
 
@@ -471,6 +470,91 @@ def test_qa_service_uses_exact_structured_table_calculation(qa_db):
     assert result.citations[0]["table_location"]["row_end"] == 3
 
 
+def test_qa_service_resolves_yearless_date_and_completes_detail_answer(qa_db):
+    async def _run():
+        async with qa_db() as session:
+            document = Document(title="排班明细", source_type=DocumentSourceType.file)
+            session.add(document)
+            await session.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="detail-date-question",
+                processing_status="ready",
+            )
+            session.add(version)
+            await session.flush()
+            document.current_version_id = version.id
+            session.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id="detail-date-child",
+                    role="child",
+                    chunk_type="table",
+                    order_index=0,
+                    content=(
+                        "行 2｜日期=2026-06-23｜班次=早班｜人员=甲\n"
+                        "行 3｜日期=2026-06-23｜班次=早班｜人员=乙\n"
+                        "行 4｜日期=2026-06-23｜班次=早班｜人员=丙"
+                    ),
+                    search_text="6月23日 早班 甲 乙 丙",
+                    content_hash="detail-date-chunk",
+                    heading_path=["排班"],
+                    char_count=100,
+                    token_estimate=50,
+                    extra={
+                        "sheet_name": "排班",
+                        "region_index": 1,
+                        "row_start": 2,
+                        "row_end": 4,
+                        "column_names": ["日期", "班次", "人员"],
+                    },
+                    is_current=True,
+                )
+            )
+            session.add_all(
+                [
+                    StructuredTableRow(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        sheet_name="排班",
+                        region_index=1,
+                        row_number=index,
+                        values={"日期": "2026-06-23", "班次": "早班", "人员": name},
+                    )
+                    for index, name in enumerate(["甲", "乙", "丙"], start=2)
+                ]
+            )
+            await session.commit()
+            document_id = document.id
+
+        provider = StubProvider()
+        provider.queue(
+            AnswerResult(
+                answer="6月23日早班有甲。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            result = await QAService(provider).ask(
+                session,
+                AskRequest(
+                    question="6月23日的早班有什么人？",
+                    document_ids=[document_id],
+                ),
+            )
+        return result, provider
+
+    result, provider = asyncio.run(_run())
+    assert result.retrieval["mode"] == "structured_table"
+    assert result.retrieval["structured_table"]["matched_rows"] == 3
+    assert "甲" in result.answer and "乙" in result.answer and "丙" in result.answer
+    assert "模型未完整覆盖" in result.answer
+    assert '"人员":"丙"' in provider.calls[0]["evidence"][0]["snippet"]
+
+
 def test_qa_service_skips_model_when_no_evidence(qa_db):
     async def _run():
         provider = StubProvider()
@@ -777,6 +861,6 @@ def test_ask_status_endpoint(qa_db):
 
 
 # Import the module-level symbol used by the override helpers.
-from apps.api.api import ask as ask_module  # noqa: E402,F401
+from apps.api.api import ask as ask_module
 
 _provider_dependency = ask_module.build_provider_from_db

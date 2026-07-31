@@ -8,6 +8,7 @@ import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -25,13 +26,24 @@ _NUMBER_CLEAN_RE = re.compile(r"[,，\s￥¥$元]")
 _STRUCTURED_INTENT_RE = re.compile(
     r"(多少|几个|数量|总数|合计|总计|总和|求和|平均|均值|最大|最小|最高|最低|"
     r"哪些|哪几|列出|罗列|包含什么|包含哪些|提供了什么|提供了哪些|"
+    r"有什么|都有什么|有哪些|有哪几|有啥|"
     r"分组|各自|分别|排名|排行|前\s*\d+|后\s*\d+|筛选|过滤|占比|百分比|"
     r"count|sum|average|avg|max|min|group|rank|top\s*\d+)",
     re.IGNORECASE,
 )
 _DETAIL_INTENT_RE = re.compile(
-    r"(哪些|哪几|列出|罗列|包含什么|包含哪些|提供了什么|提供了哪些)",
+    r"(哪些|哪几|列出|罗列|包含什么|包含哪些|"
+    r"提供了什么|提供了哪些|有什么|都有什么|"
+    r"有哪些|有哪几|有啥)",
     re.IGNORECASE,
+)
+_DATE_VALUE_RE = re.compile(
+    r"^(?P<year>\d{4})[-/.\u5e74](?P<month>\d{1,2})[-/.\u6708]"
+    r"(?P<day>\d{1,2})(?:\u65e5)?(?:[T\s].*)?$"
+)
+_DATE_QUERY_RE = re.compile(
+    r"(?<!\d)(?:(?:\d{4})[-/.\u5e74])?(?:0?[1-9]|1[0-2])"
+    r"[-/.\u6708](?:0?[1-9]|[12]\d|3[01])\u65e5?(?!\d)"
 )
 
 ALLOWED_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"}
@@ -513,6 +525,43 @@ def _safe_sort_value(value: Any) -> tuple[int, Any]:
     return (1, str(value).casefold())
 
 
+def _date_parts(value: str) -> tuple[int, int, int] | None:
+    match = _DATE_VALUE_RE.match(value.strip())
+    if match is None:
+        return None
+    parts = tuple(int(match.group(key)) for key in ("year", "month", "day"))
+    try:
+        date(*parts)
+    except ValueError:
+        return None
+    return parts
+
+
+def _date_aliases(value: str) -> tuple[str, ...]:
+    parts = _date_parts(value)
+    if parts is None:
+        return ()
+    year, month, day = parts
+    return (
+        f"{year}年{month}月{day}日",
+        f"{year}-{month:02d}-{day:02d}",
+        f"{year}/{month:02d}/{day:02d}",
+        f"{year}.{month:02d}.{day:02d}",
+        f"{month}月{day}日",
+        f"{month:02d}月{day:02d}日",
+        f"{month}-{day}",
+        f"{month:02d}-{day:02d}",
+        f"{month}/{day}",
+        f"{month:02d}/{day:02d}",
+        f"{month}.{day}",
+        f"{month:02d}.{day:02d}",
+    )
+
+
+def _question_contains_alias(question: str, alias: str) -> bool:
+    return bool(re.search(rf"(?<!\d){re.escape(alias)}(?!\d)", question))
+
+
 def _literal_matches_for_question(
     question: str,
     rows: Sequence[StructuredTableRow],
@@ -535,6 +584,25 @@ def _literal_matches_for_question(
         ]
         if matched:
             matches.append((column, max(matched, key=len)))
+            continue
+
+        # Spreadsheet parsers persist dates in a canonical form such as
+        # 2026-06-23, while people commonly omit the year. Resolve such an
+        # alias only when it identifies exactly one value in this dataset;
+        # this avoids silently choosing a year in multi-year tables.
+        alias_values: dict[str, set[str]] = defaultdict(set)
+        for value in candidates:
+            for alias in _date_aliases(value):
+                alias_values[alias.casefold()].add(value)
+        date_matches = [
+            (alias, next(iter(values)))
+            for alias, values in alias_values.items()
+            if len(values) == 1
+            and _question_contains_alias(normalized_question, alias)
+        ]
+        if date_matches:
+            _, resolved_value = max(date_matches, key=lambda item: len(item[0]))
+            matches.append((column, resolved_value))
     return tuple(matches)
 
 
@@ -633,6 +701,16 @@ async def try_structured_table_query(
         return None
     if _DETAIL_INTENT_RE.search(question):
         matched_datasets = [dataset for dataset in datasets if dataset.literal_matches]
+        if _DATE_QUERY_RE.search(question):
+            matched_datasets = [
+                dataset
+                for dataset in matched_datasets
+                if any(
+                    _date_parts(value) is not None
+                    or bool(_DATE_QUERY_RE.fullmatch(value))
+                    for _, value in dataset.literal_matches
+                )
+            ]
         if matched_datasets:
             dataset = max(
                 matched_datasets,

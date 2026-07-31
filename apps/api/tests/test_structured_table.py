@@ -237,6 +237,8 @@ def test_executor_can_return_filtered_and_ranked_detail_rows():
         "列出状态为完成的记录",
         "这个部门包含什么人员？",
         "哪几笔交易超过了一万元？",
+        "6月23日的早餐有什么菜？",
+        "仓库里有啥物料？",
     ],
 )
 def test_generic_table_detail_questions_use_structured_path(question):
@@ -267,3 +269,49 @@ def test_detail_filter_inference_uses_literal_cell_values_not_business_columns()
     )
 
     assert matches == (("字段甲", "2026-06-26"), ("字段乙", "晚餐"))
+
+
+def test_literal_inference_resolves_unique_yearless_date_alias():
+    rows = [
+        StructuredTableRow(
+            document_id=8,
+            document_version_id=12,
+            sheet_name="任意数据",
+            region_index=1,
+            row_number=index,
+            values={"字段甲": value, "字段乙": "早餐"},
+        )
+        for index, value in enumerate(
+            ["2026-06-22", "2026-06-23", "2026-06-24"], start=2
+        )
+    ]
+
+    matches = _literal_matches_for_question(
+        "6月23日的早餐有什么菜？",
+        rows,
+        ["字段甲", "字段乙"],
+    )
+
+    assert matches == (("字段甲", "2026-06-23"), ("字段乙", "早餐"))
+
+
+def test_literal_inference_does_not_guess_year_for_ambiguous_date_alias():
+    rows = [
+        StructuredTableRow(
+            document_id=8,
+            document_version_id=12,
+            sheet_name="任意数据",
+            region_index=1,
+            row_number=index,
+            values={"字段甲": value, "字段乙": "早餐"},
+        )
+        for index, value in enumerate(["2025-06-23", "2026-06-23"], start=2)
+    ]
+
+    matches = _literal_matches_for_question(
+        "6月23日的早餐有哪些菜？",
+        rows,
+        ["字段甲", "字段乙"],
+    )
+
+    assert matches == (("字段乙", "早餐"),)

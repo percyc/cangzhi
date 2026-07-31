@@ -24,6 +24,7 @@ front end can render deep links.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -338,10 +339,16 @@ class QAService:
         citations: list[dict] = [
             evidence_by_id[cid].to_citation() for cid in answer.citation_ids
         ]
+        answer_text = answer.answer
+        if structured_result is not None and not answer.insufficient_evidence:
+            answer_text = _ensure_complete_structured_answer(
+                answer_text,
+                structured_result,
+            )
 
         return AskResult(
             question=question,
-            answer=answer.answer,
+            answer=answer_text,
             insufficient_evidence=answer.insufficient_evidence,
             citations=citations,
             evidence=evidence,
@@ -857,11 +864,157 @@ async def _structured_result_to_evidence(
         source_start=chunk.source_start,
         source_end=chunk.source_end,
         table_location=location,
-        snippet=result.summary[:3_500],
+        snippet=_structured_provider_summary(result),
         score=10.0,
         source_type=_source_type_label(source_type),
         source_url=source_url,
     )
+
+
+def _structured_provider_summary(
+    result: TableQueryResult,
+    *,
+    max_chars: int = 3_500,
+) -> str:
+    """Keep every exact detail row visible without sending redundant cells.
+
+    Parsed spreadsheets often include a synthetic ``content`` cell which
+    repeats every semantic column. Pretty-printed full rows can therefore hit
+    the evidence limit halfway through a valid result. For detail queries we
+    remove filter/constant/redundant columns, then progressively retain the
+    most discriminating columns. The underlying result remains unchanged.
+    """
+
+    if result.plan.metric != "rows" or not result.rows:
+        return result.summary[:max_chars]
+
+    filter_columns = {item.column for item in result.plan.filters}
+    ordered_columns = [
+        column
+        for column in result.dataset.columns
+        if column not in filter_columns and column != "content"
+    ]
+    values_by_column = {
+        column: [row.get(column) for row in result.rows] for column in ordered_columns
+    }
+    varying_columns = [
+        column
+        for column in ordered_columns
+        if len({str(value) for value in values_by_column[column]}) > 1
+    ]
+    selected_columns = varying_columns or ordered_columns
+
+    def render(columns: list[str], cell_chars: int = 120) -> str:
+        detail_rows = [
+            {
+                column: (
+                    str(row.get(column))[:cell_chars]
+                    if row.get(column) is not None
+                    else None
+                )
+                for column in columns
+            }
+            for row in result.rows
+        ]
+        payload = {
+            "数据集": (
+                f"{result.dataset.title} / {result.dataset.sheet_name} / "
+                f"区域 {result.dataset.region_index}"
+            ),
+            "筛选条件": [
+                {
+                    "列": item.column,
+                    "运算符": item.operator,
+                    "值": item.value,
+                }
+                for item in result.plan.filters
+            ],
+            "精确命中行数": result.matched_row_count,
+            "完整明细": detail_rows,
+            "完整性要求": "回答必须覆盖上述每一行，不得省略。",
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    summary = render(selected_columns)
+    while len(summary) > max_chars and len(selected_columns) > 1:
+        def column_score(column: str) -> tuple[float, float]:
+            values = [
+                str(value)
+                for value in values_by_column[column]
+                if value not in (None, "")
+            ]
+            distinct_ratio = len(set(values)) / max(len(values), 1)
+            average_length = sum(len(value) for value in values) / max(len(values), 1)
+            return distinct_ratio, -average_length
+
+        least_useful = min(selected_columns, key=column_score)
+        selected_columns.remove(least_useful)
+        summary = render(selected_columns)
+    if len(summary) > max_chars:
+        summary = render(selected_columns, cell_chars=40)
+    if len(summary) > max_chars:
+        identity_column = selected_columns[0]
+        summary = json.dumps(
+            {
+                "筛选条件": [
+                    [item.column[:80], item.operator, str(item.value)[:120]]
+                    for item in result.plan.filters
+                ],
+                "精确命中行数": result.matched_row_count,
+                "明细列": identity_column[:80],
+                "完整明细值": [
+                    str(row.get(identity_column))[:40] for row in result.rows
+                ],
+                "完整性要求": "回答必须覆盖上述每一项，不得省略。",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return summary
+
+
+def _ensure_complete_structured_answer(
+    answer: str,
+    result: TableQueryResult,
+) -> str:
+    """Append any exact detail values omitted by the language model."""
+
+    if result.plan.metric != "rows" or not result.rows:
+        return answer
+    filter_columns = {item.column for item in result.plan.filters}
+    candidates = [
+        column
+        for column in result.dataset.columns
+        if column not in filter_columns and column != "content"
+    ]
+
+    def candidate_values(column: str) -> list[str]:
+        return [
+            str(row.get(column)).strip()
+            for row in result.rows
+            if row.get(column) not in (None, "")
+        ]
+
+    def candidate_score(column: str) -> tuple[float, float, float]:
+        values = candidate_values(column)
+        if not values:
+            return (0.0, 0.0, float("-inf"))
+        distinct_ratio = len(set(values)) / len(values)
+        nonnumeric_ratio = sum(
+            1 for value in values if not value.replace(".", "", 1).isdigit()
+        ) / len(values)
+        average_length = sum(len(value) for value in values) / len(values)
+        return (distinct_ratio, nonnumeric_ratio, -average_length)
+
+    if not candidates:
+        return answer
+    identity_column = max(candidates, key=candidate_score)
+    identity_values = list(dict.fromkeys(candidate_values(identity_column)))
+    missing = [value for value in identity_values if value not in answer]
+    if not missing:
+        return answer
+    suffix = "精确结果补充（模型未完整覆盖）：" + "、".join(missing)
+    return f"{answer.rstrip()}\n\n{suffix}"
 
 
 async def _expanded_chunk_context(
