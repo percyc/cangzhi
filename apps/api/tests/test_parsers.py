@@ -168,23 +168,57 @@ class TestOfficeParsers:
         assert result.success is True
         structured = result.structured_content
         assert structured.document_type == "xlsx"
-        assert structured.metadata == {
-            "source_format": "xlsx",
-            "sheet_count": 2,
-            "sheet_names": ["汇总", "明细"],
-            "non_empty_rows": 4,
-            "non_empty_cells": 11,
-            "formula_cells": 1,
-        }
+        assert structured.metadata["source_format"] == "xlsx"
+        assert structured.metadata["sheet_names"] == ["汇总", "明细"]
+        assert structured.metadata["non_empty_rows"] == 4
+        assert structured.metadata["formula_cells"] == 1
         assert [block.type for block in structured.blocks] == [
             "heading",
             "table",
             "heading",
             "table",
         ]
-        assert structured.blocks[1].heading_path == ["汇总"]
-        assert "收入\t100\t\t=SUM(B2:C2)" in structured.blocks[1].text
-        assert "2026-07-31 08:30:00\t会员收入" in structured.blocks[3].text
+        assert structured.blocks[1].heading_path == ["汇总", "数据区域 1"]
+        assert "行 2｜项目=收入｜一月=100｜合计=公式=SUM(B2:C2)" in structured.blocks[1].text
+        assert "行 2｜日期=2026-07-31 08:30:00｜说明=会员收入" in structured.blocks[3].text
+        assert structured.blocks[1].extra == {
+            "sheet_name": "汇总",
+            "region_index": 1,
+            "row_start": 2,
+            "row_end": 2,
+            "header_row": 1,
+            "column_names": ["项目", "一月", "二月", "合计"],
+        }
+
+    def test_parse_xlsx_splits_regions_and_preserves_display_formats(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "台账"
+        sheet.append(["编号", "完成率", "金额"])
+        sheet.append([7, 0.25, 1234.5])
+        sheet["A2"].number_format = "00000"
+        sheet["B2"].number_format = "0.0%"
+        sheet["C2"].number_format = "￥#,##0.00"
+        sheet.append([None, None, None])
+        sheet.append(["张三", "广州"])
+        sheet.append(["李四", "深圳"])
+        source = BytesIO()
+        workbook.save(source)
+
+        result = XlsxParser().parse(source.getvalue())
+
+        assert result.success is True
+        structured = result.structured_content
+        assert structured.metadata["data_region_count"] == 2
+        tables = [block for block in structured.blocks if block.type == "table"]
+        assert tables[0].text == (
+            "行 2｜编号=00007（原始值：7）｜完成率=25.0%（原始值：0.25）｜"
+            "金额=￥1,234.50（原始值：1234.5）"
+        )
+        assert tables[1].text.startswith("行 4｜A列=张三｜B列=广州")
+        assert tables[1].extra["header_row"] is None
 
     def test_parse_blank_xlsx_returns_no_fake_content(self):
         from openpyxl import Workbook

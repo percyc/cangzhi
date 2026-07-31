@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 
 from .detection import DocumentProfile
 
-CHUNK_PROFILE_VERSION = "chunk-profile:v2"
+CHUNK_PROFILE_VERSION = "chunk-profile:v4"
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,14 @@ class ChunkingConfig:
 def get_chunking_config(profile: DocumentProfile) -> ChunkingConfig:
     """Code and table documents keep larger retrieval units; others use defaults."""
 
-    if profile.detected_type in {"code", "table"}:
+    if profile.detected_type == "table":
+        return ChunkingConfig(
+            child_target_max_chars=1800,
+            child_hard_max_chars=2400,
+            child_target_min_chars=100,
+            child_overlap_chars=0,
+        )
+    if profile.detected_type == "code":
         return ChunkingConfig(
             child_target_max_chars=1200,
             child_hard_max_chars=1800,

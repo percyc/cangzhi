@@ -281,6 +281,7 @@ def _vector_row_select(score_column):
             DocumentChunk.source_start.label("source_start"),
             DocumentChunk.source_end.label("source_end"),
             DocumentChunk.content.label("content"),
+            DocumentChunk.extra.label("chunk_extra"),
             Document.title.label("title"),
             Document.source_type.label("source_type"),
             Document.source_url.label("source_url"),

@@ -42,6 +42,23 @@ MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
 SNIPPET_RADIUS = 80
 SNIPPET_MAX_LENGTH = 280
+_TABLE_LOCATION_KEYS = {
+    "sheet_name",
+    "region_index",
+    "row_start",
+    "row_end",
+    "header_row",
+    "column_names",
+    "row_fragmented",
+    "table_ranges",
+}
+
+
+def table_location_from_extra(value: dict | None) -> dict:
+    extra = value or {}
+    if not (extra.get("sheet_name") or extra.get("table_ranges")):
+        return {}
+    return {key: extra[key] for key in _TABLE_LOCATION_KEYS if key in extra}
 
 
 @dataclass
@@ -62,6 +79,7 @@ class SearchHit:
     paragraph_index: int | None
     source_start: int | None
     source_end: int | None
+    table_location: dict
     score: float
     snippet: str
     highlights: list[dict]
@@ -90,6 +108,7 @@ class SearchHit:
                 "paragraph_index": self.paragraph_index,
                 "source_start": self.source_start,
                 "source_end": self.source_end,
+                "table_location": dict(self.table_location),
             },
             "snippet": self.snippet,
             "highlights": self.highlights,
@@ -438,6 +457,7 @@ async def _browse_filtered(
             DocumentChunk.source_start.label("source_start"),
             DocumentChunk.source_end.label("source_end"),
             DocumentChunk.content.label("content"),
+            DocumentChunk.extra.label("chunk_extra"),
             Document.title.label("title"),
             Document.source_type.label("source_type"),
             Document.source_url.label("source_url"),
@@ -546,6 +566,7 @@ async def _search_postgres(
             DocumentChunk.source_start.label("source_start"),
             DocumentChunk.source_end.label("source_end"),
             DocumentChunk.content.label("content"),
+            DocumentChunk.extra.label("chunk_extra"),
             Document.title.label("title"),
             Document.source_type.label("source_type"),
             Document.source_url.label("source_url"),
@@ -640,6 +661,7 @@ async def _search_like(
             DocumentChunk.source_start.label("source_start"),
             DocumentChunk.source_end.label("source_end"),
             DocumentChunk.content.label("content"),
+            DocumentChunk.extra.label("chunk_extra"),
             Document.title.label("title"),
             Document.source_type.label("source_type"),
             Document.source_url.label("source_url"),
@@ -776,6 +798,7 @@ async def _build_hits(
                 paragraph_index=row.paragraph_index,
                 source_start=row.source_start,
                 source_end=row.source_end,
+                table_location=table_location_from_extra(row.chunk_extra),
                 score=float(row.rank or 0.0),
                 snippet=snippet,
                 highlights=highlights,

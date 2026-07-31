@@ -43,6 +43,18 @@ def test_code_profile_uses_larger_child_chunks():
     assert config.child_overlap_chars == 200
 
 
+def test_table_profile_uses_rows_without_overlap():
+    profile = _detect(
+        blocks=["heading", "table", "table"],
+        title="季度数据",
+    )
+    assert profile.detected_type == "table"
+    config = get_chunking_config(profile)
+    assert config.child_target_max_chars == 1800
+    assert config.child_hard_max_chars == 2400
+    assert config.child_overlap_chars == 0
+
+
 def test_detection_is_deterministic():
     kwargs = {
         "blocks": ["heading", "table", "table"],

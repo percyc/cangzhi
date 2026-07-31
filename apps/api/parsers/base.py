@@ -33,6 +33,7 @@ class Block:
     page: int | None = None
     paragraph_index: int | None = None
     level: int | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -42,6 +43,7 @@ class Block:
             "page": self.page,
             "paragraph_index": self.paragraph_index,
             "level": self.level,
+            "extra": dict(self.extra),
         }
 
 
@@ -84,14 +86,14 @@ def get_parser_for_content(
     content_type: str | None,
     file_name: str | None = None,
 ) -> BaseParser:
-    from .note import NoteParser
-    from .text import TextParser
-    from .markdown import MarkdownParser
-    from .pdf import PdfParser
     from .doc import DocParser
     from .docx import DocxParser
-    from .spreadsheet import XlsParser, XlsxParser
     from .html import HtmlParser
+    from .markdown import MarkdownParser
+    from .note import NoteParser
+    from .pdf import PdfParser
+    from .spreadsheet import XlsParser, XlsxParser
+    from .text import TextParser
 
     content_type = (content_type or "").lower()
 

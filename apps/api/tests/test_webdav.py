@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from apps.api.api.webdav import _matches_ignore_pattern
+from apps.api.api.webdav import _matches_ignore_pattern, _spreadsheet_schema_is_stale
 from apps.api.services.webdav import (
     RemoteEntry,
     parse_multistatus,
@@ -164,6 +164,27 @@ def test_webdav_ignore_patterns_match_path_segments():
     assert _matches_ignore_pattern("/docs/@eaDir/report.pdf", patterns)
     assert _matches_ignore_pattern("/docs/cache.tmp", patterns)
     assert not _matches_ignore_pattern("/docs/report.pdf", patterns)
+
+
+def test_webdav_reprocesses_only_legacy_spreadsheet_schema():
+    from types import SimpleNamespace
+
+    legacy = SimpleNamespace(
+        structured_content={
+            "document_type": "xlsx",
+            "metadata": {"source_format": "xlsx"},
+        }
+    )
+    current = SimpleNamespace(
+        structured_content={
+            "document_type": "xlsx",
+            "metadata": {"spreadsheet_schema_version": 2},
+        }
+    )
+
+    assert _spreadsheet_schema_is_stale(legacy, "台账.xlsx") is True
+    assert _spreadsheet_schema_is_stale(current, "台账.xlsx") is False
+    assert _spreadsheet_schema_is_stale(legacy, "说明.docx") is False
 
 
 def test_deleted_webdav_document_is_not_rediscovered(client, monkeypatch):

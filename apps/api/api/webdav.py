@@ -19,16 +19,18 @@ from ..models.processing import ProcessingJob
 from ..models.webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource
 from ..security.secrets import decrypt_secret, encrypt_secret
 from ..security.url_safety import URLSecurityError
+from ..services.document_lifecycle import (
+    restore_documents as restore_document_records,
+)
+from ..services.document_lifecycle import (
+    trash_documents as trash_document_records,
+)
 from ..services.webdav import (
     WebDAVError,
     download_file,
     propfind,
     validate_webdav_url,
     webdav_external_identity,
-)
-from ..services.document_lifecycle import (
-    restore_documents as restore_document_records,
-    trash_documents as trash_document_records,
 )
 from ..storage import get_storage
 from ..storage.base import BlobStorage
@@ -47,6 +49,19 @@ DEFAULT_EXTENSIONS = [
 ]
 REMOTE_MISSING_CONFIRMATIONS = 2
 REMOTE_MISSING_GRACE = timedelta(hours=24)
+
+
+def _spreadsheet_schema_is_stale(
+    version: DocumentVersion,
+    filename: str,
+) -> bool:
+    if PurePosixPath(filename).suffix.lower() not in {".xlsx", ".xls"}:
+        return False
+    structured = version.structured_content or {}
+    metadata = structured.get("metadata") if isinstance(structured, dict) else {}
+    return not isinstance(metadata, dict) or metadata.get(
+        "spreadsheet_schema_version"
+    ) != 2
 
 
 class SourceConfig(BaseModel):
@@ -878,6 +893,45 @@ async def sync_source(
                     else None
                 )
                 if current is not None and current.content_hash == stored.sha256:
+                    if _spreadsheet_schema_is_stale(current, filename):
+                        current.blob_id = blob.id
+                        current.processing_status = "created"
+                        parse_job = await db.scalar(
+                            select(ProcessingJob)
+                            .where(
+                                ProcessingJob.document_version_id == current.id,
+                                ProcessingJob.stage.in_(("stored", "parsing")),
+                            )
+                            .order_by(ProcessingJob.id)
+                        )
+                        if parse_job is None:
+                            parse_job = ProcessingJob(
+                                document_id=document.id,
+                                document_version_id=current.id,
+                                stage="stored",
+                                status="created",
+                                idempotency_key=(
+                                    f"{current.id}:stored:webdav-spreadsheet-v2"
+                                ),
+                                config_version="2",
+                            )
+                        else:
+                            parse_job.stage = "stored"
+                            parse_job.status = "created"
+                            parse_job.retry_count = 0
+                            parse_job.next_retry_at = None
+                            parse_job.last_error = None
+                            parse_job.error_details = None
+                            parse_job.config_version = "2"
+                            parse_job.started_at = None
+                            parse_job.finished_at = None
+                        db.add(parse_job)
+                        entry.state = "synced"
+                        entry.synced_at = datetime.now(timezone.utc)
+                        entry.last_error = None
+                        updated += 1
+                        await db.commit()
+                        continue
                     entry.state = "synced"
                     entry.synced_at = datetime.now(timezone.utc)
                     unchanged += 1

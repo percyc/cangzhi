@@ -28,11 +28,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
 
 from ..parsers.base import Block, StructuredContent
-
 
 CHILD_TARGET_MAX_CHARS = 600
 CHILD_HARD_MAX_CHARS = 900
@@ -142,6 +141,7 @@ def build_chunk_specs(
             char_count=len(section_text),
             token_estimate=_estimate_tokens(section_text),
             language=metadata.get("language") if isinstance(metadata, dict) else None,
+            extra=_merge_block_extras(section.blocks),
         )
         specs.append(parent)
         parent_index += 1
@@ -218,6 +218,7 @@ def _block_from_dict(payload: dict) -> Block:
         page=payload.get("page"),
         paragraph_index=payload.get("paragraph_index"),
         level=payload.get("level"),
+        extra=dict(payload.get("extra") or {}),
     )
 
 
@@ -239,7 +240,6 @@ def _split_into_sections(blocks: Sequence[Block]) -> list[_Section]:
     sections: list[_Section] = []
     current: _Section | None = None
     section_cursor = 0
-    last_paragraph_index: int | None = None
 
     for block in blocks:
         text = (block.text or "").strip()
@@ -278,7 +278,6 @@ def _split_into_sections(blocks: Sequence[Block]) -> list[_Section]:
                     blocks=[],
                 )
             current.blocks.append(block)
-            last_paragraph_index = block.paragraph_index
             section_cursor += len(text) + 2
 
     if current is not None:
@@ -350,6 +349,7 @@ def _split_section_into_children(
                 paragraph_index=first_paragraph_index,
                 source_start=section.source_start,
                 source_end=section.source_end,
+                extra=_merge_block_extras(body_blocks),
             )
         ]
 
@@ -400,6 +400,7 @@ def _split_section_into_children(
             ),
             source_start=section.source_start + start_offset,
             source_end=section.source_start + end_offset,
+            extra=_merge_block_extras([b for b, _, _ in buffer]),
         )
         children.append(spec)
         child_index += 1
@@ -439,6 +440,11 @@ def _split_section_into_children(
                     paragraph_index=block.paragraph_index,
                     source_start=section.source_start + cursor_local,
                     source_end=section.source_start + end_local,
+                    extra=(
+                        _table_piece_extra(block.extra, sub_text)
+                        if block.type == "table"
+                        else dict(block.extra)
+                    ),
                 )
                 children.append(spec)
                 child_index += 1
@@ -485,6 +491,13 @@ def _apply_child_overlap(
     previous_core_end = children[0].source_end
     for child in children[1:]:
         core_content = child.content
+        if child.chunk_type == "table" and (
+            child.extra.get("sheet_name") or child.extra.get("table_ranges")
+        ):
+            previous_core = core_content
+            previous_core_start = child.source_start
+            previous_core_end = child.source_end
+            continue
         available = max(0, hard_max - len(core_content) - 2)
         prefix = _semantic_tail(
             previous_core,
@@ -591,7 +604,18 @@ def _split_table_text(text: str, *, target: int, hard_max: int) -> list[str]:
                 pieces.append("\n".join(buffer))
                 buffer = []
                 buffer_length = 0
-            pieces.extend(_hard_split(row, hard_max))
+            locator_match = re.match(r"^(行\s+\d+｜)", row)
+            if locator_match is None:
+                pieces.extend(_hard_split(row, hard_max))
+                continue
+            locator = locator_match.group(1)
+            body = row[len(locator) :]
+            fragment_size = max(1, hard_max - len(locator) - 12)
+            fragments = _hard_split(body, fragment_size)
+            pieces.extend(
+                f"{locator}【片段 {index}/{len(fragments)}】{fragment}"
+                for index, fragment in enumerate(fragments, start=1)
+            )
             continue
         candidate_length = buffer_length + (1 if buffer else 0) + len(row)
         if buffer and candidate_length > target:
@@ -604,6 +628,50 @@ def _split_table_text(text: str, *, target: int, hard_max: int) -> list[str]:
     if buffer:
         pieces.append("\n".join(buffer))
     return pieces
+
+
+_TABLE_ROW_RE = re.compile(r"^行\s+(\d+)｜", re.MULTILINE)
+
+
+def _table_piece_extra(base: dict, text: str) -> dict:
+    extra = dict(base or {})
+    rows = [int(value) for value in _TABLE_ROW_RE.findall(text)]
+    if rows:
+        extra["row_start"] = min(rows)
+        extra["row_end"] = max(rows)
+    if "【片段 " in text:
+        extra["row_fragmented"] = True
+    return extra
+
+
+def _merge_block_extras(blocks: Sequence[Block]) -> dict:
+    table_ranges = [dict(block.extra) for block in blocks if block.extra]
+    if not table_ranges:
+        return {}
+    if len(table_ranges) == 1:
+        return table_ranges[0]
+    regions = {
+        (item.get("sheet_name"), item.get("region_index"))
+        for item in table_ranges
+    }
+    if len(regions) == 1:
+        merged = dict(table_ranges[0])
+        starts = [
+            item["row_start"]
+            for item in table_ranges
+            if item.get("row_start") is not None
+        ]
+        ends = [
+            item["row_end"]
+            for item in table_ranges
+            if item.get("row_end") is not None
+        ]
+        if starts:
+            merged["row_start"] = min(starts)
+        if ends:
+            merged["row_end"] = max(ends)
+        return merged
+    return {"table_ranges": table_ranges}
 
 
 def _merge_short_pieces(
@@ -656,6 +724,7 @@ def _make_child_chunk(
     paragraph_index: int | None,
     source_start: int,
     source_end: int,
+    extra: dict | None = None,
 ) -> ChunkSpec:
     return ChunkSpec(
         external_id=external_id,
@@ -672,6 +741,7 @@ def _make_child_chunk(
         source_end=source_end,
         char_count=len(content),
         token_estimate=_estimate_tokens(content),
+        extra=dict(extra or {}),
     )
 
 

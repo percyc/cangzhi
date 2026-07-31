@@ -18,6 +18,13 @@ type Citation = {
   paragraph_index: number | null;
   source_start: number | null;
   source_end: number | null;
+  table_location?: {
+    sheet_name?: string;
+    region_index?: number;
+    row_start?: number;
+    row_end?: number;
+    column_names?: string[];
+  };
   source_type: string;
   source_url: string | null;
   snippet: string;
@@ -842,6 +849,11 @@ function CitationItem({
         content?: string;
         parent_id?: number | null;
       };
+      if (citation.table_location?.sheet_name) {
+        setContentLabel('表格引用行');
+        setContent(body.content || citation.snippet);
+        return;
+      }
       if (body.parent_id) {
         const parentResponse = await fetch(
           `/api/v1/knowledge/chunks/${body.parent_id}`,
@@ -893,6 +905,17 @@ function CitationItem({
                   ? citation.heading_path.join(' › ')
                   : sourceTypeLabel(citation.source_type)}
                 {citation.page ? ` · 第 ${citation.page} 页` : ''}
+                {citation.table_location?.sheet_name
+                  ? ` · ${citation.table_location.sheet_name}`
+                  : ''}
+                {citation.table_location?.row_start
+                  ? ` · 第 ${citation.table_location.row_start}${
+                      citation.table_location.row_end &&
+                      citation.table_location.row_end !== citation.table_location.row_start
+                        ? `–${citation.table_location.row_end}`
+                        : ''
+                    } 行`
+                  : ''}
               </p>
             </div>
           </div>

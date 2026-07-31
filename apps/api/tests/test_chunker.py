@@ -133,6 +133,44 @@ def test_long_table_splits_only_between_rows():
     assert all(child.chunk_type == "table" for child in children)
 
 
+def test_spreadsheet_chunks_keep_row_ranges_and_disable_character_overlap():
+    rows = [
+        f"行 {number}｜订单号=NO-{number:04d}｜客户=客户{number}｜金额={number * 100}"
+        for number in range(2, 82)
+    ]
+    blocks = [
+        Block(
+            type="heading",
+            text="订单",
+            heading_path=["订单"],
+            level=1,
+        ),
+        Block(
+            type="table",
+            text="\n".join(rows),
+            heading_path=["订单", "数据区域 1"],
+            paragraph_index=1,
+            extra={
+                "sheet_name": "订单",
+                "region_index": 1,
+                "row_start": 2,
+                "row_end": 81,
+                "header_row": 1,
+                "column_names": ["订单号", "客户", "金额"],
+            },
+        ),
+    ]
+
+    specs = build_chunk_specs(_structured(blocks))
+    children = [spec for spec in specs if spec.role == "child"]
+
+    assert len(children) > 1
+    assert all(child.extra["overlap_prefix_chars"] == 0 for child in children)
+    assert children[0].extra["row_start"] == 2
+    assert children[-1].extra["row_end"] == 81
+    assert all(child.content.startswith("行 ") for child in children)
+
+
 def test_adjacent_children_include_bounded_semantic_overlap():
     text = "".join(
         f"第{i}句说明跨切片上下文不能丢失。" for i in range(1, 80)

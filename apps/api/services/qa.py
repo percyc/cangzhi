@@ -38,7 +38,7 @@ from sqlalchemy.sql import ColumnElement
 from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
-from .search import extract_cjk_ngrams, normalize_query
+from .search import extract_cjk_ngrams, normalize_query, table_location_from_extra
 
 # ---- Limits ---------------------------------------------------------------
 # These constants cap what a single ask call can do. The point is to
@@ -116,18 +116,22 @@ class Evidence:
     source_end: int | None
     snippet: str
     score: float
+    table_location: dict = field(default_factory=dict)
     source_type: str = ""
     source_url: str | None = None
     categories: list[dict] = field(default_factory=list)
     tags: list[dict] = field(default_factory=list)
 
     def to_provider_dict(self) -> dict:
-        return {
+        payload = {
             "id": self.id,
             "title": self.title,
             "heading_path": list(self.heading_path),
             "snippet": self.snippet,
         }
+        if self.table_location:
+            payload["table_location"] = dict(self.table_location)
+        return payload
 
     def to_citation(self) -> dict:
         return {
@@ -141,6 +145,7 @@ class Evidence:
             "paragraph_index": self.paragraph_index,
             "source_start": self.source_start,
             "source_end": self.source_end,
+            "table_location": dict(self.table_location),
             "source_type": self.source_type,
             "source_url": self.source_url,
             "snippet": self.snippet,
@@ -676,6 +681,7 @@ class QAService:
                 fallback=row.content or "",
             )
             snippet = _build_snippet(content, terms=terms)
+            chunk = chunks.get(row.chunk_id)
             if len(snippet) > EVIDENCE_SNIPPET_CHARS:
                 snippet = snippet[:EVIDENCE_SNIPPET_CHARS] + "…"
             if len(snippet) > budget:
@@ -693,6 +699,9 @@ class QAService:
                     paragraph_index=row.paragraph_index,
                     source_start=row.source_start,
                     source_end=row.source_end,
+                    table_location=(
+                        table_location_from_extra(chunk.extra) if chunk else {}
+                    ),
                     snippet=snippet,
                     score=float(row.rank or 0.0),
                     source_type=_source_type_label(row.source_type),
@@ -754,6 +763,12 @@ async def _expanded_chunk_context(
 ) -> str:
     if chunk is None or chunk.parent_id is None:
         return fallback.strip()
+    if (chunk.extra or {}).get("sheet_name") or (chunk.extra or {}).get(
+        "table_ranges"
+    ):
+        # Spreadsheet rows are self-describing and must never receive a
+        # character tail that starts or ends halfway through another row.
+        return (chunk.content or fallback).strip()
     neighbors = (
         (
             await db.execute(

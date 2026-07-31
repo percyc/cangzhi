@@ -74,6 +74,29 @@ def test_long_ai_input_samples_beginning_middle_and_end():
     assert result.endswith("TAIL")
 
 
+def test_spreadsheet_ai_input_preserves_schema_and_whole_rows():
+    raw_text = "\n".join(
+        f"行 {row}｜订单号=NO-{row:04d}｜金额={row * 100}"
+        for row in range(2, 82)
+    )
+    metadata = {
+        "regions": [
+            {
+                "sheet_name": "订单",
+                "row_start": 1,
+                "row_end": 81,
+                "column_names": ["订单号", "金额"],
+            }
+        ]
+    }
+
+    result = _build_ai_input("订单台账", raw_text, metadata)
+
+    assert "工作表 订单，第 1–81 行，列：订单号、金额" in result
+    assert "【表格中部行】" in result
+    assert "行 2｜订单号=NO-0002｜金额=200" in result
+
+
 class TestChunkingJob:
     def test_webdav_original_is_released_after_parsing(
         self, session, tmp_path, monkeypatch
@@ -161,9 +184,9 @@ class TestChunkingJob:
         assert child.is_current is True
         session.refresh(version)
         assert version.meta["document_profile"]["detected_type"] == "general"
-        assert version.meta["chunking_config"]["profile_version"] == "chunk-profile:v2"
+        assert version.meta["chunking_config"]["profile_version"] == "chunk-profile:v4"
         assert version.meta["chunking_config"]["child_overlap_chars"] == 120
-        assert child.extra["document_profile"]["profile_version"] == "chunk-profile:v2"
+        assert child.extra["document_profile"]["profile_version"] == "chunk-profile:v4"
 
     def test_chunking_is_idempotent(self, session):
         document = Document(

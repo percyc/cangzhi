@@ -57,7 +57,7 @@ BATCH_SIZE = 10
 UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
-CHUNKING_IDEMPOTENCY = "chunking:m3-v2"
+CHUNKING_IDEMPOTENCY = "chunking:m3-v4"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
@@ -833,6 +833,7 @@ def _structured_content_from_payload(payload: dict) -> StructuredContent:
             page=item.get("page"),
             paragraph_index=item.get("paragraph_index"),
             level=item.get("level"),
+            extra=dict(item.get("extra") or {}),
         )
         for item in blocks_payload
         if isinstance(item, dict)
@@ -851,6 +852,43 @@ def _build_ai_input(title: str, raw_text: str, metadata: dict) -> str:
         return ""
     if not raw_text:
         return f"标题：{title}"
+    regions = metadata.get("regions") if isinstance(metadata, dict) else None
+    if isinstance(regions, list) and regions:
+        structure_lines = []
+        for region in regions[:20]:
+            if not isinstance(region, dict):
+                continue
+            columns = "、".join(str(value) for value in region.get("column_names") or [])
+            structure_lines.append(
+                f"- 工作表 {region.get('sheet_name') or '未命名'}，"
+                f"第 {region.get('row_start')}–{region.get('row_end')} 行，"
+                f"列：{columns or '未识别'}"
+            )
+        lines = [line for line in raw_text.splitlines() if line.strip()]
+        if len(lines) > 60:
+            middle = max(0, len(lines) // 2 - 10)
+            sampled_lines = [
+                "【表格开头行】",
+                *lines[:25],
+                "【表格中部行】",
+                *lines[middle : middle + 20],
+                "【表格结尾行】",
+                *lines[-15:],
+            ]
+        else:
+            sampled_lines = lines
+        table_sample = "\n".join(sampled_lines)
+        if len(table_sample) > 6_500:
+            table_sample = table_sample[:6_500].rsplit("\n", 1)[0]
+        structure_text = "\n".join(structure_lines)
+        return (
+            f"标题：{title}\n\n"
+            "表格结构：\n"
+            f"{structure_text}\n\n"
+            "代表性数据行：\n"
+            f"{table_sample}"
+        )
+
     max_chars = 8_000
     if len(raw_text) <= max_chars:
         sample = raw_text
