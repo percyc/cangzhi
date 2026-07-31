@@ -188,6 +188,46 @@ def test_spreadsheet_chunks_keep_row_ranges_and_disable_character_overlap():
     assert all(child.content.startswith("行 ") for child in children)
 
 
+def test_spreadsheet_document_uses_compact_dataset_catalog_chunks():
+    table_blocks = []
+    for block_index in range(100):
+        row_start = block_index * 200 + 2
+        row_end = row_start + 199
+        table_blocks.append(
+            Block(
+                type="table",
+                text=(
+                    f"行 {row_start}｜状态=是｜金额={row_start}\n"
+                    f"行 {row_end}｜状态=否｜金额={row_end}"
+                ),
+                heading_path=["明细", "数据区域 1"],
+                paragraph_index=block_index,
+                extra={
+                    "sheet_name": "明细",
+                    "region_index": 1,
+                    "row_start": row_start,
+                    "row_end": row_end,
+                    "header_row": 1,
+                    "column_names": ["状态", "金额"],
+                },
+            )
+        )
+    structured = StructuredContent(document_type="xlsx", blocks=table_blocks)
+
+    specs = build_chunk_specs(structured, child_overlap_chars=0)
+
+    assert len(specs) == 2
+    parent, child = specs
+    assert parent.role == "parent"
+    assert child.role == "child"
+    assert child.chunk_type == "dataset_catalog"
+    assert child.extra["dataset_catalog"] is True
+    assert child.extra["catalog_row_count"] == 200
+    assert child.extra["column_names"] == ["状态", "金额"]
+    assert child.extra["catalog_sample_count"] == 12
+    assert "精确筛选、计数、求和、分组和排序" in child.content
+
+
 def test_adjacent_children_include_bounded_semantic_overlap():
     text = "".join(
         f"第{i}句说明跨切片上下文不能丢失。" for i in range(1, 80)

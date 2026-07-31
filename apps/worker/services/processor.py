@@ -68,7 +68,7 @@ UNDERSTANDING_STAGE = "understanding"
 UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
 DATASET_CATALOG_STAGE = "dataset_catalog"
-CHUNKING_IDEMPOTENCY = "chunking:m3-v6"
+CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
@@ -503,11 +503,19 @@ def _process_chunking(
         session.commit()
         return False
 
+    seed_preview_parts: list[str] = []
+    seed_preview_chars = 0
+    for block in structured.blocks:
+        if not block.text or seed_preview_chars >= 1_000:
+            continue
+        piece = block.text[: 1_000 - seed_preview_chars]
+        seed_preview_parts.append(piece)
+        seed_preview_chars += len(piece)
     seed_input = "|".join(
         [
             str(version.id),
             version.content_hash or "",
-            structured.full_text()[:1000],
+            "\n".join(seed_preview_parts),
         ]
     )
     content_hash_seed = hashlib.sha256(seed_input.encode("utf-8")).hexdigest()

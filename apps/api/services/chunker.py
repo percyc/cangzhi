@@ -38,6 +38,8 @@ CHILD_HARD_MAX_CHARS = 900
 CHILD_TARGET_MIN_CHARS = 80
 CHILD_OVERLAP_CHARS = 120
 PARENT_MAX_CHARS = 80_000
+DATASET_CATALOG_SAMPLE_ROWS = 12
+DATASET_CATALOG_MAX_ROW_CHARS = 1_000
 
 # Sentence boundary detectors. Chinese punctuation first so we don't
 # split on the ASCII period inside a number; newline is always a
@@ -111,11 +113,26 @@ def build_chunk_specs(
     ORM model and the API may pass a freshly re-parsed dict from tests.
     """
 
-    blocks, metadata, raw = _coerce(structured, raw_text)
+    document_type = (
+        structured.document_type
+        if isinstance(structured, StructuredContent)
+        else str(structured.get("document_type") or "")
+    )
+    blocks, metadata, raw = _coerce(
+        structured,
+        raw_text,
+        include_raw=content_hash_seed is None,
+    )
     if not blocks:
         return []
 
     seed = content_hash_seed or chunk_content_hash(raw)
+    if document_type in {"xlsx", "xls"}:
+        return _build_dataset_catalog_specs(
+            blocks,
+            metadata=metadata,
+            seed=seed,
+        )
     sections = _split_into_sections(blocks)
     specs: list[ChunkSpec] = []
     parent_index = 0
@@ -185,6 +202,165 @@ def build_chunk_specs(
     return specs
 
 
+def _build_dataset_catalog_specs(
+    blocks: Sequence[Block],
+    *,
+    metadata: dict,
+    seed: str,
+) -> list[ChunkSpec]:
+    """Build compact discovery chunks for spreadsheet data regions.
+
+    Spreadsheet rows remain fully queryable in ``structured_table_rows``.
+    Repeating them in the document chunk/vector layer is both expensive and
+    misleading: vector retrieval discovers a dataset, while the structured
+    executor performs complete filtering and aggregation.
+    """
+
+    grouped: dict[tuple[str, int], list[Block]] = {}
+    for block in blocks:
+        if block.type != "table":
+            continue
+        extra = block.extra or {}
+        key = (
+            str(extra.get("sheet_name") or (block.heading_path or ["工作表"])[0]),
+            int(extra.get("region_index") or 1),
+        )
+        grouped.setdefault(key, []).append(block)
+
+    specs: list[ChunkSpec] = []
+    for dataset_order, ((sheet_name, region_index), table_blocks) in enumerate(
+        grouped.items()
+    ):
+        extras = [block.extra or {} for block in table_blocks]
+        columns = list(
+            dict.fromkeys(
+                str(column)
+                for extra in extras
+                for column in (extra.get("column_names") or [])
+                if column
+            )
+        )
+        row_start = min(
+            (int(extra["row_start"]) for extra in extras if extra.get("row_start") is not None),
+            default=None,
+        )
+        row_end = max(
+            (int(extra["row_end"]) for extra in extras if extra.get("row_end") is not None),
+            default=None,
+        )
+        header_row = next(
+            (extra.get("header_row") for extra in extras if extra.get("header_row") is not None),
+            None,
+        )
+        row_count = sum(
+            len([line for line in (block.text or "").splitlines() if line.strip()])
+            for block in table_blocks
+        )
+        samples = _representative_table_rows(table_blocks)
+        display_name = (
+            sheet_name
+            if region_index == 1
+            else f"{sheet_name} · 数据区域 {region_index}"
+        )
+        content = "\n".join(
+            [
+                f"数据集：{display_name}",
+                f"工作表：{sheet_name}",
+                f"规模：{row_count} 行，{len(columns)} 个字段",
+                f"字段：{'、'.join(columns)[:4_000] or '未识别'}",
+                (
+                    "用途：这是可计算的结构化数据。精确筛选、计数、求和、分组和排序"
+                    "应由数据集查询执行器处理，不以代表行推断全量事实。"
+                ),
+                *(["代表行：", *samples] if samples else []),
+            ]
+        )
+        dataset_key = chunk_content_hash(f"{sheet_name}\0{region_index}")[:16]
+        parent_external_id = f"{seed}:dataset:{dataset_key}:p"
+        common_extra = {
+            "dataset_catalog": True,
+            "sheet_name": sheet_name,
+            "region_index": region_index,
+            "row_start": row_start,
+            "row_end": row_end,
+            "header_row": header_row,
+            "column_names": columns,
+            "catalog_row_count": row_count,
+            "catalog_sample_count": len(samples),
+        }
+        heading_path = [sheet_name, f"数据区域 {region_index}"]
+        paragraph_index = table_blocks[0].paragraph_index
+        source_start = row_start or 0
+        source_end = row_end or source_start
+        specs.extend(
+            [
+                ChunkSpec(
+                    external_id=parent_external_id,
+                    parent_external_id=None,
+                    order_index=dataset_order,
+                    role=_CHUNK_ROLE_PARENT,
+                    chunk_type="dataset",
+                    content=content,
+                    content_hash=chunk_content_hash(content),
+                    heading_path=heading_path,
+                    page=None,
+                    paragraph_index=paragraph_index,
+                    source_start=source_start,
+                    source_end=source_end,
+                    char_count=len(content),
+                    token_estimate=_estimate_tokens(content),
+                    language=metadata.get("language"),
+                    extra=common_extra,
+                ),
+                ChunkSpec(
+                    external_id=f"{seed}:dataset:{dataset_key}:c",
+                    parent_external_id=parent_external_id,
+                    order_index=dataset_order,
+                    role=_CHUNK_ROLE_CHILD,
+                    chunk_type="dataset_catalog",
+                    content=content,
+                    content_hash=chunk_content_hash(content),
+                    heading_path=heading_path,
+                    page=None,
+                    paragraph_index=paragraph_index,
+                    source_start=source_start,
+                    source_end=source_end,
+                    char_count=len(content),
+                    token_estimate=_estimate_tokens(content),
+                    language=metadata.get("language"),
+                    extra=common_extra,
+                ),
+            ]
+        )
+    return specs
+
+
+def _representative_table_rows(blocks: Sequence[Block]) -> list[str]:
+    if not blocks:
+        return []
+    if len(blocks) <= DATASET_CATALOG_SAMPLE_ROWS:
+        block_indexes = list(range(len(blocks)))
+    else:
+        block_indexes = sorted(
+            {
+                round(index * (len(blocks) - 1) / (DATASET_CATALOG_SAMPLE_ROWS - 1))
+                for index in range(DATASET_CATALOG_SAMPLE_ROWS)
+            }
+        )
+    samples: list[str] = []
+    for block_index in block_indexes:
+        lines = [line.strip() for line in (blocks[block_index].text or "").splitlines() if line.strip()]
+        if not lines:
+            continue
+        for line in (lines[0], lines[-1]):
+            sample = line[:DATASET_CATALOG_MAX_ROW_CHARS]
+            if sample not in samples:
+                samples.append(sample)
+            if len(samples) >= DATASET_CATALOG_SAMPLE_ROWS:
+                return samples
+    return samples
+
+
 def _bounded_parent_content(content: str) -> tuple[str, bool]:
     """Bound non-retrieval parent text while retaining both source edges."""
 
@@ -214,18 +390,32 @@ class _Section:
 def _coerce(
     structured: StructuredContent | dict,
     raw_text: str | None,
+    *,
+    include_raw: bool = True,
 ) -> tuple[list[Block], dict, str]:
     if isinstance(structured, StructuredContent):
         blocks = list(structured.blocks)
         metadata = dict(structured.metadata or {})
-        raw = raw_text if raw_text is not None else structured.full_text()
+        raw = (
+            raw_text
+            if raw_text is not None
+            else structured.full_text()
+            if include_raw
+            else ""
+        )
     elif isinstance(structured, dict):
         raw_blocks = structured.get("blocks") or []
         blocks = [_block_from_dict(b) for b in raw_blocks if isinstance(b, dict)]
         metadata = structured.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
-        raw = raw_text if raw_text is not None else _join_text(blocks)
+        raw = (
+            raw_text
+            if raw_text is not None
+            else _join_text(blocks)
+            if include_raw
+            else ""
+        )
     else:
         raise TypeError("structured must be a StructuredContent or dict")
     return blocks, metadata, raw

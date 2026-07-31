@@ -40,7 +40,12 @@ from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from .search import extract_cjk_ngrams, normalize_query, table_location_from_extra
-from .structured_table import TableQueryResult, try_structured_table_query
+from .structured_table import (
+    TableQueryResult,
+    candidate_dataset_document_ids,
+    is_structured_table_question,
+    try_structured_table_query,
+)
 
 # ---- Limits ---------------------------------------------------------------
 # These constants cap what a single ask call can do. The point is to
@@ -255,6 +260,23 @@ class QAService:
                 dict.fromkeys(
                     item.document_id for item in evidence if item.table_location
                 )
+            )
+        if (
+            not candidate_table_document_ids
+            and is_structured_table_question(question)
+            and not request.matches_none
+        ):
+            candidate_table_document_ids = await candidate_dataset_document_ids(
+                db,
+                filters={
+                    "category_ids": list(request.category_ids),
+                    "category_slugs": list(request.category_slugs),
+                    "tag_ids": list(request.tag_ids),
+                    "tag_slugs": list(request.tag_slugs),
+                    "source_types": list(request.source_types),
+                    "document_ids": list(request.document_ids),
+                    "matches_none": request.matches_none,
+                },
             )
         structured_result = await try_structured_table_query(
             db,

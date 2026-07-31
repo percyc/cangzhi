@@ -58,6 +58,7 @@ MAX_FILTERS = 8
 MAX_REFERENCE_ROWS = 200
 MAX_PROFILE_DISTINCT_VALUES = 500
 MAX_PROFILE_SAMPLES = 8
+MAX_DATASET_DISCOVERY_DOCUMENTS = 12
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,32 @@ class TableQueryResult:
 
 def is_structured_table_question(question: str) -> bool:
     return bool(_STRUCTURED_INTENT_RE.search(question or ""))
+
+
+async def candidate_dataset_document_ids(
+    db: AsyncSession,
+    *,
+    filters: dict[str, Any],
+    limit: int = MAX_DATASET_DISCOVERY_DOCUMENTS,
+) -> list[int]:
+    """Return in-scope dataset documents when chunk discovery has no hit."""
+
+    from ..models.documents import Document
+    from .search import _apply_filters
+
+    stmt = (
+        select(Document.id)
+        .join(KnowledgeDataset, KnowledgeDataset.document_id == Document.id)
+        .where(
+            Document.is_deleted.is_(False),
+            Document.current_version_id == KnowledgeDataset.document_version_id,
+        )
+        .distinct()
+        .order_by(Document.id.desc())
+        .limit(max(1, min(limit, MAX_DATASET_DISCOVERY_DOCUMENTS)))
+    )
+    stmt = _apply_filters(stmt, filters)
+    return [int(document_id) for document_id in (await db.scalars(stmt)).all()]
 
 
 def _parse_semantic_row(
