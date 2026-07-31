@@ -43,6 +43,10 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     item = created.json()["item"]
     assert token.startswith("cz_pat_")
     assert token not in str(item)
+    integration = created.json()["integration"]
+    assert integration["api_path"] == "/api/v1"
+    assert integration["mcp_path"] == "/api/mcp"
+    assert integration["authorization_header"] == f"Bearer {token}"
 
     listed = test_client.get("/api/access-tokens")
     assert listed.status_code == 200
@@ -121,8 +125,14 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         json={"username": "owner", "password": "a-strong-password"},
     )
     assert login.status_code == 200
+    active_delete = test_client.delete(f"/api/access-tokens/{item['id']}")
+    assert active_delete.status_code == 409
+    assert active_delete.json()["detail"]["code"] == "token_must_be_revoked"
     revoked = test_client.post(f"/api/access-tokens/{item['id']}/revoke")
     assert revoked.status_code == 200
+    deleted = test_client.delete(f"/api/access-tokens/{item['id']}")
+    assert deleted.status_code == 204
+    assert test_client.get("/api/access-tokens").json()["items"] == []
     test_client.cookies.clear()
     assert (
         test_client.get("/api/v1/capabilities", headers=headers).status_code

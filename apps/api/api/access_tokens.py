@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,6 +119,13 @@ async def create_access_token(
         "token": plaintext,
         "item": row.to_public_dict(),
         "notice": "令牌只显示这一次，请立即保存。",
+        "integration": {
+            # The browser supplies its public origin. A reverse proxy may
+            # otherwise make request.base_url point at an internal hostname.
+            "api_path": "/api/v1",
+            "mcp_path": "/api/mcp",
+            "authorization_header": f"Bearer {plaintext}",
+        },
     }
 
 
@@ -146,3 +153,41 @@ async def revoke_access_token(
         await db.commit()
         await db.refresh(row)
     return {"item": row.to_public_dict()}
+
+
+@router.delete("/{token_id}", status_code=204)
+async def delete_access_token(
+    token_id: int,
+    admin: Admin = Depends(require_admin),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> Response:
+    """Permanently remove a revoked token record.
+
+    Active credentials must be revoked first so an accidental delete can never
+    be mistaken for a harmless list cleanup.
+    """
+
+    row = (
+        await db.execute(
+            select(PersonalAccessToken).where(
+                PersonalAccessToken.id == token_id,
+                PersonalAccessToken.admin_id == admin.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "token_not_found", "message": "访问令牌不存在"},
+        )
+    if row.revoked_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "token_must_be_revoked",
+                "message": "请先撤销令牌，再永久删除记录",
+            },
+        )
+    await db.delete(row)
+    await db.commit()
+    return Response(status_code=204)

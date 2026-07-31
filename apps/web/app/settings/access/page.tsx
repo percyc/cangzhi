@@ -20,6 +20,12 @@ type TokenList = {
   available_scopes: string[];
 };
 
+type IntegrationInfo = {
+  base_url: string;
+  mcp_url: string;
+  authorization_header: string;
+};
+
 const scopeLabels: Record<string, string> = {
   'knowledge:read': '读取文档',
   'knowledge:search': '检索知识',
@@ -34,10 +40,12 @@ export default function AccessSettingsPage() {
     'knowledge:search',
   ]);
   const [plaintext, setPlaintext] = useState<string | null>(null);
+  const [integration, setIntegration] = useState<IntegrationInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -78,15 +86,64 @@ export default function AccessSettingsPage() {
       const body = (await response.json()) as {
         token: string;
         item: AccessToken;
+        integration: {
+          api_path: string;
+          mcp_path: string;
+          authorization_header: string;
+        };
       };
       setPlaintext(body.token);
+      const publicBaseUrl = window.location.origin;
+      setIntegration({
+        base_url: publicBaseUrl,
+        mcp_url: `${publicBaseUrl}${body.integration.mcp_path}`,
+        authorization_header: body.integration.authorization_header,
+      });
       setItems((current) => [body.item, ...current]);
       setName('');
-      setCopied(false);
+      setCopiedKey(null);
+      setCopyError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '创建令牌失败');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const deleteToken = async (item: AccessToken) => {
+    if (!item.revoked_at) {
+      setError('有效令牌不能直接删除，请先撤销');
+      return;
+    }
+    if (
+      !window.confirm(
+        `永久删除“${item.name}”的令牌记录吗？删除后不可恢复。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const response = await fetch(`/api/access-tokens/${item.id}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) throw new Error(await errorMessage(response));
+      setItems((current) => current.filter((value) => value.id !== item.id));
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '删除令牌失败');
+    }
+  };
+
+  const copy = async (key: string, value: string) => {
+    try {
+      await copyText(value);
+      setCopiedKey(key);
+      setCopyError(null);
+      window.setTimeout(() => {
+        setCopiedKey((current) => (current === key ? null : current));
+      }, 1800);
+    } catch {
+      setCopyError('浏览器阻止了自动复制，请长按或选中文本手动复制。');
     }
   };
 
@@ -218,9 +275,18 @@ export default function AccessSettingsPage() {
                       </p>
                     </div>
                     {item.revoked_at ? (
-                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-500">
-                        已撤销
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] text-slate-500">
+                          已撤销
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void deleteToken(item)}
+                          className="text-xs text-red-600 hover:underline"
+                        >
+                          删除
+                        </button>
+                      </div>
                     ) : (
                       <button
                         type="button"
@@ -267,13 +333,13 @@ export default function AccessSettingsPage() {
         </p>
       </section>
 
-      {plaintext && (
+      {plaintext && integration && (
         <div
           role="dialog"
           aria-modal="true"
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm"
         >
-          <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
             <p className="text-xs font-semibold uppercase tracking-[0.15em] text-amber-700">
               仅显示一次
             </p>
@@ -283,23 +349,85 @@ export default function AccessSettingsPage() {
             <p className="mt-2 text-sm leading-6 text-slate-500">
               关闭后无法再次查看。如遗失，请撤销并重新创建。
             </p>
-            <pre className="mt-4 overflow-x-auto rounded-xl bg-slate-950 p-4 text-xs leading-6 text-emerald-300">
-              {plaintext}
-            </pre>
-            <div className="mt-5 flex justify-end gap-2">
+            <CopyBlock
+              className="mt-4"
+              label="访问令牌"
+              value={plaintext}
+              copied={copiedKey === 'token'}
+              onCopy={() => void copy('token', plaintext)}
+              tone="dark"
+            />
+
+            <div className="mt-6 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+              <h3 className="text-sm font-semibold text-slate-900">
+                远程 MCP 配置
+              </h3>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                在 Hermes、OpenClaw 或其他支持远程 MCP 的平台中填写以下地址和请求头。
+              </p>
+              <CopyBlock
+                className="mt-4"
+                label="MCP URL"
+                value={integration.mcp_url}
+                copied={copiedKey === 'mcp-url'}
+                onCopy={() => void copy('mcp-url', integration.mcp_url)}
+              />
+              <CopyBlock
+                className="mt-3"
+                label="认证请求头"
+                value={`Authorization: ${integration.authorization_header}`}
+                copied={copiedKey === 'auth-header'}
+                onCopy={() =>
+                  void copy(
+                    'auth-header',
+                    `Authorization: ${integration.authorization_header}`,
+                  )
+                }
+              />
+              <CopyBlock
+                className="mt-3"
+                label="通用 JSON 配置"
+                value={mcpConfig(integration)}
+                copied={copiedKey === 'mcp-json'}
+                onCopy={() => void copy('mcp-json', mcpConfig(integration))}
+                multiline
+              />
+              <p className="mt-2 text-[11px] leading-5 text-slate-400">
+                不同平台的顶层字段名称可能略有差异，但 URL、传输方式和请求头保持一致。
+              </p>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 p-4">
+              <h3 className="text-sm font-semibold text-slate-900">
+                CLI / Skill 环境变量
+              </h3>
+              <CopyBlock
+                className="mt-3"
+                label="Shell 配置"
+                value={shellConfig(integration, plaintext)}
+                copied={copiedKey === 'shell'}
+                onCopy={() =>
+                  void copy('shell', shellConfig(integration, plaintext))
+                }
+                multiline
+              />
+            </div>
+
+            {copyError && (
+              <p className="mt-4 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                {copyError}
+              </p>
+            )}
+
+            <div className="mt-5 flex justify-end">
               <button
                 type="button"
-                onClick={async () => {
-                  await navigator.clipboard.writeText(plaintext);
-                  setCopied(true);
+                onClick={() => {
+                  setPlaintext(null);
+                  setIntegration(null);
+                  setCopiedKey(null);
+                  setCopyError(null);
                 }}
-                className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-              >
-                {copied ? '已复制' : '复制令牌'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setPlaintext(null)}
                 className="rounded-xl bg-slate-950 px-4 py-2 text-sm text-white"
               >
                 我已保存
@@ -312,6 +440,57 @@ export default function AccessSettingsPage() {
   );
 }
 
+function CopyBlock({
+  label,
+  value,
+  copied,
+  onCopy,
+  multiline = false,
+  tone = 'light',
+  className = '',
+}: {
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+  multiline?: boolean;
+  tone?: 'light' | 'dark';
+  className?: string;
+}) {
+  const dark = tone === 'dark';
+  return (
+    <div className={className}>
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <span
+          className={`text-xs font-medium ${
+            dark ? 'text-slate-600' : 'text-slate-500'
+          }`}
+        >
+          {label}
+        </span>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+        >
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+      <pre
+        className={`select-all overflow-x-auto rounded-xl p-3 text-xs leading-5 ${
+          multiline ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'
+        } ${
+          dark
+            ? 'bg-slate-950 text-emerald-300'
+            : 'border border-slate-200 bg-white text-slate-700'
+        }`}
+      >
+        {value}
+      </pre>
+    </div>
+  );
+}
+
 function Endpoint({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-3">
@@ -319,6 +498,51 @@ function Endpoint({ label, value }: { label: string; value: string }) {
       <dd className="mt-1 font-mono text-slate-700">{value}</dd>
     </div>
   );
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error('copy failed');
+}
+
+function mcpConfig(integration: IntegrationInfo) {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        cangzhi: {
+          type: 'streamable-http',
+          url: integration.mcp_url,
+          headers: {
+            Authorization: integration.authorization_header,
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function shellConfig(integration: IntegrationInfo, token: string) {
+  return [
+    `export CANGZHI_URL='${integration.base_url}'`,
+    `export CANGZHI_TOKEN='${token}'`,
+  ].join('\n');
 }
 
 async function errorMessage(response: Response) {
