@@ -3,7 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libreoffice-writer \
+    && apt-get install -y --no-install-recommends \
+        fonts-liberation \
+        fonts-noto-cjk \
+        libreoffice-writer \
     && rm -rf /var/lib/apt/lists/*
 
 COPY apps/api/requirements.txt ./apps/api/
