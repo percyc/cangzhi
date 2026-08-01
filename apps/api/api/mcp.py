@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field, ValidationError
@@ -19,6 +19,7 @@ from ..services.dataset_execution import (
     list_visible_datasets,
     preview_dataset,
 )
+from ..services.deep_analysis import DeepAnalysisService
 from ..services.knowledge_read import (
     KnowledgeReadError,
     read_current_chunk,
@@ -61,6 +62,7 @@ class SearchArguments(BaseModel):
 
 class AskArguments(BaseModel):
     question: str = Field(min_length=1, max_length=500)
+    mode: Literal["quick", "deep"] = "quick"
     scope_id: int | None = Field(default=None, ge=1)
     scope_slug: str | None = Field(default=None, max_length=128)
     category_ids: list[int] = Field(default_factory=list)
@@ -153,6 +155,7 @@ TOOLS = [
         "description": (
             "由藏知检索并回答问题，返回可核验引用。表格的筛选、明细、统计、"
             "分组和排序会优先使用精确计算；需要完整答案时优先使用本工具。"
+            "mode=quick 为默认单轮问答；mode=deep 会进行最多 5 次受控只读工具调用。"
         ),
         "inputSchema": AskArguments.model_json_schema(),
         "annotations": {
@@ -418,7 +421,12 @@ async def _call_tool(
                 document_ids=args.document_ids,
             )
             provider = await build_provider_from_db(db)
-            result = await QAService(provider).ask(
+            service = (
+                DeepAnalysisService(provider)
+                if args.mode == "deep"
+                else QAService(provider)
+            )
+            result = await service.ask(
                 db,
                 AskRequest(
                     question=args.question.strip(),

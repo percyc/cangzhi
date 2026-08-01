@@ -31,6 +31,7 @@ from apps.api.models.taxonomy import (
 )
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
+from apps.api.services.deep_analysis import DeepAnalysisService
 from apps.api.services.qa import (
     AskError,
     AskRequest,
@@ -371,6 +372,183 @@ def test_qa_service_returns_cited_answer(qa_db):
     assert citation["document_id"]
     assert citation["title"] == "向量检索"
     assert "向量检索" in citation["snippet"]
+
+
+def test_deep_analysis_plans_multiple_searches_and_exposes_bounded_trace(qa_db):
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="向量检索",
+            body="向量检索负责语义召回，关键词检索负责精确词匹配。",
+            heading="检索策略",
+        )
+        provider = StubProvider()
+        provider.json_responses.append(
+            {
+                "search_queries": ["向量检索", "关键词检索"],
+                "use_dataset_query": False,
+                "summary": "分别检索两类召回方式后综合比较",
+            }
+        )
+        provider.queue(
+            AnswerResult(
+                answer="应结合向量召回与关键词匹配。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            return await DeepAnalysisService(provider).ask(
+                session,
+                AskRequest(question="向量检索和关键词检索应该如何配合？"),
+            ), provider
+
+    result, provider = asyncio.run(_run())
+
+    assert result.retrieval["mode"] == "deep_analysis"
+    analysis = result.retrieval["analysis"]
+    assert analysis["tool_calls"] == 3  # original question plus two planned queries
+    assert analysis["tool_calls"] <= analysis["max_tool_calls"]
+    assert all(step["tool"] == "knowledge_search" for step in analysis["steps"])
+    assert result.citations[0]["title"] == "向量检索"
+    assert len(provider.json_calls) == 1
+
+
+def test_deep_analysis_degrades_to_original_query_when_planner_fails(qa_db):
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="知识切片",
+            body="知识切片需要保留标题路径和相邻段落。",
+        )
+        provider = StubProvider()
+        provider.queue(
+            AnswerResult(
+                answer="切片应保留标题路径和相邻段落。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            return await DeepAnalysisService(provider).ask(
+                session,
+                AskRequest(question="知识切片要保留什么？"),
+            )
+
+    result = asyncio.run(_run())
+
+    assert result.retrieval["mode"] == "deep_analysis"
+    assert result.retrieval["analysis"]["tool_calls"] == 1
+    assert "规划不可用" in result.retrieval["degraded_reason"]
+
+
+def test_deep_analysis_rejects_fabricated_citation(qa_db):
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="引用校验",
+            body="回答必须引用真实知识片段。",
+        )
+        provider = StubProvider()
+        provider.json_responses.append(
+            {
+                "search_queries": ["引用校验"],
+                "use_dataset_query": False,
+                "summary": "核验引用规则",
+            }
+        )
+        provider.queue(
+            AnswerResult(
+                answer="这是一条伪造引用的回答。",
+                citation_ids=[999],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            return await DeepAnalysisService(provider).ask(
+                session,
+                AskRequest(question="如何校验引用？"),
+            )
+
+    with pytest.raises(AskError) as exc_info:
+        asyncio.run(_run())
+    assert exc_info.value.code == "provider_failed"
+
+
+def test_quick_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
+    import apps.api.services.qa as qa_service_module
+    import apps.api.services.knowledge_scopes as scope_service_module
+
+    captured: dict[str, list[int]] = {}
+
+    async def connector_documents(_db, _connector_ids):
+        return [42]
+
+    async def table_query(_db, *, provider, question, document_ids):
+        captured["document_ids"] = document_ids
+        return None
+
+    monkeypatch.setattr(
+        scope_service_module,
+        "resolve_connector_document_ids",
+        connector_documents,
+    )
+    monkeypatch.setattr(qa_service_module, "try_structured_table_query", table_query)
+
+    async def _run():
+        async with qa_db() as session:
+            return await QAService(StubProvider()).ask(
+                session,
+                AskRequest(
+                    question="按类别统计金额",
+                    connector_ids=[7],
+                ),
+            )
+
+    result = asyncio.run(_run())
+    assert result.insufficient_evidence is True
+    assert captured["document_ids"] == [42]
+
+
+def test_deep_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
+    import apps.api.services.deep_analysis as deep_service_module
+    import apps.api.services.knowledge_scopes as scope_service_module
+
+    captured: dict[str, list[int]] = {}
+
+    async def connector_documents(_db, _connector_ids):
+        return [84]
+
+    async def table_query(_db, *, provider, question, document_ids):
+        captured["document_ids"] = document_ids
+        return None
+
+    monkeypatch.setattr(
+        scope_service_module,
+        "resolve_connector_document_ids",
+        connector_documents,
+    )
+    monkeypatch.setattr(deep_service_module, "try_structured_table_query", table_query)
+
+    provider = StubProvider()
+    provider.json_responses.append(
+        {
+            "search_queries": ["金额统计"],
+            "use_dataset_query": True,
+            "summary": "精确统计连接器内的数据",
+        }
+    )
+
+    async def _run():
+        async with qa_db() as session:
+            return await DeepAnalysisService(provider).ask(
+                session,
+                AskRequest(question="按类别统计金额", connector_ids=[9]),
+            )
+
+    result = asyncio.run(_run())
+    assert result.insufficient_evidence is True
+    assert captured["document_ids"] == [84]
 
 
 def test_qa_service_uses_exact_structured_table_calculation(qa_db):
@@ -853,6 +1031,42 @@ def test_ask_endpoint_returns_cited_answer(qa_db):
     assert body["insufficient_evidence"] is False
     assert body["citations"][0]["title"] == "向量检索"
     assert body["evidence"][0]["document_id"]
+
+
+def test_ask_endpoint_accepts_deep_mode(qa_db):
+    asyncio.run(
+        _seed_document(
+            qa_db,
+            title="混合检索",
+            body="混合检索结合关键词与向量召回。",
+        )
+    )
+    provider = StubProvider()
+    provider.json_responses.append(
+        {
+            "search_queries": ["混合检索"],
+            "use_dataset_query": False,
+            "summary": "检索实现依据",
+        }
+    )
+    provider.queue(
+        AnswerResult(
+            answer="混合检索结合关键词与向量召回。",
+            citation_ids=[1],
+            insufficient_evidence=False,
+        )
+    )
+    original = _override_provider(provider)
+    try:
+        response = TestClient(app).post(
+            "/api/ask",
+            json={"question": "混合检索是什么？", "mode": "deep"},
+        )
+    finally:
+        _restore_provider(original)
+
+    assert response.status_code == 200
+    assert response.json()["retrieval"]["mode"] == "deep_analysis"
 
 
 def test_ask_endpoint_rejects_fabricated_citation(qa_db):

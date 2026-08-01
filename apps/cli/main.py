@@ -162,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     ask = commands.add_parser("ask", help="由藏知模型生成带引用的回答")
     ask.add_argument("question")
+    ask.add_argument(
+        "--deep",
+        action="store_true",
+        help="启用受控多步检索与数据集精确计算",
+    )
     _add_scope_options(ask)
 
     document = commands.add_parser("document", help="读取当前文档内容")
@@ -193,7 +198,11 @@ def run(args: argparse.Namespace, client: CangzhiClient) -> dict[str, Any]:
         return client.request(
             "POST",
             "/api/v1/knowledge/ask",
-            payload={"question": args.question, **_scope_payload(args)},
+            payload={
+                "question": args.question,
+                "mode": "deep" if args.deep else "quick",
+                **_scope_payload(args),
+            },
         )
     if args.command == "document":
         return client.request("GET", f"/api/v1/knowledge/documents/{args.id}")

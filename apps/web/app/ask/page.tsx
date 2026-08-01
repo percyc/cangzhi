@@ -49,6 +49,18 @@ type AskResponse = {
       group_by?: string[];
       warnings?: string[];
     };
+    analysis?: {
+      plan_summary?: string;
+      tool_calls: number;
+      max_tool_calls: number;
+      steps: Array<{
+        tool: string;
+        label: string;
+        status: string;
+        result_count?: number;
+        detail?: string;
+      }>;
+    };
   };
   scope?: { slug: string };
 };
@@ -100,6 +112,7 @@ type Turn = {
   question: string;
   response: AskResponse;
   contextLabel: string;
+  mode: 'quick' | 'deep';
 };
 
 const ASK_SESSION_KEY = 'cangzhi:ask-session:v1';
@@ -124,6 +137,7 @@ function AskSkeleton() {
 function AskClient() {
   const searchParams = useSearchParams();
   const [question, setQuestion] = useState(searchParams.get('q') ?? '');
+  const [mode, setMode] = useState<'quick' | 'deep'>('quick');
   const [scopeSlug, setScopeSlug] = useState('all');
   const [scopes, setScopes] = useState<KnowledgeScope[]>([]);
   const [facets, setFacets] = useState<FacetCatalog | null>(null);
@@ -152,6 +166,7 @@ function AskClient() {
             sourceTypes?: string[];
             connectorIds?: number[];
             question?: string;
+            mode?: 'quick' | 'deep';
           };
           if (Array.isArray(value.turns)) setTurns(value.turns.slice(-20));
           if (typeof value.scopeSlug === 'string') setScopeSlug(value.scopeSlug);
@@ -163,6 +178,7 @@ function AskClient() {
           if (!searchParams.get('q') && typeof value.question === 'string') {
             setQuestion(value.question);
           }
+          if (value.mode === 'quick' || value.mode === 'deep') setMode(value.mode);
         }
       } catch {
         window.sessionStorage.removeItem(ASK_SESSION_KEY);
@@ -185,6 +201,7 @@ function AskClient() {
         sourceTypes,
         connectorIds,
         question,
+        mode,
       }),
     );
   }, [
@@ -195,6 +212,7 @@ function AskClient() {
     sourceTypes,
     connectorIds,
     question,
+    mode,
     sessionReady,
   ]);
 
@@ -252,6 +270,7 @@ function AskClient() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question: trimmed,
+          mode,
           scope_slug: scopeSlug,
           category_ids: categoryIds,
           tag_ids: tagIds,
@@ -275,6 +294,7 @@ function AskClient() {
           question: trimmed,
           response: body as AskResponse,
           contextLabel,
+          mode,
         },
       ]);
       setQuestion('');
@@ -350,6 +370,27 @@ function AskClient() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <div className="flex rounded-xl bg-slate-100 p-1" aria-label="问答模式">
+              {(['quick', 'deep'] as const).map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setMode(item)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                    mode === item
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                  title={
+                    item === 'quick'
+                      ? '一次检索后快速回答'
+                      : '规划并调用多次检索或表格计算后回答'
+                  }
+                >
+                  {item === 'quick' ? '快速问答' : '深度分析'}
+                </button>
+              ))}
+            </div>
             <select
               value={scopeSlug}
               onChange={(event) => changeScope(event.target.value)}
@@ -419,7 +460,9 @@ function AskClient() {
               <div className="flex gap-3">
                 <AssistantMark />
                 <div className="rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm">
-                  正在检索、核对出处并组织回答…
+                  {mode === 'deep'
+                    ? '正在规划检索、调用知识工具并核对出处…'
+                    : '正在检索、核对出处并组织回答…'}
                 </div>
               </div>
             )}
@@ -475,7 +518,9 @@ function AskClient() {
             </button>
           </form>
           <p className="mt-2 text-center text-[11px] text-slate-400">
-            Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文
+            {mode === 'deep'
+              ? '深度分析最多调用 5 次只读工具 · 回答可能有误，请核对引用原文'
+              : 'Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文'}
           </p>
         </footer>
       </section>
@@ -772,12 +817,53 @@ function ConversationTurn({ turn }: { turn: Turn }) {
             </ReactMarkdown>
           </div>
           <ResultMeta response={turn.response} contextLabel={turn.contextLabel} />
+          {turn.response.retrieval?.analysis && (
+            <AnalysisTrace analysis={turn.response.retrieval.analysis} />
+          )}
           {turn.response.citations.length > 0 && (
             <CitationList citations={turn.response.citations} />
           )}
         </div>
       </div>
     </article>
+  );
+}
+
+function AnalysisTrace({
+  analysis,
+}: {
+  analysis: NonNullable<NonNullable<AskResponse['retrieval']>['analysis']>;
+}) {
+  return (
+    <details className="mt-3 rounded-2xl border border-indigo-100 bg-indigo-50/50">
+      <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-indigo-800">
+        深度分析过程 · {analysis.tool_calls} 次工具调用
+      </summary>
+      <div className="border-t border-indigo-100 px-4 py-3">
+        {analysis.plan_summary && (
+          <p className="mb-2 text-xs text-slate-600">{analysis.plan_summary}</p>
+        )}
+        <ol className="space-y-2">
+          {analysis.steps.map((step, index) => (
+            <li key={`${step.tool}-${index}`} className="flex gap-2 text-xs">
+              <span className="text-slate-400">{index + 1}.</span>
+              <div className="min-w-0">
+                <span className="font-medium text-slate-700">{step.label}</span>
+                <span className="ml-2 text-slate-400">
+                  {step.status === 'skipped'
+                    ? '无需执行'
+                    : step.status === 'degraded'
+                      ? '已降级'
+                      : step.result_count === undefined
+                        ? '已完成'
+                        : `得到 ${step.result_count} 条结果`}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </details>
   );
 }
 
@@ -792,7 +878,9 @@ function ResultMeta({
     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
       <span>范围：{contextLabel}</span>
       <span>
-        {response.retrieval?.mode === 'structured_table'
+        {response.retrieval?.mode === 'deep_analysis'
+          ? `深度分析 · ${response.retrieval.analysis?.tool_calls ?? 0} 次工具调用`
+          : response.retrieval?.mode === 'structured_table'
           ? `表格精确计算 · ${response.retrieval.structured_table?.matched_rows ?? 0} 行`
           : response.retrieval?.vector_used
             ? '混合检索'

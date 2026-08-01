@@ -16,7 +16,7 @@ in ``docs/ROADMAP.md`` M3 follow-ups.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..ai import build_provider_from_db
 from ..core.db import get_db
 from ..models.documents import DocumentSourceType
+from ..services.deep_analysis import DeepAnalysisService
 from ..services.qa import (
     MAX_QUESTION_LENGTH,
     AskError,
@@ -49,11 +50,14 @@ _ASK_ERROR_STATUS = {
 
 class AskPayload(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
+    mode: Literal["quick", "deep"] = "quick"
     category_ids: list[int] = Field(default_factory=list)
     category_slugs: list[str] = Field(default_factory=list)
     tag_ids: list[int] = Field(default_factory=list)
     tag_slugs: list[str] = Field(default_factory=list)
     source_types: list[str] = Field(default_factory=list)
+    connector_ids: list[int] = Field(default_factory=list)
+    document_ids: list[int] = Field(default_factory=list)
 
     @field_validator("source_types")
     @classmethod
@@ -90,6 +94,8 @@ class AskPayload(BaseModel):
             tag_ids=list(self.tag_ids),
             tag_slugs=list(self.tag_slugs),
             source_types=list(self.source_types),
+            connector_ids=list(self.connector_ids),
+            document_ids=list(self.document_ids),
         )
 
 
@@ -99,7 +105,11 @@ async def ask_post(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     provider = await build_provider_from_db(db)
-    service = QAService(provider)
+    service = (
+        DeepAnalysisService(provider)
+        if payload.mode == "deep"
+        else QAService(provider)
+    )
     if not service.is_provider_configured:
         # The retrieval layer does not need the model, but asking
         # without a configured model would just return

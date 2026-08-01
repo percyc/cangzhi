@@ -242,7 +242,7 @@ class QAService:
                 "尚未配置问答模型，请先完成模型设置",
             )
 
-        evidence, retrieval = await self._collect_evidence(
+        evidence, retrieval = await self.collect_evidence(
             db,
             question=question,
             category_ids=request.category_ids,
@@ -255,9 +255,28 @@ class QAService:
             matches_none=request.matches_none,
         )
         assert self._provider is not None  # checked above
+        table_matches_none = request.matches_none
         candidate_table_document_ids = (
-            [] if request.matches_none else list(request.document_ids)
+            [] if table_matches_none else list(request.document_ids)
         )
+        if request.connector_ids and not table_matches_none:
+            from .knowledge_scopes import resolve_connector_document_ids
+
+            connector_document_ids = await resolve_connector_document_ids(
+                db, request.connector_ids
+            )
+            if not connector_document_ids:
+                table_matches_none = True
+                candidate_table_document_ids = []
+            elif candidate_table_document_ids:
+                candidate_table_document_ids = sorted(
+                    set(candidate_table_document_ids).intersection(
+                        connector_document_ids
+                    )
+                )
+                table_matches_none = not candidate_table_document_ids
+            else:
+                candidate_table_document_ids = connector_document_ids
         if not candidate_table_document_ids:
             candidate_table_document_ids = list(
                 dict.fromkeys(
@@ -267,7 +286,7 @@ class QAService:
         if (
             not candidate_table_document_ids
             and is_structured_table_question(question)
-            and not request.matches_none
+            and not table_matches_none
         ):
             candidate_table_document_ids = await candidate_dataset_document_ids(
                 db,
@@ -395,7 +414,7 @@ class QAService:
 
     # ---- evidence retrieval ------------------------------------------------
 
-    async def _collect_evidence(
+    async def collect_evidence(
         self,
         db: AsyncSession,
         *,

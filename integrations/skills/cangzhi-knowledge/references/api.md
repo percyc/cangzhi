@@ -30,6 +30,10 @@ Search body:
 Only send one of `scope_slug` and `scope_id`. Request-time filters narrow a
 saved scope by intersection; they never broaden it.
 
+Ask body accepts `mode: "quick"` (default) or `mode: "deep"`. Deep mode uses
+a bounded internal tool plan and includes `retrieval.analysis.steps`; use it
+for cross-document comparison or complex table analysis, not routine lookup.
+
 Use `facets` to discover valid category, tag, source-type, and connector IDs
 before adding request-time filters. Options in the same dimension use OR
 semantics; different dimensions use AND semantics.

@@ -69,6 +69,35 @@ def test_facets_command_uses_stable_catalog_endpoint():
     assert client.calls == [("GET", "/api/v1/knowledge/facets", None)]
 
 
+def test_ask_command_can_select_deep_analysis():
+    client = StubClient()
+    args = argparse.Namespace(
+        command="ask",
+        question="比较两份方案",
+        deep=True,
+        scope="all",
+        scope_id=None,
+        category_ids=None,
+        tag_ids=None,
+        source_types=None,
+        connector_ids=None,
+        document_ids=None,
+    )
+
+    assert run(args, client) == {"ok": True}
+    assert client.calls == [
+        (
+            "POST",
+            "/api/v1/knowledge/ask",
+            {
+                "question": "比较两份方案",
+                "mode": "deep",
+                "scope_slug": "all",
+            },
+        )
+    ]
+
+
 def test_missing_token_is_machine_readable(capsys):
     assert main(["capabilities"]) == 2
     error = json.loads(capsys.readouterr().err)

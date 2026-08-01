@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ from ..services.dataset_execution import (
     get_dataset_schema,
     preview_dataset,
 )
+from ..services.deep_analysis import DeepAnalysisService
 from ..services.knowledge_read import (
     KnowledgeReadError,
     read_current_chunk,
@@ -60,6 +61,7 @@ class KnowledgeSearchPayload(ScopeSelector):
 
 class KnowledgeAskPayload(ScopeSelector):
     question: str = Field(min_length=1, max_length=500)
+    mode: Literal["quick", "deep"] = "quick"
 
 
 class DatasetQueryPayload(BaseModel):
@@ -113,6 +115,7 @@ async def capabilities(
             "vector_search": True,
             "cited_qa": True,
             "structured_table_qa": True,
+            "deep_analysis": True,
             "dataset_catalog": True,
             "dataset_query": True,
             "dataset_execution_backend": "duckdb_parquet",
@@ -265,7 +268,11 @@ async def knowledge_ask(
 ) -> dict[str, Any]:
     scope = await _resolve_scope(db, payload)
     provider = await build_provider_from_db(db)
-    service = QAService(provider)
+    service = (
+        DeepAnalysisService(provider)
+        if payload.mode == "deep"
+        else QAService(provider)
+    )
     try:
         result = await service.ask(
             db,
