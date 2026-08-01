@@ -53,7 +53,11 @@ def _seed_and_build(path: Path) -> tuple[int, int]:
         session.add_all(
             [
                 DatasetField(
-                    dataset_id=dataset.id, position=0, name="地区", inferred_type="text"
+                    dataset_id=dataset.id,
+                    position=0,
+                    name="地区",
+                    inferred_type="text",
+                    sample_values=["华东", "全国-华东", "全国-华南"],
                 ),
                 DatasetField(
                     dataset_id=dataset.id,
@@ -194,6 +198,46 @@ def test_dataset_query_aggregates_only_direct_hierarchy_children(tmp_path: Path)
     result = asyncio.run(run())
     assert result["matched_row_count"] == 2
     assert result["rows"] == [{"metric": 70.0, "matched_rows": 2}]
+
+
+def test_zero_parent_query_returns_generic_hierarchy_recovery_hint(tmp_path: Path):
+    _document_id, dataset_id = _seed_and_build(tmp_path)
+
+    async def run():
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'builder.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            result = await execute_dataset_query(
+                session,
+                dataset_id,
+                {
+                    "filters": [{"column": "地区", "operator": "eq", "value": "全国"}],
+                    "columns": ["地区", "金额"],
+                    "limit": 10,
+                },
+                storage_root=tmp_path / "storage",
+            )
+        await engine.dispose()
+        return result
+
+    result = asyncio.run(run())
+    assert result["matched_row_count"] == 0
+    assert result["query_hints"] == [
+        {
+            "type": "hierarchy_children_available",
+            "message": (
+                "精确父级没有记录，但字段样例显示存在下级路径；"
+                "可保留其他筛选条件，将该条件改为 direct_child_of 验证直属子级。"
+            ),
+            "suggested_filter": {
+                "column": "地区",
+                "operator": "direct_child_of",
+                "value": "全国",
+            },
+        }
+    ]
 
 
 def test_query_plan_rejects_unknown_columns(tmp_path: Path):

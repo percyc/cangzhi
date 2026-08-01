@@ -244,6 +244,8 @@ TOOLS = [
             "filters 每项使用 column、operator、value；operator 支持 "
             "eq/ne/gt/gte/lt/lte/contains/starts_with/ends_with/"
             "direct_child_of/in。direct_child_of 用于安全选择层级路径的直属子级。"
+            "零结果时应检查响应中的 query_hints，并按 suggested_filter 调整后继续查询；"
+            "不要因为首次精确查询为空就结束探索。"
         ),
         "inputSchema": DatasetQueryArguments.model_json_schema(),
         "annotations": {

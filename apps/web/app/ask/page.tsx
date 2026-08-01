@@ -30,6 +30,14 @@ type Citation = {
   snippet: string;
 };
 
+type AnalysisStep = {
+  tool: string;
+  label: string;
+  status: string;
+  result_count?: number;
+  detail?: string;
+};
+
 type AskResponse = {
   question: string;
   answer: string;
@@ -54,13 +62,7 @@ type AskResponse = {
       iterations?: number;
       tool_calls: number;
       max_tool_calls: number;
-      steps: Array<{
-        tool: string;
-        label: string;
-        status: string;
-        result_count?: number;
-        detail?: string;
-      }>;
+      steps: AnalysisStep[];
     };
   };
   scope?: { slug: string };
@@ -116,6 +118,30 @@ type Turn = {
   mode: 'quick' | 'deep';
 };
 
+type LiveAnalysis = {
+  question: string;
+  contextLabel: string;
+  message: string;
+  steps: AnalysisStep[];
+  toolCalls: number;
+  maxToolCalls: number;
+  iterations?: number;
+};
+
+type AskStreamEvent =
+  | {
+      type: 'progress';
+      phase: string;
+      message?: string;
+      step?: AnalysisStep;
+      tool_calls?: number;
+      max_tool_calls?: number;
+      iterations?: number;
+    }
+  | { type: 'heartbeat' }
+  | { type: 'result'; data: AskResponse }
+  | { type: 'error'; error: { code?: string; message?: string } };
+
 const ASK_SESSION_KEY = 'cangzhi:ask-session:v1';
 
 export default function AskPage() {
@@ -150,9 +176,19 @@ function AskClient() {
   const [sessionReady, setSessionReady] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
+  const [liveAnalysis, setLiveAnalysis] = useState<LiveAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [providerReady, setProviderReady] = useState<boolean | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useRef(true);
+  const requestAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      requestAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -250,11 +286,13 @@ function AskClient() {
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }, [turns, loading]);
+  }, [turns, loading, liveAnalysis]);
 
   const runAsk = async () => {
     const trimmed = question.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || requestAbortRef.current) return;
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
     setLoading(true);
     setError(null);
     const contextLabel = buildContextLabel(
@@ -265,22 +303,39 @@ function AskClient() {
       sourceTypes,
       connectorIds,
     );
-    try {
-      const response = await fetch('/api/v1/knowledge/ask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: trimmed,
-          mode,
-          scope_slug: scopeSlug,
-          category_ids: categoryIds,
-          tag_ids: tagIds,
-          source_types: sourceTypes,
-          connector_ids: connectorIds,
-        }),
+    const requestBody = {
+      question: trimmed,
+      mode,
+      scope_slug: scopeSlug,
+      category_ids: categoryIds,
+      tag_ids: tagIds,
+      source_types: sourceTypes,
+      connector_ids: connectorIds,
+    };
+    if (mode === 'deep') {
+      setLiveAnalysis({
+        question: trimmed,
+        contextLabel,
+        message: '正在分析问题',
+        steps: [],
+        toolCalls: 0,
+        maxToolCalls: 8,
       });
-      const body = await response.json().catch(() => ({}));
+    }
+    try {
+      const response = await fetch(
+        mode === 'deep'
+          ? '/api/v1/knowledge/ask/stream'
+          : '/api/v1/knowledge/ask',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        },
+      );
       if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
         const detail = body?.detail;
         throw new Error(
           typeof detail === 'object'
@@ -288,6 +343,31 @@ function AskClient() {
             : (detail ?? '问答请求失败'),
         );
       }
+      const body =
+        mode === 'deep'
+          ? await readAskStream(response, (event) => {
+              if (event.type !== 'progress') return;
+              if (!mountedRef.current) return;
+              setLiveAnalysis((current) => {
+                if (!current) return current;
+                const steps = event.step
+                  ? [...current.steps, event.step]
+                  : current.steps;
+                return {
+                  ...current,
+                  message:
+                    event.message ??
+                    (event.step
+                      ? progressMessage(event.step)
+                      : current.message),
+                  steps,
+                  toolCalls: event.tool_calls ?? current.toolCalls,
+                  maxToolCalls: event.max_tool_calls ?? current.maxToolCalls,
+                  iterations: event.iterations ?? current.iterations,
+                };
+              });
+            })
+          : ((await response.json()) as AskResponse);
       setTurns((current) => [
         ...current,
         {
@@ -301,9 +381,18 @@ function AskClient() {
       setQuestion('');
       window.history.replaceState(null, '', '/ask');
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '问答失败');
+      if (reason instanceof DOMException && reason.name === 'AbortError') return;
+      if (mountedRef.current) {
+        setError(reason instanceof Error ? reason.message : '问答失败');
+      }
     } finally {
-      setLoading(false);
+      if (requestAbortRef.current === controller) {
+        requestAbortRef.current = null;
+      }
+      if (mountedRef.current) {
+        setLiveAnalysis(null);
+        setLoading(false);
+      }
     }
   };
 
@@ -457,16 +546,16 @@ function AskClient() {
             {turns.map((turn) => (
               <ConversationTurn key={turn.id} turn={turn} />
             ))}
-            {loading && (
+            {liveAnalysis ? (
+              <LiveAnalysisCard analysis={liveAnalysis} />
+            ) : loading ? (
               <div className="flex gap-3">
                 <AssistantMark />
                 <div className="rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm">
-                  {mode === 'deep'
-                    ? '正在规划检索、调用知识工具并核对出处…'
-                    : '正在检索、核对出处并组织回答…'}
+                  正在检索、核对出处并组织回答…
                 </div>
               </div>
-            )}
+            ) : null}
           </div>
           <div ref={endRef} />
         </div>
@@ -799,6 +888,105 @@ function buildContextLabel(
       .map((item) => item.name),
   ];
   return [scopeName, ...labels].join(' · ');
+}
+
+async function readAskStream(
+  response: Response,
+  onProgress: (event: Extract<AskStreamEvent, { type: 'progress' }>) => void,
+): Promise<AskResponse> {
+  if (!response.body) throw new Error('浏览器不支持流式问答');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result: AskResponse | null = null;
+  let completed = false;
+
+  const consumeLine = (line: string) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line) as AskStreamEvent;
+    if (event.type === 'progress') onProgress(event);
+    if (event.type === 'result') result = event.data;
+    if (event.type === 'error') {
+      throw new Error(event.error.message ?? '问答请求失败');
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) consumeLine(line);
+      if (done) break;
+    }
+    if (buffer.trim()) consumeLine(buffer);
+    if (!result) throw new Error('深度分析连接中断，请重试');
+    completed = true;
+    return result;
+  } finally {
+    if (!completed) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+function progressMessage(step: AnalysisStep): string {
+  if (step.status === 'degraded') return `${step.label}未完成，正在调整方案`;
+  if (step.result_count === undefined) return `${step.label}已完成`;
+  return `${step.label}，得到 ${step.result_count} 条结果`;
+}
+
+function LiveAnalysisCard({ analysis }: { analysis: LiveAnalysis }) {
+  return (
+    <article className="space-y-4">
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-slate-900 px-4 py-3 text-sm leading-6 text-white">
+          {analysis.question}
+        </div>
+      </div>
+      <div className="flex items-start gap-3">
+        <AssistantMark />
+        <div className="min-w-0 max-w-3xl flex-1 rounded-2xl rounded-tl-md border border-indigo-100 bg-white px-4 py-4 shadow-sm">
+          <div className="flex items-center gap-2 text-sm font-medium text-indigo-800">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
+            {analysis.message}
+          </div>
+          <p className="mt-1 text-[11px] text-slate-400">
+            范围：{analysis.contextLabel} · {analysis.toolCalls}/
+            {analysis.maxToolCalls} 次工具调用
+            {analysis.iterations ? ` · ${analysis.iterations} 轮决策` : ''}
+          </p>
+          {analysis.steps.length > 0 && (
+            <ol className="mt-3 space-y-2 border-t border-slate-100 pt-3">
+              {analysis.steps.map((step, index) => (
+                <li
+                  key={`${step.tool}-${index}`}
+                  className="flex items-start gap-2 text-xs"
+                >
+                  <span className="mt-0.5 text-emerald-600">✓</span>
+                  <div className="min-w-0">
+                    <span className="font-medium text-slate-700">
+                      {step.label}
+                    </span>
+                    <span className="ml-2 text-slate-400">
+                      {step.status === 'degraded'
+                        ? '正在调整'
+                        : step.result_count === undefined
+                          ? '已完成'
+                          : `${step.result_count} 条结果`}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+          <p className="mt-3 text-[11px] text-slate-400">
+            展示的是可审计工具过程，不包含模型内部思维链。
+          </p>
+        </div>
+      </div>
+    </article>
+  );
 }
 
 function ConversationTurn({ turn }: { turn: Turn }) {

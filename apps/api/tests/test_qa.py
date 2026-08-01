@@ -570,6 +570,40 @@ def test_deep_analysis_degrades_to_original_query_when_planner_fails(qa_db):
     assert "规划不可用" in result.retrieval["degraded_reason"]
 
 
+def test_deep_analysis_repairs_insufficient_answer_with_conflicting_citation(qa_db):
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="待核实资料",
+            body="资料提到了相关主题，但没有给出最终数值。",
+        )
+        provider = StubProvider()
+        provider.json_responses.extend(
+            [
+                {"action": "search", "query": "待核实资料"},
+                {"action": "finish", "summary": "没有更多可验证事实"},
+                {
+                    "answer": "当前证据没有给出可确认的最终数值。",
+                    "citation_ids": [1],
+                    "insufficient_evidence": True,
+                    "rationale": "证据只有背景说明",
+                },
+            ]
+        )
+        provider.fail_with(AIProviderError("schema conflict"))
+        provider.fail_with(AIProviderError("schema conflict"))
+        async with qa_db() as session:
+            return await DeepAnalysisService(provider).ask(
+                session, AskRequest(question="最终数值是多少？")
+            )
+
+    result = asyncio.run(_run())
+
+    assert result.insufficient_evidence is True
+    assert result.citations == []
+    assert "没有给出" in result.answer
+
+
 def test_deep_analysis_rejects_fabricated_citation(qa_db):
     async def _run():
         await _seed_document(

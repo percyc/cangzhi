@@ -1,9 +1,11 @@
 """Integration tests for the stable external knowledge API."""
 
 import asyncio
+import json
 
 from apps.api.ai import AIProvider, AnswerResult
 from apps.api.api import mcp as mcp_module
+from apps.api.api import v1 as v1_module
 from apps.api.api.auth import require_admin, reset_auth_limiters_for_tests
 from apps.api.core.db import get_db
 from apps.api.main import app
@@ -412,6 +414,95 @@ def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
     ).json()["result"]
     assert nested_deep["isError"] is True
     assert nested_deep["structuredContent"]["error"]["code"] == "invalid_arguments"
+
+
+def test_deep_ask_stream_emits_live_tool_progress_and_result(client, monkeypatch):
+    test_client, _ = client
+    _enable_real_login()
+    _setup_owner(test_client)
+
+    async def seed():
+        async for db in app.dependency_overrides[get_db]():
+            document = Document(
+                title="流式问答资料", source_type=DocumentSourceType.note
+            )
+            db.add(document)
+            await db.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="streaming-answer-version",
+                raw_content="流式问答会实时展示工具进度。",
+                processing_status="ready",
+            )
+            db.add(version)
+            await db.flush()
+            document.current_version_id = version.id
+            db.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id="streaming-answer-chunk",
+                    role="child",
+                    chunk_type="paragraph",
+                    order_index=0,
+                    content="流式问答会实时展示工具进度。",
+                    search_text="流式问答 实时展示 工具进度",
+                    content_hash="streaming-answer-chunk-hash",
+                    heading_path=[],
+                    char_count=15,
+                    token_estimate=8,
+                    is_current=True,
+                )
+            )
+            await db.commit()
+            return
+
+    asyncio.run(seed())
+
+    class Provider(AIProvider):
+        name = "stub"
+
+        def __init__(self):
+            self.decisions = [
+                {"action": "search", "query": "流式问答 工具进度"},
+                {"action": "finish", "summary": "证据充分"},
+            ]
+
+        def is_configured(self):
+            return True
+
+        def generate_understanding(self, **_):
+            raise NotImplementedError
+
+        def generate_json(self, **_):
+            return self.decisions.pop(0)
+
+        def answer_question(self, *, question, evidence):
+            return AnswerResult(
+                answer="流式问答会实时展示工具进度。",
+                citation_ids=[int(evidence[0]["id"])],
+                insufficient_evidence=False,
+            )
+
+    async def provider_from_db(_db):
+        return Provider()
+
+    monkeypatch.setattr(v1_module, "build_provider_from_db", provider_from_db)
+    with test_client.stream(
+        "POST",
+        "/api/v1/knowledge/ask/stream",
+        json={"question": "流式问答如何展示进度？", "mode": "deep"},
+    ) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert events[0]["phase"] == "starting"
+    tool_event = next(item for item in events if item.get("phase") == "tool")
+    assert tool_event["step"]["tool"] == "knowledge_search"
+    assert tool_event["tool_calls"] == 1
+    assert events[-1]["type"] == "result"
+    assert events[-1]["data"]["answer"] == "流式问答会实时展示工具进度。"
 
 
 def test_missing_saved_scope_never_broadens_to_all(client):

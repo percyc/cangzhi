@@ -63,7 +63,10 @@ MCP 的 `knowledge_ask` 固定为快速问答，不暴露 `deep`；Skill 和外�
 
 外部 Agent 应先读 schema 再生成计划。`knowledge_query_dataset` 不接收 SQL，查询由
 DuckDB 在 Parquet 上下推执行，最多返回 200 行。不要循环调用预览工具把大型 Excel
-全部塞进模型上下文；需要完整导出时应使用未来的异步导出接口，而不是 MCP 对话。
+全部塞进模型上下文。查询为零行时还应读取响应的 `query_hints`；例如层级字段存在
+直属子级而父级本身没有记录时，按 `suggested_filter` 改用 `direct_child_of` 后继续
+验证和聚合，不应把首次零结果当作最终结论。需要完整导出时应使用未来的异步导出
+接口，而不是 MCP 对话。
 
 ## 权限边界
 

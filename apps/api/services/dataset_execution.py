@@ -415,10 +415,10 @@ def _discover_literals(
                 if len(set(date_hits)) == 1:
                     matches.append((field.name, date_hits[0]))
                     continue
-            if (
-                field.inferred_type in {"number", "identifier"}
-                and field.semantic_role not in {"status", "category"}
-            ):
+            if field.inferred_type in {
+                "number",
+                "identifier",
+            } and field.semantic_role not in {"status", "category"}:
                 # A bare year or amount frequently appears somewhere in a
                 # numeric/id column by coincidence. Do not treat that as an
                 # explicit field literal unless a semantic field handled it.
@@ -825,7 +825,7 @@ async def execute_dataset_query(
                 }
                 for row in rows
             ]
-        return {
+        payload = {
             "dataset_id": dataset.id,
             "document_id": dataset.document_id,
             "artifact_version": None,
@@ -842,6 +842,8 @@ async def execute_dataset_query(
                 else ["列式产物尚未就绪，当前使用 PostgreSQL 兼容执行器"]
             ),
         }
+        payload["query_hints"] = _query_hints(query, fields, payload)
+        return payload
     path = _artifact_path(artifact, storage_root)
     try:
         result = await asyncio.wait_for(
@@ -858,13 +860,66 @@ async def execute_dataset_query(
                 "query_timeout", "数据集查询超时，请缩小筛选范围"
             ) from exc
         raise DatasetExecutionError("query_failed", f"数据集查询失败：{exc}") from exc
-    return {
+    payload = {
         "dataset_id": dataset.id,
         "document_id": dataset.document_id,
         "artifact_version": artifact.version_number,
         "warnings": [],
         **result,
     }
+    payload["query_hints"] = _query_hints(query, fields, payload)
+    return payload
+
+
+def _query_hints(
+    query: SafeDatasetQuery,
+    fields: list[DatasetField],
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return machine-readable recovery hints without changing query meaning."""
+
+    if int(result.get("matched_row_count") or 0) > 0:
+        return []
+    field_map = {field.name: field for field in fields}
+    hints: list[dict[str, Any]] = []
+    for condition in query.filters:
+        if condition.get("operator") != "eq":
+            continue
+        value = condition.get("value")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        field = field_map.get(str(condition.get("column") or ""))
+        if field is None or field.inferred_type not in {"text", "identifier"}:
+            continue
+        if not any(
+            _sample_contains_descendant(sample, value)
+            for sample in list(field.sample_values or [])
+        ):
+            continue
+        hints.append(
+            {
+                "type": "hierarchy_children_available",
+                "message": (
+                    "精确父级没有记录，但字段样例显示存在下级路径；"
+                    "可保留其他筛选条件，将该条件改为 direct_child_of 验证直属子级。"
+                ),
+                "suggested_filter": {
+                    "column": field.name,
+                    "operator": "direct_child_of",
+                    "value": value,
+                },
+            }
+        )
+    return hints
+
+
+def _sample_contains_descendant(sample: Any, parent: str) -> bool:
+    text = str(sample or "").strip().casefold()
+    target = parent.strip().casefold()
+    if not text or not target:
+        return False
+    pattern = rf"(^|[-/＞>]){re.escape(target)}[-/＞>]"
+    return re.search(pattern, text) is not None
 
 
 async def preview_dataset(

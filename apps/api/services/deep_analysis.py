@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -17,7 +18,12 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..ai import AIProvider, AIProviderError
+from ..ai import (
+    AIProvider,
+    AIProviderError,
+    AnswerResult,
+    validate_against_evidence,
+)
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType
 from .dataset_execution import (
@@ -50,6 +56,8 @@ MAX_OBSERVATION_CHARS = 18_000
 MAX_DATASET_ROWS_IN_CONTEXT = 20
 MAX_DECISION_ATTEMPTS = 2
 MAX_SEARCH_HITS_IN_OBSERVATION = 6
+
+ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class AgentDecision(BaseModel):
@@ -108,7 +116,13 @@ class DeepAnalysisService:
     def is_provider_configured(self) -> bool:
         return self._qa.is_provider_configured
 
-    async def ask(self, db: AsyncSession, request: AskRequest) -> AskResult:
+    async def ask(
+        self,
+        db: AsyncSession,
+        request: AskRequest,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> AskResult:
         question = (request.question or "").strip()
         self._validate_request(question)
         assert self._provider is not None
@@ -161,6 +175,15 @@ class DeepAnalysisService:
                         },
                     }
                 )
+                await _emit_progress(
+                    on_progress,
+                    {
+                        "phase": "retry",
+                        "message": "检测到重复调用，正在调整分析路径",
+                        "tool_calls": len(steps),
+                        "max_tool_calls": MAX_TOOL_CALLS,
+                    },
+                )
                 continue
 
             try:
@@ -209,6 +232,16 @@ class DeepAnalysisService:
                 retrieval_statuses.append(retrieval)
             if dataset_result is not None:
                 last_dataset_result = dataset_result
+            await _emit_progress(
+                on_progress,
+                {
+                    "phase": "tool",
+                    "step": step.to_dict(),
+                    "tool_calls": len(steps),
+                    "max_tool_calls": MAX_TOOL_CALLS,
+                    "iterations": iterations,
+                },
+            )
 
         if not evidence_by_chunk and not dataset_evidence:
             # A planner/provider failure must still degrade to one ordinary,
@@ -238,6 +271,16 @@ class DeepAnalysisService:
                 )
             )
             planning_degraded = True
+            await _emit_progress(
+                on_progress,
+                {
+                    "phase": "tool",
+                    "step": steps[-1].to_dict(),
+                    "tool_calls": len(steps),
+                    "max_tool_calls": MAX_TOOL_CALLS,
+                    "iterations": iterations,
+                },
+            )
 
         supporting_evidence = list(evidence_by_chunk.values())
         if dataset_evidence:
@@ -281,6 +324,16 @@ class DeepAnalysisService:
                 retrieval=retrieval,
             )
 
+        await _emit_progress(
+            on_progress,
+            {
+                "phase": "synthesis",
+                "message": "证据已整理，正在生成带引用的回答",
+                "tool_calls": len(steps),
+                "max_tool_calls": MAX_TOOL_CALLS,
+                "iterations": iterations,
+            },
+        )
         answer = None
         for _attempt in range(2):
             try:
@@ -298,7 +351,13 @@ class DeepAnalysisService:
                 )
                 continue
         if answer is None:
-            raise AskError("provider_failed", "模型暂时不可用，请稍后再试")
+            try:
+                answer = await self._repair_answer(question, evidence)
+            except (AIProviderError, ValidationError, TypeError, ValueError) as exc:
+                logger.warning("deep answer repair failed error=%s", str(exc))
+                raise AskError(
+                    "provider_failed", "模型暂时不可用，请稍后再试"
+                ) from None
 
         evidence_by_id = {item.id: item for item in evidence}
         if any(item not in evidence_by_id for item in answer.citation_ids):
@@ -314,6 +373,46 @@ class DeepAnalysisService:
             model=_model_name(self._provider),
             retrieval=retrieval,
         )
+
+    async def _repair_answer(
+        self, question: str, evidence: list[Evidence]
+    ) -> AnswerResult:
+        """Use a distinct JSON repair prompt after repeated schema failures."""
+
+        assert self._provider is not None
+        allowed_ids = {item.id for item in evidence}
+        payload = await asyncio.to_thread(
+            self._provider.generate_json,
+            system=(
+                "你是回答格式修复器。只根据提供的证据回答并输出严格 JSON；"
+                "不要输出 Markdown 或额外文字。"
+            ),
+            prompt=json.dumps(
+                {
+                    "用户问题": question,
+                    "证据": [item.to_provider_dict() for item in evidence],
+                    "输出格式": {
+                        "answer": "自然中文回答",
+                        "citation_ids": [1],
+                        "insufficient_evidence": False,
+                        "rationale": "简短依据",
+                    },
+                    "规则": (
+                        "证据足够时 insufficient_evidence=false 且至少引用一个真实 id；"
+                        "证据不足时 insufficient_evidence=true 且 citation_ids 必须为空。"
+                    ),
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+        result = AnswerResult.model_validate(payload)
+        if result.insufficient_evidence and result.citation_ids:
+            # Some compatible reasoning models repeatedly combine these two
+            # mutually exclusive fields. Dropping citations is the only safe
+            # repair: it cannot turn an insufficient answer into a claim.
+            result.citation_ids = []
+        return validate_against_evidence(result, allowed_ids=allowed_ids)
 
     def _validate_request(self, question: str) -> None:
         if not question:
@@ -408,7 +507,9 @@ class DeepAnalysisService:
                 "零行、截断、跨层级或错误都不是结束，应修正参数。"
                 "层级父级精确查询为零行时，优先用 direct_child_of 验证直属子级，"
                 "不要只反复更换关键词。数据集查询不需要先读取目录片段。"
-                "不要重复完全相同的调用。证据充分时选择 finish。"
+                "宽泛浏览字段或大量候选行只是探索，不等于已经回答用户问题；"
+                "只有得到直接事实或可验证的精确聚合后才选择 finish。"
+                "不要重复完全相同的调用。"
             ),
         }
         serialized_prompt = json.dumps(prompt, ensure_ascii=False, default=str)
@@ -790,6 +891,13 @@ def _bound_observations(observations: list[dict[str, Any]]) -> list[dict[str, An
         selected.append(observation)
         remaining -= len(serialized)
     return list(reversed(selected))
+
+
+async def _emit_progress(
+    callback: ProgressCallback | None, event: dict[str, Any]
+) -> None:
+    if callback is not None:
+        await callback(event)
 
 
 async def _chunk_to_evidence(

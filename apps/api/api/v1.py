@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import logging
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..ai import build_provider_from_db
 from ..core.db import get_db
@@ -37,6 +43,7 @@ from ..services.search import DEFAULT_LIMIT, MAX_LIMIT, search_documents
 from .schemas import DatasetFilterInput
 
 router = APIRouter(prefix="/v1", tags=["knowledge-v1"])
+logger = logging.getLogger(__name__)
 
 _read_identity = require_api_identity("knowledge:read")
 _search_identity = require_api_identity("knowledge:search")
@@ -269,9 +276,7 @@ async def knowledge_ask(
     scope = await _resolve_scope(db, payload)
     provider = await build_provider_from_db(db)
     service = (
-        DeepAnalysisService(provider)
-        if payload.mode == "deep"
-        else QAService(provider)
+        DeepAnalysisService(provider) if payload.mode == "deep" else QAService(provider)
     )
     try:
         result = await service.ask(
@@ -305,6 +310,116 @@ async def knowledge_ask(
             **scope.to_filters_dict(),
         },
     }
+
+
+@router.post("/knowledge/ask/stream")
+async def knowledge_ask_stream(
+    payload: KnowledgeAskPayload,
+    _identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> StreamingResponse:
+    """Stream auditable tool progress and finish with the normal answer DTO."""
+
+    scope = await _resolve_scope(db, payload)
+    provider = await build_provider_from_db(db)
+    request = AskRequest(
+        question=payload.question.strip(),
+        category_ids=scope.category_ids,
+        tag_ids=scope.tag_ids,
+        source_types=scope.source_types,
+        document_ids=scope.document_ids,
+        connector_ids=scope.connector_ids,
+        matches_none=scope.matches_none,
+    )
+    scope_payload = {
+        "id": scope.scope_id,
+        "slug": scope.scope_slug,
+        **scope.to_filters_dict(),
+    }
+    if db.bind is None:
+        raise HTTPException(status_code=503, detail="数据库连接不可用")
+    stream_session_factory = async_sessionmaker(bind=db.bind, expire_on_commit=False)
+
+    async def events() -> AsyncIterator[str]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def on_progress(event: dict[str, Any]) -> None:
+            await queue.put({"type": "progress", **event})
+
+        async def run() -> None:
+            try:
+                async with stream_session_factory() as stream_db:
+                    service = (
+                        DeepAnalysisService(provider)
+                        if payload.mode == "deep"
+                        else QAService(provider)
+                    )
+                    if isinstance(service, DeepAnalysisService):
+                        result = await service.ask(
+                            stream_db, request, on_progress=on_progress
+                        )
+                    else:
+                        await on_progress(
+                            {"phase": "synthesis", "message": "正在检索并生成回答"}
+                        )
+                        result = await service.ask(stream_db, request)
+                await queue.put(
+                    {
+                        "type": "result",
+                        "data": {**result.to_dict(), "scope": scope_payload},
+                    }
+                )
+            except AskError as exc:
+                await queue.put(
+                    {
+                        "type": "error",
+                        "error": {"code": exc.code, "message": str(exc)},
+                    }
+                )
+            except Exception:
+                logger.exception("streaming knowledge ask failed")
+                await queue.put(
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": "internal_error",
+                            "message": "问答请求失败，请稍后重试",
+                        },
+                    }
+                )
+
+        task = asyncio.create_task(run())
+        yield _ndjson(
+            {"type": "progress", "phase": "starting", "message": "正在分析问题"}
+        )
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=10)
+                except TimeoutError:
+                    yield _ndjson({"type": "heartbeat"})
+                    continue
+                yield _ndjson(event)
+                if event.get("type") in {"result", "error"}:
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _ndjson(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, default=str) + "\n"
 
 
 @router.get("/knowledge/documents/{document_id}", response_model=dict[str, Any])
