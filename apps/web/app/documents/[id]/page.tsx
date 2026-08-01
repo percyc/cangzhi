@@ -34,6 +34,11 @@ type DocumentVersion = {
   meta: {
     extraction_status?: string;
     extraction_message?: string;
+    preview?: {
+      status?: string;
+      reason?: string;
+      message?: string;
+    };
   };
   structured_content: {
     document_type?: string;
@@ -709,7 +714,9 @@ export default function DocumentDetailPage() {
 
       {isWord && !hasConvertedPreview && (
         <div className="mt-6 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-          当前显示的是 Word 解析版。Word 原样预览需要生成 PDF 预览件；原文件仍可从上方下载，不会被替换。
+          {version?.meta?.preview?.reason === 'webdav_source_unavailable'
+            ? '远端 Word 原文件当前已无法获取，因此只能显示之前保存的解析文本。远端文件恢复后重新处理即可生成版式预览。'
+            : '当前显示的是 Word 解析版，PDF 版式预览正在等待生成；原文件不会被替换。'}
         </div>
       )}
 

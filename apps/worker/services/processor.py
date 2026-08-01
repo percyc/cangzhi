@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import hashlib
 import shutil
@@ -43,6 +44,7 @@ from apps.api.models.taxonomy import (
     DocumentTag,
     Tag,
 )
+from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.api.parsers import get_parser_for_content
 from apps.api.parsers.base import StructuredContent
 from apps.api.security import (
@@ -52,6 +54,7 @@ from apps.api.security import (
     fetch_url,
     looks_like_access_block,
 )
+from apps.api.security.secrets import decrypt_secret
 from apps.api.services import build_chunk_specs
 from apps.api.services.dataset_execution import (
     DatasetExecutionError,
@@ -62,6 +65,7 @@ from apps.api.services.structured_table import (
     _profile_dataset_fields,
     replace_version_table_rows,
 )
+from apps.api.services.webdav import WebDAVError, download_file
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings
 
@@ -199,6 +203,62 @@ def _load_content_for_parsing(
     if blob is None:
         return None
     return _read_blob_bytes(blob), blob.content_type, blob.original_filename
+
+
+def _load_content_for_preview(
+    session: Session,
+    document: Document,
+    version: DocumentVersion,
+) -> tuple[bytes | str, str, str | None] | None:
+    """Load a source for preview, fetching WebDAV bytes only for this task."""
+
+    loaded = _load_content_for_parsing(session, document, version)
+    if loaded is not None:
+        return loaded
+    document_meta = document.meta or {}
+    if document_meta.get("external_source") != "webdav":
+        return None
+    source_id = document_meta.get("webdav_source_id")
+    if not isinstance(source_id, int):
+        return None
+    source = session.get(WebDAVSource, source_id)
+    entry = session.scalar(
+        select(WebDAVEntry).where(
+            WebDAVEntry.source_id == source_id,
+            WebDAVEntry.document_id == document.id,
+        )
+    )
+    if source is None or entry is None:
+        return None
+    try:
+        payload, content_type = asyncio.run(
+            download_file(
+                base_url=source.base_url,
+                remote_path=entry.remote_path,
+                username=source.username,
+                password=decrypt_secret(source.password_cipher),
+                trusted_private_network=source.trusted_private_network,
+                max_bytes=PDF_PREVIEW_MAX_BYTES,
+                timeout_seconds=90,
+            )
+        )
+    except (WebDAVError, URLSecurityError, ValueError) as exc:
+        logger.warning(
+            "webdav_preview_source_failed",
+            document_id=document.id,
+            error=str(exc),
+        )
+        version.meta = {
+            **(version.meta or {}),
+            "preview": {
+                "status": "failed",
+                "reason": "webdav_source_unavailable",
+                "message": str(exc)[:1000],
+            },
+        }
+        session.add(version)
+        return None
+    return payload, content_type, entry.remote_path
 
 
 def _read_blob_bytes(blob: Blob) -> bytes:
@@ -1363,7 +1423,7 @@ def process_single_job(session: Session, job_id: int) -> bool:
         return _process_dataset_artifacts(session, job, version)
 
     if stage == PREVIEW_STAGE:
-        loaded = _load_content_for_parsing(session, document, version)
+        loaded = _load_content_for_preview(session, document, version)
         if loaded is not None:
             content, content_type, filename = loaded
             _ensure_word_pdf_preview(session, version, content, content_type, filename)

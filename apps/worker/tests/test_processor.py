@@ -12,10 +12,12 @@ from apps.api.models.blobs import Blob
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.taxonomy import DocumentCategory, DocumentSummary
+from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
     _ensure_word_pdf_preview,
     _is_terminal_parse_failure,
+    _load_content_for_preview,
     calculate_next_retry_at,
     process_single_job,
 )
@@ -122,6 +124,65 @@ class TestCalculateNextRetry:
         assert preview.content_type == "application/pdf"
         assert preview.original_filename == "合同.pdf"
         assert version.meta["preview"]["status"] == "ready"
+
+    def test_preview_task_fetches_webdav_source_without_attaching_blob(
+        self, session, monkeypatch
+    ):
+        source = WebDAVSource(
+            name="远端资料",
+            base_url="https://dav.example.test/",
+            username="reader",
+            password_cipher="cipher",
+            root_path="/docs",
+            include_extensions=[".docx"],
+            ignore_patterns=[],
+        )
+        session.add(source)
+        session.flush()
+        document = Document(
+            title="远端 Word",
+            source_type=DocumentSourceType.file,
+            meta={"external_source": "webdav", "webdav_source_id": source.id},
+        )
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="remote",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        session.add(
+            WebDAVEntry(
+                source_id=source.id,
+                remote_path="/docs/合同.docx",
+                document_id=document.id,
+                state="synced",
+            )
+        )
+        session.commit()
+
+        async def fake_download(**_kwargs):
+            return b"remote word", "application/octet-stream"
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor.decrypt_secret",
+            lambda _cipher: "password",
+        )
+        monkeypatch.setattr(
+            "apps.worker.services.processor.download_file", fake_download
+        )
+
+        loaded = _load_content_for_preview(session, document, version)
+
+        assert loaded == (
+            b"remote word",
+            "application/octet-stream",
+            "/docs/合同.docx",
+        )
+        assert version.blob_id is None
 
 
 class TestJobProcessing:
