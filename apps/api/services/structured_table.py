@@ -48,7 +48,19 @@ _DATE_QUERY_RE = re.compile(
     r"[-/.\u6708](?:0?[1-9]|[12]\d|3[01])\u65e5?(?!\d)"
 )
 
-ALLOWED_OPERATORS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"}
+ALLOWED_OPERATORS = {
+    "eq",
+    "ne",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "direct_child_of",
+    "in",
+}
 ALLOWED_METRICS = {"rows", "count", "count_distinct", "sum", "avg", "min", "max"}
 ALLOWED_SORT_ORDERS = {"asc", "desc"}
 MAX_QUERY_ROWS = 150_000
@@ -131,6 +143,35 @@ class TableQueryResult:
 
 def is_structured_table_question(question: str) -> bool:
     return bool(_STRUCTURED_INTENT_RE.search(question or ""))
+
+
+_HIERARCHY_SEPARATORS = frozenset("-/＞>")
+
+
+def _is_direct_child_path(actual: Any, parent: Any) -> bool:
+    """Match exactly one segment below a parent in a path-like text field."""
+
+    text = str(actual or "").strip()
+    target = str(parent or "").strip()
+    if not text or not target:
+        return False
+    start = 0
+    while True:
+        index = text.find(target, start)
+        if index < 0:
+            return False
+        before_ok = index == 0 or text[index - 1] in _HIERARCHY_SEPARATORS
+        suffix_start = index + len(target)
+        after_ok = (
+            suffix_start < len(text)
+            and text[suffix_start] in _HIERARCHY_SEPARATORS
+        )
+        if before_ok and after_ok:
+            child = text[suffix_start + 1 :]
+            return bool(child) and not any(
+                separator in child for separator in _HIERARCHY_SEPARATORS
+            )
+        start = index + 1
 
 
 async def candidate_dataset_document_ids(
@@ -473,6 +514,12 @@ def _matches(values: dict[str, Any], condition: TableFilter) -> bool:
     expected = condition.value
     if condition.operator == "contains":
         return str(expected).casefold() in str(actual or "").casefold()
+    if condition.operator == "starts_with":
+        return str(actual or "").casefold().startswith(str(expected).casefold())
+    if condition.operator == "ends_with":
+        return str(actual or "").casefold().endswith(str(expected).casefold())
+    if condition.operator == "direct_child_of":
+        return _is_direct_child_path(actual, expected)
     if condition.operator == "in":
         if not isinstance(expected, list):
             return False
@@ -1135,7 +1182,10 @@ _PLAN_SYSTEM = """你是藏知的表格查询规划器。
 relevant、document_id、sheet_name、region_index、filters、group_by、metric、
 metric_column、sort_by、sort_order、limit。
 filters 每项固定为 column/operator/value，operator 仅可用
-eq/ne/gt/gte/lt/lte/contains/in。
+eq/ne/gt/gte/lt/lte/contains/starts_with/ends_with/direct_child_of/in。
+若字段使用“-”“/”或“>”表达层级路径，问题询问父级实体的可加总指标、但父级本身
+可能没有记录，应使用 direct_child_of 只选择直属子级并对数值列求和；不要用
+contains 混入更深层后代造成重复统计。普通精确记录仍优先使用 eq。
 metric 仅可用 rows/count/count_distinct/sum/avg/min/max。
 用户要查看、筛选或排序具体明细时用 rows，group_by=[]。
 没有分组但需要总计时 group_by=[]。
@@ -1150,8 +1200,9 @@ async def try_structured_table_query(
     provider: AIProvider,
     question: str,
     document_ids: Sequence[int],
+    force: bool = False,
 ) -> TableQueryResult | None:
-    if not is_structured_table_question(question):
+    if not force and not is_structured_table_question(question):
         return None
     datasets = await _load_datasets(db, document_ids, question=question)
     if not datasets:
@@ -1247,4 +1298,61 @@ async def try_structured_table_query(
         for item in datasets
         if item.key == (plan.document_id, plan.sheet_name, plan.region_index)
     )
-    return await _execute_dataset_plan(db, dataset, plan)
+    result = await _execute_dataset_plan(db, dataset, plan)
+    ambiguous_truncation = (
+        plan.metric == "rows"
+        and result.matched_row_count > len(result.rows)
+        and not _DETAIL_INTENT_RE.search(question)
+    )
+    if result.matched_row_count > 0 and not ambiguous_truncation:
+        return result
+
+    feedback = {
+        "已执行计划": {
+            "filters": [
+                {
+                    "column": item.column,
+                    "operator": item.operator,
+                    "value": item.value,
+                }
+                for item in plan.filters
+            ],
+            "group_by": list(plan.group_by),
+            "metric": plan.metric,
+            "metric_column": plan.metric_column,
+            "limit": plan.limit,
+        },
+        "执行结果": {
+            "matched_row_count": result.matched_row_count,
+            "returned_rows": result.rows[:5],
+            "truncated": ambiguous_truncation,
+        },
+        "修正规则": (
+            "不要从零行或任意第一行作答。请重新核对筛选粒度。"
+            "若目标是层级路径中的父级、父级自身无记录且指标可加总，"
+            "使用 direct_child_of 选择直属子级并 sum 数值列；"
+            "若不能安全推导则返回 relevant=false。"
+        ),
+    }
+    try:
+        raw_refined = await asyncio.to_thread(
+            provider.generate_json,
+            system=_PLAN_SYSTEM,
+            prompt=prompt + "\n" + json.dumps(feedback, ensure_ascii=False),
+        )
+        if raw_refined.get("relevant") is not True:
+            return result
+        refined_plan = validate_query_plan(raw_refined, datasets)
+    except (AIProviderError, ValueError, TypeError, KeyError):
+        return result
+    refined_dataset = next(
+        item
+        for item in datasets
+        if item.key
+        == (
+            refined_plan.document_id,
+            refined_plan.sheet_name,
+            refined_plan.region_index,
+        )
+    )
+    return await _execute_dataset_plan(db, refined_dataset, refined_plan)

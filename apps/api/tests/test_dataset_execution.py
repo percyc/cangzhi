@@ -70,6 +70,9 @@ def _seed_and_build(path: Path) -> tuple[int, int]:
             (2, "华东", "10.0（原始值：10）"),
             (3, "华东", "20"),
             (4, "华南", "7"),
+            (5, "全国-华东", "30"),
+            (6, "全国-华南", "40"),
+            (7, "全国-华东-上海", "99"),
         ]:
             session.add(
                 StructuredTableRow(
@@ -157,6 +160,40 @@ def test_dataset_query_accepts_op_alias(tmp_path: Path):
     result = asyncio.run(run())
     assert result["matched_row_count"] == 2
     assert {row["地区"] for row in result["rows"]} == {"华东"}
+
+
+def test_dataset_query_aggregates_only_direct_hierarchy_children(tmp_path: Path):
+    _document_id, dataset_id = _seed_and_build(tmp_path)
+
+    async def run():
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'builder.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            result = await execute_dataset_query(
+                session,
+                dataset_id,
+                {
+                    "filters": [
+                        {
+                            "column": "地区",
+                            "operator": "direct_child_of",
+                            "value": "全国",
+                        }
+                    ],
+                    "metric": "sum",
+                    "metric_column": "金额",
+                    "limit": 10,
+                },
+                storage_root=tmp_path / "storage",
+            )
+        await engine.dispose()
+        return result
+
+    result = asyncio.run(run())
+    assert result["matched_row_count"] == 2
+    assert result["rows"] == [{"metric": 70.0, "matched_rows": 2}]
 
 
 def test_query_plan_rejects_unknown_columns(tmp_path: Path):

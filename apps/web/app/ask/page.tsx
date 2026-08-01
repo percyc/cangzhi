@@ -51,6 +51,7 @@ type AskResponse = {
     };
     analysis?: {
       plan_summary?: string;
+      iterations?: number;
       tool_calls: number;
       max_tool_calls: number;
       steps: Array<{
@@ -519,7 +520,7 @@ function AskClient() {
           </form>
           <p className="mt-2 text-center text-[11px] text-slate-400">
             {mode === 'deep'
-              ? '深度分析最多调用 5 次只读工具 · 回答可能有误，请核对引用原文'
+              ? '深度分析会根据每次结果继续探索，最多调用 8 次只读工具 · 请核对引用原文'
               : 'Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文'}
           </p>
         </footer>
@@ -838,6 +839,7 @@ function AnalysisTrace({
     <details className="mt-3 rounded-2xl border border-indigo-100 bg-indigo-50/50">
       <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-indigo-800">
         深度分析过程 · {analysis.tool_calls} 次工具调用
+        {analysis.iterations ? ` · ${analysis.iterations} 轮决策` : ''}
       </summary>
       <div className="border-t border-indigo-100 px-4 py-3">
         {analysis.plan_summary && (

@@ -31,7 +31,7 @@ from apps.api.models.taxonomy import (
 )
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
-from apps.api.services.deep_analysis import DeepAnalysisService
+from apps.api.services.deep_analysis import DeepAnalysisService, _select_dataset_chunk
 from apps.api.services.qa import (
     AskError,
     AskRequest,
@@ -212,9 +212,7 @@ async def _seed_document(
                 )
             )
         if tag_slug:
-            tag = await session.scalar(
-                select(Tag).where(Tag.slug == tag_slug)
-            )
+            tag = await session.scalar(select(Tag).where(Tag.slug == tag_slug))
             if tag is None:
                 tag = Tag(slug=tag_slug, name=tag_slug)
                 session.add(tag)
@@ -274,6 +272,31 @@ def test_neighbor_context_keeps_previous_and_following_meaning_without_duplicate
     assert "三个工作日内审核" in context
     assert context.count("用户必须完成实名认证") == 1
     assert context.count("满足条件后可以提交申请") == 1
+
+
+def test_dataset_evidence_anchors_matching_sheet_region_and_rows():
+    wrong_sheet = DocumentChunk(
+        id=1,
+        extra={"sheet_name": "说明", "region_index": 1, "row_start": 1, "row_end": 5},
+    )
+    wrong_rows = DocumentChunk(
+        id=2,
+        extra={"sheet_name": "指标", "region_index": 2, "row_start": 2, "row_end": 20},
+    )
+    matching = DocumentChunk(
+        id=3,
+        extra={"sheet_name": "指标", "region_index": 2, "row_start": 21, "row_end": 40},
+    )
+
+    selected = _select_dataset_chunk(
+        [wrong_sheet, wrong_rows, matching],
+        sheet_name="指标",
+        region_index=2,
+        row_start=25,
+        row_end=30,
+    )
+
+    assert selected is matching
 
 
 def test_neighbor_context_is_loaded_from_same_parent(qa_db):
@@ -374,7 +397,7 @@ def test_qa_service_returns_cited_answer(qa_db):
     assert "向量检索" in citation["snippet"]
 
 
-def test_deep_analysis_plans_multiple_searches_and_exposes_bounded_trace(qa_db):
+def test_deep_analysis_observes_each_search_before_next_action(qa_db):
     async def _run():
         await _seed_document(
             qa_db,
@@ -383,12 +406,12 @@ def test_deep_analysis_plans_multiple_searches_and_exposes_bounded_trace(qa_db):
             heading="检索策略",
         )
         provider = StubProvider()
-        provider.json_responses.append(
-            {
-                "search_queries": ["向量检索", "关键词检索"],
-                "use_dataset_query": False,
-                "summary": "分别检索两类召回方式后综合比较",
-            }
+        provider.json_responses.extend(
+            [
+                {"action": "search", "query": "向量检索", "summary": "检索语义召回"},
+                {"action": "search", "query": "关键词检索", "summary": "补充精确匹配"},
+                {"action": "finish", "summary": "证据充分"},
+            ]
         )
         provider.queue(
             AnswerResult(
@@ -407,11 +430,116 @@ def test_deep_analysis_plans_multiple_searches_and_exposes_bounded_trace(qa_db):
 
     assert result.retrieval["mode"] == "deep_analysis"
     analysis = result.retrieval["analysis"]
-    assert analysis["tool_calls"] == 3  # original question plus two planned queries
+    assert analysis["tool_calls"] == 2
+    assert analysis["iterations"] == 3
     assert analysis["tool_calls"] <= analysis["max_tool_calls"]
     assert all(step["tool"] == "knowledge_search" for step in analysis["steps"])
     assert result.citations[0]["title"] == "向量检索"
-    assert len(provider.json_calls) == 1
+    assert len(provider.json_calls) == 3
+    assert "向量检索" in provider.json_calls[1]["prompt"]
+
+
+def test_deep_analysis_revises_dataset_query_after_zero_rows(qa_db, monkeypatch):
+    import apps.api.services.deep_analysis as deep_service_module
+
+    plans: list[dict] = []
+
+    async def candidate_documents(_db, *, filters, limit):
+        return [document_id]
+
+    async def datasets(_db, *, document_id=None, limit=20):
+        return [{"id": 14, "document_id": document_id, "name": "人口指标"}]
+
+    async def schema(_db, dataset_id):
+        assert dataset_id == 14
+        return {
+            "id": 14,
+            "fields": [
+                {"name": "行政区划", "type": "string"},
+                {"name": "指标值", "type": "number"},
+            ],
+        }
+
+    async def query(_db, dataset_id, plan):
+        plans.append(plan)
+        matched = 0 if len(plans) == 1 else 8
+        rows = [] if matched == 0 else [{"metric": 369174}]
+        return {
+            "document_id": document_id,
+            "matched_row_count": matched,
+            "rows": rows,
+            "truncated": False,
+            "backend": "duckdb",
+            "warnings": [],
+        }
+
+    async def no_dataset_evidence(_db, dataset_id, query_plan, result):
+        return None
+
+    async def _run():
+        nonlocal document_id
+        document_id = await _seed_document(
+            qa_db,
+            title="通用统计指标",
+            body="本资料包含行政区划与人口指标数据。",
+        )
+        monkeypatch.setattr(
+            deep_service_module, "candidate_dataset_document_ids", candidate_documents
+        )
+        monkeypatch.setattr(deep_service_module, "list_visible_datasets", datasets)
+        monkeypatch.setattr(deep_service_module, "get_dataset_schema", schema)
+        monkeypatch.setattr(deep_service_module, "execute_dataset_query", query)
+        monkeypatch.setattr(
+            deep_service_module, "_dataset_result_to_evidence", no_dataset_evidence
+        )
+        provider = StubProvider()
+        provider.json_responses.extend(
+            [
+                {"action": "search", "query": "行政区划 人口指标"},
+                {"action": "list_datasets", "document_id": document_id},
+                {"action": "get_dataset_schema", "dataset_id": 14},
+                {
+                    "action": "query_dataset",
+                    "dataset_id": 14,
+                    "query_plan": {
+                        "filters": [
+                            {"column": "行政区划", "operator": "eq", "value": "某区"}
+                        ]
+                    },
+                },
+                {
+                    "action": "query_dataset",
+                    "dataset_id": 14,
+                    "query_plan": {
+                        "filters": [
+                            {
+                                "column": "行政区划",
+                                "operator": "direct_child_of",
+                                "value": "某区",
+                            }
+                        ],
+                        "metric": "sum",
+                        "metric_column": "指标值",
+                    },
+                },
+                {"action": "finish", "summary": "修正后得到完整结果"},
+            ]
+        )
+        provider.queue(AnswerResult(answer="统计结果为 369174。", citation_ids=[1]))
+        async with qa_db() as session:
+            result = await DeepAnalysisService(provider).ask(
+                session, AskRequest(question="查询某区的人口指标")
+            )
+        return result, provider
+
+    document_id = 0
+    result, provider = asyncio.run(_run())
+
+    assert len(plans) == 2
+    assert plans[1]["filters"][0]["operator"] == "direct_child_of"
+    assert '"matched_row_count": 0' in provider.json_calls[4]["prompt"]
+    assert result.retrieval["analysis"]["tool_calls"] == 5
+    assert result.retrieval["structured_table"]["matched_rows"] == 8
 
 
 def test_deep_analysis_degrades_to_original_query_when_planner_fails(qa_db):
@@ -450,12 +578,11 @@ def test_deep_analysis_rejects_fabricated_citation(qa_db):
             body="回答必须引用真实知识片段。",
         )
         provider = StubProvider()
-        provider.json_responses.append(
-            {
-                "search_queries": ["引用校验"],
-                "use_dataset_query": False,
-                "summary": "核验引用规则",
-            }
+        provider.json_responses.extend(
+            [
+                {"action": "search", "query": "引用校验", "summary": "核验引用规则"},
+                {"action": "finish", "summary": "完成"},
+            ]
         )
         provider.queue(
             AnswerResult(
@@ -476,17 +603,17 @@ def test_deep_analysis_rejects_fabricated_citation(qa_db):
 
 
 def test_quick_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
-    import apps.api.services.qa as qa_service_module
     import apps.api.services.knowledge_scopes as scope_service_module
+    import apps.api.services.qa as qa_service_module
 
     captured: dict[str, list[int]] = {}
 
     async def connector_documents(_db, _connector_ids):
         return [42]
 
-    async def table_query(_db, *, provider, question, document_ids):
+    async def table_query(_db, *, provider, question, document_ids, force=False):
         captured["document_ids"] = document_ids
-        return None
+        captured["force"] = force
 
     monkeypatch.setattr(
         scope_service_module,
@@ -508,35 +635,42 @@ def test_quick_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
     result = asyncio.run(_run())
     assert result.insufficient_evidence is True
     assert captured["document_ids"] == [42]
+    assert captured["force"] is False
 
 
 def test_deep_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
     import apps.api.services.deep_analysis as deep_service_module
     import apps.api.services.knowledge_scopes as scope_service_module
 
-    captured: dict[str, list[int]] = {}
+    captured: dict[str, object] = {}
 
     async def connector_documents(_db, _connector_ids):
         return [84]
 
-    async def table_query(_db, *, provider, question, document_ids):
-        captured["document_ids"] = document_ids
-        return None
+    async def candidate_documents(_db, *, filters, limit):
+        captured["candidate_filters"] = filters
+        return [84]
+
+    async def datasets(_db, *, document_id=None, limit=20):
+        captured["listed_document_id"] = document_id
+        return []
 
     monkeypatch.setattr(
         scope_service_module,
         "resolve_connector_document_ids",
         connector_documents,
     )
-    monkeypatch.setattr(deep_service_module, "try_structured_table_query", table_query)
+    monkeypatch.setattr(
+        deep_service_module, "candidate_dataset_document_ids", candidate_documents
+    )
+    monkeypatch.setattr(deep_service_module, "list_visible_datasets", datasets)
 
     provider = StubProvider()
-    provider.json_responses.append(
-        {
-            "search_queries": ["金额统计"],
-            "use_dataset_query": True,
-            "summary": "精确统计连接器内的数据",
-        }
+    provider.json_responses.extend(
+        [
+            {"action": "list_datasets", "summary": "发现连接器数据集"},
+            {"action": "finish", "summary": "没有可用数据集"},
+        ]
     )
 
     async def _run():
@@ -548,7 +682,8 @@ def test_deep_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
 
     result = asyncio.run(_run())
     assert result.insufficient_evidence is True
-    assert captured["document_ids"] == [84]
+    assert captured["listed_document_id"] == 84
+    assert captured["candidate_filters"]["document_ids"] == [84]
 
 
 def test_qa_service_uses_exact_structured_table_calculation(qa_db):
@@ -619,9 +754,7 @@ def test_qa_service_uses_exact_structured_table_calculation(qa_db):
                 "document_id": document_id,
                 "sheet_name": "明细",
                 "region_index": 1,
-                "filters": [
-                    {"column": "品类", "operator": "eq", "value": "水果"}
-                ],
+                "filters": [{"column": "品类", "operator": "eq", "value": "水果"}],
                 "group_by": [],
                 "metric": "sum",
                 "metric_column": "金额",
@@ -1042,12 +1175,11 @@ def test_ask_endpoint_accepts_deep_mode(qa_db):
         )
     )
     provider = StubProvider()
-    provider.json_responses.append(
-        {
-            "search_queries": ["混合检索"],
-            "use_dataset_query": False,
-            "summary": "检索实现依据",
-        }
+    provider.json_responses.extend(
+        [
+            {"action": "search", "query": "混合检索", "summary": "检索实现依据"},
+            {"action": "finish", "summary": "证据充分"},
+        ]
     )
     provider.queue(
         AnswerResult(
@@ -1145,6 +1277,7 @@ def test_ask_status_endpoint(qa_db):
 
     class _Unconfigured:
         name = "openai"
+
         def is_configured(self) -> bool:
             return False
 

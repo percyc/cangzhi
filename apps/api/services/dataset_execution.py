@@ -32,7 +32,21 @@ MAX_PREVIEW_ROWS = 200
 MAX_QUERY_RESULT_ROWS = 200
 MAX_FILTERS = 8
 MAX_IN_VALUES = 100
-ALLOWED_OPERATORS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"})
+ALLOWED_OPERATORS = frozenset(
+    {
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "starts_with",
+        "ends_with",
+        "direct_child_of",
+        "in",
+    }
+)
 ALLOWED_METRICS = frozenset(
     {"rows", "count", "count_distinct", "sum", "avg", "min", "max"}
 )
@@ -401,6 +415,14 @@ def _discover_literals(
                 if len(set(date_hits)) == 1:
                     matches.append((field.name, date_hits[0]))
                     continue
+            if (
+                field.inferred_type in {"number", "identifier"}
+                and field.semantic_role not in {"status", "category"}
+            ):
+                # A bare year or amount frequently appears somewhere in a
+                # numeric/id column by coincidence. Do not treat that as an
+                # explicit field literal unless a semantic field handled it.
+                continue
             candidates = [
                 str(item[0])
                 for item in connection.execute(
@@ -591,6 +613,16 @@ def _where_sql(query: SafeDatasetQuery, types: dict[str, str]) -> tuple[str, lis
         if operator == "contains":
             clauses.append(f"COALESCE({expression}, '') ILIKE ?")
             parameters.append(f"%{value}%")
+        elif operator == "starts_with":
+            clauses.append(f"COALESCE({expression}, '') ILIKE ?")
+            parameters.append(f"{value}%")
+        elif operator == "ends_with":
+            clauses.append(f"COALESCE({expression}, '') ILIKE ?")
+            parameters.append(f"%{value}")
+        elif operator == "direct_child_of":
+            parent = re.escape(str(value).strip())
+            clauses.append(f"regexp_matches(COALESCE({expression}, ''), ?)")
+            parameters.append(rf"(^|[-/＞>]){parent}[-/＞>][^-/＞>]+$")
         elif operator == "in":
             values = value or []
             if not values:

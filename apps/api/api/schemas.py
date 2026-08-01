@@ -14,7 +14,19 @@ class DatasetFilterInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     column: str = Field(min_length=1, max_length=255)
-    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"]
+    operator: Literal[
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "starts_with",
+        "ends_with",
+        "direct_child_of",
+        "in",
+    ]
     value: Any
 
     @model_validator(mode="before")

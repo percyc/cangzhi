@@ -1,14 +1,18 @@
+import asyncio
+
 import pytest
 
 from apps.api.models.table_rows import StructuredTableRow
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.structured_table import (
     TableDataset,
+    TableQueryResult,
     _literal_detail_plan_is_complete,
     _literal_matches_for_question,
     execute_query_plan,
     extract_table_row_payloads,
     is_structured_table_question,
+    try_structured_table_query,
     validate_query_plan,
 )
 
@@ -231,6 +235,60 @@ def test_executor_can_return_filtered_and_ranked_detail_rows():
     ]
 
 
+def test_fallback_executor_direct_child_filter_excludes_deeper_descendants():
+    dataset = TableDataset(
+        document_id=8,
+        document_version_id=12,
+        title="区域人口",
+        sheet_name="指标",
+        region_index=1,
+        columns=("行政区划", "人口"),
+        row_count=3,
+    )
+    rows = [
+        StructuredTableRow(
+            document_id=8,
+            document_version_id=12,
+            sheet_name="指标",
+            region_index=1,
+            row_number=index,
+            values={"行政区划": path, "人口": population},
+        )
+        for index, (path, population) in enumerate(
+            [
+                ("广东省-赤坎区-中华街道", "10"),
+                ("广东省-赤坎区-寸金街道", "20"),
+                ("广东省-赤坎区-寸金街道-西苑社区", "99"),
+            ],
+            start=2,
+        )
+    ]
+    plan = validate_query_plan(
+        {
+            "document_id": 8,
+            "sheet_name": "指标",
+            "region_index": 1,
+            "filters": [
+                {
+                    "column": "行政区划",
+                    "operator": "direct_child_of",
+                    "value": "赤坎区",
+                }
+            ],
+            "group_by": [],
+            "metric": "sum",
+            "metric_column": "人口",
+            "sort_order": "desc",
+            "limit": 10,
+        },
+        [dataset],
+    )
+
+    result = execute_query_plan(dataset, rows, plan)
+    assert result.matched_row_count == 2
+    assert result.rows == [{"metric": 30, "matched_rows": 2}]
+
+
 @pytest.mark.parametrize(
     "question",
     [
@@ -382,3 +440,109 @@ def test_dataset_prompt_exposes_semantic_summary_for_relevance_routing():
     )
 
     assert dataset.to_prompt_dict()["semantic_summary"] == "仓库物料与实时库存数量"
+
+
+def test_forced_semantic_query_refines_empty_parent_lookup_to_direct_children(
+    monkeypatch,
+):
+    import apps.api.services.structured_table as module
+
+    dataset = TableDataset(
+        document_id=34,
+        document_version_id=35,
+        title="区域指标",
+        sheet_name="指标",
+        region_index=1,
+        columns=("行政区划", "指标名称", "数据期", "指标值"),
+        row_count=100,
+        dataset_id=14,
+    )
+
+    class Provider:
+        def __init__(self):
+            self.responses = [
+                {
+                    "relevant": True,
+                    "document_id": 34,
+                    "sheet_name": "指标",
+                    "region_index": 1,
+                    "filters": [
+                        {
+                            "column": "行政区划",
+                            "operator": "eq",
+                            "value": "广东省-赤坎区",
+                        }
+                    ],
+                    "group_by": [],
+                    "metric": "rows",
+                    "metric_column": None,
+                    "sort_by": None,
+                    "sort_order": "asc",
+                    "limit": 1,
+                },
+                {
+                    "relevant": True,
+                    "document_id": 34,
+                    "sheet_name": "指标",
+                    "region_index": 1,
+                    "filters": [
+                        {
+                            "column": "行政区划",
+                            "operator": "direct_child_of",
+                            "value": "赤坎区",
+                        }
+                    ],
+                    "group_by": [],
+                    "metric": "sum",
+                    "metric_column": "指标值",
+                    "sort_by": "metric",
+                    "sort_order": "desc",
+                    "limit": 20,
+                },
+            ]
+
+        def generate_json(self, **_kwargs):
+            return self.responses.pop(0)
+
+    async def load_datasets(_db, _document_ids, *, question):
+        return [dataset]
+
+    async def execute_plan(_db, selected_dataset, plan):
+        if plan.filters[0].operator == "eq":
+            return TableQueryResult(
+                dataset=selected_dataset,
+                plan=plan,
+                rows=[],
+                source_rows=[],
+                source_row_start=None,
+                source_row_end=None,
+                matched_row_count=0,
+                summary="zero",
+            )
+        return TableQueryResult(
+            dataset=selected_dataset,
+            plan=plan,
+            rows=[{"metric": 369174, "matched_rows": 8}],
+            source_rows=list(range(1, 9)),
+            source_row_start=1,
+            source_row_end=8,
+            matched_row_count=8,
+            summary="sum",
+        )
+
+    monkeypatch.setattr(module, "_load_datasets", load_datasets)
+    monkeypatch.setattr(module, "_execute_dataset_plan", execute_plan)
+
+    result = asyncio.run(
+        try_structured_table_query(
+            object(),
+            provider=Provider(),
+            question="2023年赤坎区常住人口",
+            document_ids=[34],
+            force=True,
+        )
+    )
+
+    assert result is not None
+    assert result.plan.filters[0].operator == "direct_child_of"
+    assert result.rows == [{"metric": 369174, "matched_rows": 8}]

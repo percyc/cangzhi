@@ -124,6 +124,9 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "lt",
         "lte",
         "contains",
+        "starts_with",
+        "ends_with",
+        "direct_child_of",
         "in",
     ]
     ask_tool = next(

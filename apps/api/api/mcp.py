@@ -242,7 +242,8 @@ TOOLS = [
             "通过受控计划执行投影、筛选、排序、分组和聚合，由 DuckDB/Parquet 下推计算。"
             "不接受 SQL，最多返回 200 行，适合大型 Excel，避免把整表放入模型上下文。"
             "filters 每项使用 column、operator、value；operator 支持 "
-            "eq/ne/gt/gte/lt/lte/contains/in。"
+            "eq/ne/gt/gte/lt/lte/contains/starts_with/ends_with/"
+            "direct_child_of/in。direct_child_of 用于安全选择层级路径的直属子级。"
         ),
         "inputSchema": DatasetQueryArguments.model_json_schema(),
         "annotations": {
