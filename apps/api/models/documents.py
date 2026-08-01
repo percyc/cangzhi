@@ -1,20 +1,22 @@
+import enum
+
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     DateTime,
     Enum,
     ForeignKey,
     Integer,
-    JSON,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.schema import UniqueConstraint
-from sqlalchemy import text
+
 from ..core.db import Base
 from .base import BaseModel
-import enum
 
 
 class DocumentSourceType(enum.Enum):
@@ -40,7 +42,9 @@ class Document(BaseModel):
         ),
         nullable=True,
     )
-    is_deleted = Column(Boolean, nullable=False, default=False, server_default=text("false"), index=True)
+    is_deleted = Column(
+        Boolean, nullable=False, default=False, server_default=text("false"), index=True
+    )
     deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
     delete_reason = Column(String(64), nullable=True)
     external_identity = Column(String(64), nullable=True, unique=True, index=True)
@@ -61,6 +65,16 @@ class DocumentVersion(BaseModel):
         index=True,
     )
     blob_id = Column(Integer, ForeignKey("blobs.id"), nullable=True, index=True)
+    preview_blob_id = Column(
+        Integer,
+        ForeignKey(
+            "blobs.id",
+            name="fk_document_versions_preview_blob_id_blobs",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
     version_number = Column(Integer, nullable=False)
     content_hash = Column(String(64), nullable=False)
     raw_content = Column(Text, nullable=True)

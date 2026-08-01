@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.blobs import Blob
@@ -40,11 +40,7 @@ async def trash_documents(
     now = datetime.now(timezone.utc)
     ids = [document.id for document in active]
     entries = (
-        (
-            await db.execute(
-                select(WebDAVEntry).where(WebDAVEntry.document_id.in_(ids))
-            )
-        )
+        (await db.execute(select(WebDAVEntry).where(WebDAVEntry.document_id.in_(ids))))
         .scalars()
         .all()
     )
@@ -74,11 +70,7 @@ async def restore_documents(
         return 0
     ids = [document.id for document in trashed]
     entries = (
-        (
-            await db.execute(
-                select(WebDAVEntry).where(WebDAVEntry.document_id.in_(ids))
-            )
-        )
+        (await db.execute(select(WebDAVEntry).where(WebDAVEntry.document_id.in_(ids))))
         .scalars()
         .all()
     )
@@ -121,7 +113,12 @@ async def purge_documents(
         .all()
     )
     version_ids = [version.id for version in versions]
-    blob_ids = {version.blob_id for version in versions if version.blob_id is not None}
+    blob_ids = {
+        blob_id
+        for version in versions
+        for blob_id in (version.blob_id, version.preview_blob_id)
+        if blob_id is not None
+    }
     entries = (
         (
             await db.execute(
@@ -136,8 +133,7 @@ async def purge_documents(
         if entry.external_identity:
             exclusion = await db.scalar(
                 select(ExternalItemExclusion).where(
-                    ExternalItemExclusion.external_identity
-                    == entry.external_identity
+                    ExternalItemExclusion.external_identity == entry.external_identity
                 )
             )
             if exclusion is None:
@@ -205,9 +201,7 @@ async def purge_documents(
             )
         )
         await db.execute(
-            delete(DocumentTag).where(
-                DocumentTag.document_version_id.in_(version_ids)
-            )
+            delete(DocumentTag).where(DocumentTag.document_version_id.in_(version_ids))
         )
         await db.execute(
             delete(DocumentSummary).where(
@@ -236,7 +230,10 @@ async def purge_documents(
             (
                 await db.execute(
                     select(func.count(DocumentVersion.id)).where(
-                        DocumentVersion.blob_id == blob_id
+                        or_(
+                            DocumentVersion.blob_id == blob_id,
+                            DocumentVersion.preview_blob_id == blob_id,
+                        )
                     )
                 )
             ).scalar_one()

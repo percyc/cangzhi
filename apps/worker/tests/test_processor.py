@@ -1,4 +1,5 @@
 import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -7,10 +8,13 @@ from sqlalchemy.orm import sessionmaker
 
 from apps.api.core.db import Base
 from apps.api.embeddings.sampling import evenly_sample_chunks
+from apps.api.models.blobs import Blob
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.taxonomy import DocumentCategory, DocumentSummary
+from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
+    _ensure_word_pdf_preview,
     _is_terminal_parse_failure,
     calculate_next_retry_at,
     process_single_job,
@@ -45,18 +49,24 @@ class TestCalculateNextRetry:
 
     def test_exponential_backoff(self):
         now = datetime.datetime.now(datetime.timezone.utc)
-        assert calculate_next_retry_at(0, now=now) - now == datetime.timedelta(minutes=5)
-        assert calculate_next_retry_at(1, now=now) - now == datetime.timedelta(minutes=10)
-        assert calculate_next_retry_at(2, now=now) - now == datetime.timedelta(minutes=20)
+        assert calculate_next_retry_at(0, now=now) - now == datetime.timedelta(
+            minutes=5
+        )
+        assert calculate_next_retry_at(1, now=now) - now == datetime.timedelta(
+            minutes=10
+        )
+        assert calculate_next_retry_at(2, now=now) - now == datetime.timedelta(
+            minutes=20
+        )
 
     def test_spreadsheet_limit_is_not_retried(self):
-        assert _is_terminal_parse_failure(
-            {"reason": "spreadsheet_limit_exceeded"}
-        )
+        assert _is_terminal_parse_failure({"reason": "spreadsheet_limit_exceeded"})
         assert not _is_terminal_parse_failure({"reason": "xlsx_parse_failed"})
 
     def test_large_table_embedding_sample_is_even_and_keeps_edges(self):
-        chunks = [SimpleNamespace(id=index + 1, order_index=index) for index in range(13_151)]
+        chunks = [
+            SimpleNamespace(id=index + 1, order_index=index) for index in range(13_151)
+        ]
 
         selected = evenly_sample_chunks(chunks, 256)
 
@@ -68,9 +78,50 @@ class TestCalculateNextRetry:
         )
 
     def test_small_chunk_collection_is_not_sampled(self):
-        chunks = [SimpleNamespace(id=index + 1, order_index=index) for index in range(10)]
+        chunks = [
+            SimpleNamespace(id=index + 1, order_index=index) for index in range(10)
+        ]
 
         assert evenly_sample_chunks(chunks, 256) == chunks
+
+    def test_word_preview_is_stored_as_pdf(self, session, tmp_path, monkeypatch):
+        def fake_run(arguments, **_kwargs):
+            output_directory = arguments[arguments.index("--outdir") + 1]
+            Path(output_directory, "source.pdf").write_bytes(b"%PDF-1.7 preview")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(worker_settings, "storage_path", str(tmp_path))
+        monkeypatch.setattr(
+            "apps.worker.services.processor.shutil.which",
+            lambda _name: "/usr/bin/soffice",
+        )
+        monkeypatch.setattr("apps.worker.services.processor.subprocess.run", fake_run)
+        document = Document(title="Word", source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="source",
+            processing_status="created",
+        )
+        session.add(version)
+        session.flush()
+
+        assert _ensure_word_pdf_preview(
+            session,
+            version,
+            b"word bytes",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "合同.docx",
+        )
+        session.flush()
+
+        preview = session.get(Blob, version.preview_blob_id)
+        assert preview is not None
+        assert preview.content_type == "application/pdf"
+        assert preview.original_filename == "合同.pdf"
+        assert version.meta["preview"]["status"] == "ready"
 
 
 class TestJobProcessing:
@@ -190,12 +241,15 @@ class TestJobProcessing:
         assert job.status == "completed"
         assert version.processing_status == "unsupported"
         assert version.meta["extraction_status"] == "dynamic_page"
-        assert session.scalar(
-            select(ProcessingJob).where(
-                ProcessingJob.stage == "understanding",
-                ProcessingJob.document_version_id == version.id,
+        assert (
+            session.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.stage == "understanding",
+                    ProcessingJob.document_version_id == version.id,
+                )
             )
-        ) is None
+            is None
+        )
 
     def test_no_model_falls_back_to_inbox_idempotently(self, session, monkeypatch):
         monkeypatch.setattr(
@@ -239,11 +293,14 @@ class TestJobProcessing:
         ).all()
         assert len(links) == 1
         assert links[0].source == "fallback"
-        assert session.scalar(
-            select(DocumentSummary).where(
-                DocumentSummary.document_version_id == version.id
+        assert (
+            session.scalar(
+                select(DocumentSummary).where(
+                    DocumentSummary.document_version_id == version.id
+                )
             )
-        ) is None
+            is None
+        )
         session.refresh(version)
         assert version.processing_status == "ready"
         assert version.meta["ai_status"] == "not_configured"

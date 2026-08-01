@@ -49,6 +49,12 @@ type DocumentVersion = {
     file_size: number;
     content_type: string;
   } | null;
+  preview_blob: {
+    id: number;
+    original_filename: string | null;
+    file_size: number;
+    content_type: string;
+  } | null;
 };
 
 type ProcessingJob = {
@@ -278,7 +284,11 @@ export default function DocumentDetailPage() {
         ''
       ).toLowerCase();
       const contentType = documentBody.current_version?.blob?.content_type?.toLowerCase() ?? '';
-      if (filename.endsWith('.pdf') || contentType === 'application/pdf') {
+      if (
+        filename.endsWith('.pdf') ||
+        contentType === 'application/pdf' ||
+        documentBody.current_version?.preview_blob
+      ) {
         setPreviewMode('original');
       }
       setLatestJob(await jobResponse.json());
@@ -420,6 +430,11 @@ export default function DocumentDetailPage() {
   const isWord = /\.docx?$/.test(originalFilename) ||
     originalContentType.includes('wordprocessingml') ||
     originalContentType === 'application/msword';
+  const hasConvertedPreview = Boolean(version?.preview_blob);
+  const hasPaginatedPreview = isPdf || hasConvertedPreview;
+  const previewUrl = isPdf
+    ? `/api/documents/${document.id}/original?inline=true`
+    : `/api/documents/${document.id}/preview`;
   const knowledgeStatus =
     pipeline?.overall_status === 'completed'
       ? '知识库已就绪'
@@ -664,35 +679,41 @@ export default function DocumentDetailPage() {
         </section>
       )}
 
-      {isPdf && (
+      {hasPaginatedPreview && (
         <section className="mt-6">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
               <h2 className="font-semibold text-slate-900">文档预览</h2>
-              <p className="mt-1 text-xs text-slate-500">原文版保持 PDF 排版；解析版用于检索核对。</p>
+              <p className="mt-1 text-xs text-slate-500">
+                {hasConvertedPreview && !isPdf
+                  ? '版式预览由原 Word 转换为 PDF；解析版用于检索核对。'
+                  : '原文版保持 PDF 排版；解析版用于检索核对。'}
+              </p>
             </div>
             <div className="flex rounded-lg bg-slate-100 p-1 text-sm">
-              <button type="button" onClick={() => setPreviewMode('original')} className={`rounded-md px-3 py-1.5 ${previewMode === 'original' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>原文版</button>
+              <button type="button" onClick={() => setPreviewMode('original')} className={`rounded-md px-3 py-1.5 ${previewMode === 'original' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
+                {hasConvertedPreview && !isPdf ? '版式预览' : '原文版'}
+              </button>
               <button type="button" onClick={() => setPreviewMode('parsed')} className={`rounded-md px-3 py-1.5 ${previewMode === 'parsed' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>解析版</button>
             </div>
           </div>
           {previewMode === 'original' && (
             <iframe
               title={`${document.title} 原文预览`}
-              src={`/api/documents/${document.id}/original?inline=true${citationTarget?.page ? `#page=${citationTarget.page}` : ''}`}
+              src={`${previewUrl}${citationTarget?.page ? `#page=${citationTarget.page}` : ''}`}
               className="h-[72vh] min-h-[560px] w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
             />
           )}
         </section>
       )}
 
-      {isWord && (
+      {isWord && !hasConvertedPreview && (
         <div className="mt-6 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
           当前显示的是 Word 解析版。Word 原样预览需要生成 PDF 预览件；原文件仍可从上方下载，不会被替换。
         </div>
       )}
 
-      {isPdf && previewMode === 'original' ? null : datasets.length > 0 ? (
+      {hasPaginatedPreview && previewMode === 'original' ? null : datasets.length > 0 ? (
         <DatasetWorkspace datasets={datasets} />
       ) : version?.raw_content ? (
         rendersAsMarkdown ? (

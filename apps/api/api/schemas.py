@@ -42,6 +42,7 @@ class DocumentVersionResponse(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     blob: BlobResponse | None = None
+    preview_blob: BlobResponse | None = None
     source_url: str | None = None
 
 

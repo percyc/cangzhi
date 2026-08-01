@@ -184,10 +184,15 @@ async def build_document_response(
         if version is not None:
             version_id = version.id
             blob_response = None
+            preview_blob_response = None
             if version.blob_id is not None:
                 blob = await db.get(Blob, version.blob_id)
                 if blob is not None:
                     blob_response = BlobResponse.model_validate(blob)
+            if version.preview_blob_id is not None:
+                preview_blob = await db.get(Blob, version.preview_blob_id)
+                if preview_blob is not None:
+                    preview_blob_response = BlobResponse.model_validate(preview_blob)
             version_response = DocumentVersionResponse(
                 id=version.id,
                 version_number=version.version_number,
@@ -198,6 +203,7 @@ async def build_document_response(
                 meta=version.meta or {},
                 created_at=version.created_at,
                 blob=blob_response,
+                preview_blob=preview_blob_response,
                 source_url=document.source_url,
             )
 
@@ -838,6 +844,40 @@ async def download_document_original(
         content_type=blob.content_type,
         content_length=blob.file_size,
         disposition="inline" if inline else "attachment",
+    )
+
+
+@router.get("/{document_id}/preview")
+async def preview_document(
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
+):
+    """Stream the current version's disposable PDF preview inline."""
+
+    document = await db.get(Document, document_id)
+    if document is None or document.is_deleted:
+        raise HTTPException(status_code=404, detail="资料不存在")
+    version = (
+        await db.get(DocumentVersion, document.current_version_id)
+        if document.current_version_id is not None
+        else None
+    )
+    if version is None or version.preview_blob_id is None:
+        raise HTTPException(status_code=404, detail="资料暂时没有预览文件")
+    blob = await db.get(Blob, version.preview_blob_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="预览文件不存在")
+    try:
+        stream = storage.open(blob.storage_key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="预览文件内容已丢失") from None
+    return _download_response(
+        stream,
+        filename=blob.original_filename or f"{document.title}.pdf",
+        content_type="application/pdf",
+        content_length=blob.file_size,
+        disposition="inline",
     )
 
 

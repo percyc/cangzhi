@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import shutil
+import subprocess
+import tempfile
+from io import BytesIO
 from pathlib import Path
 
 import structlog
@@ -74,6 +78,9 @@ UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
 DATASET_CATALOG_STAGE = "dataset_catalog"
 DATASET_ARTIFACT_STAGE = "dataset_artifact"
+PREVIEW_STAGE = "preview"
+PDF_PREVIEW_CONFIG = "pdf-v1"
+PDF_PREVIEW_MAX_BYTES = 100 * 1024 * 1024
 DATASET_ARTIFACT_VERSION = "dataset-parquet:v1"
 CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
 
@@ -198,6 +205,128 @@ def _read_blob_bytes(blob: Blob) -> bytes:
     storage = LocalBlobStorage(settings.storage_path)
     with storage.open(blob.storage_key) as source:
         return source.read()
+
+
+def _is_word_document(content_type: str, filename: str | None) -> bool:
+    lower_name = (filename or "").lower()
+    lower_type = (content_type or "").lower()
+    return lower_name.endswith((".doc", ".docx")) or lower_type in {
+        "application/msword",
+        "application/doc",
+        "application/vnd.ms-word",
+        "application/vnd.msword",
+        "application/winword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+
+
+def _ensure_word_pdf_preview(
+    session: Session,
+    version: DocumentVersion,
+    content: bytes | str,
+    content_type: str,
+    filename: str | None,
+) -> bool:
+    """Create a version-scoped PDF view without changing the source document."""
+
+    if version.preview_blob_id is not None or not _is_word_document(
+        content_type, filename
+    ):
+        return version.preview_blob_id is not None
+    if not isinstance(content, bytes):
+        return False
+
+    executable = shutil.which("soffice") or shutil.which("libreoffice")
+    if executable is None:
+        version.meta = {
+            **(version.meta or {}),
+            "preview": {"status": "failed", "reason": "converter_unavailable"},
+        }
+        session.add(version)
+        return False
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="cangzhi-preview-") as directory:
+            workdir = Path(directory)
+            suffix = ".doc" if (filename or "").lower().endswith(".doc") else ".docx"
+            source_path = workdir / f"source{suffix}"
+            output_path = workdir / "source.pdf"
+            profile_path = workdir / "libreoffice-profile"
+            source_path.write_bytes(content)
+            completed = subprocess.run(
+                [
+                    executable,
+                    f"-env:UserInstallation={profile_path.as_uri()}",
+                    "--headless",
+                    "--nologo",
+                    "--nodefault",
+                    "--nolockcheck",
+                    "--norestore",
+                    "--convert-to",
+                    "pdf:writer_pdf_Export",
+                    "--outdir",
+                    str(workdir),
+                    str(source_path),
+                ],
+                check=False,
+                capture_output=True,
+                timeout=90,
+            )
+            if completed.returncode != 0 or not output_path.is_file():
+                converter_output = (
+                    completed.stderr.decode("utf-8", errors="replace")
+                    or completed.stdout.decode("utf-8", errors="replace")
+                ).strip()
+                raise RuntimeError(converter_output[-1000:] or "未生成 PDF 文件")
+
+            storage = LocalBlobStorage(settings.storage_path)
+            stored = storage.save(
+                BytesIO(output_path.read_bytes()), max_bytes=PDF_PREVIEW_MAX_BYTES
+            )
+            preview_blob = (
+                session.query(Blob).filter(Blob.sha256 == stored.sha256).one_or_none()
+            )
+            if preview_blob is None:
+                source_stem = Path(filename or "document").stem or "document"
+                preview_blob = Blob(
+                    sha256=stored.sha256,
+                    storage_key=stored.storage_key,
+                    content_type="application/pdf",
+                    file_size=stored.size,
+                    original_filename=f"{source_stem}.pdf",
+                )
+                session.add(preview_blob)
+                session.flush()
+            else:
+                storage.delete(stored.storage_key)
+
+            version.preview_blob_id = preview_blob.id
+            version.meta = {
+                **(version.meta or {}),
+                "preview": {
+                    "status": "ready",
+                    "format": "pdf",
+                    "config_version": PDF_PREVIEW_CONFIG,
+                },
+            }
+            session.add(version)
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "word_preview_failed",
+            document_version_id=version.id,
+            error=str(exc),
+        )
+        version.meta = {
+            **(version.meta or {}),
+            "preview": {
+                "status": "failed",
+                "reason": type(exc).__name__,
+                "message": str(exc)[:1000],
+            },
+        }
+        session.add(version)
+        return False
 
 
 def _fetch_and_store_url(
@@ -1233,6 +1362,19 @@ def process_single_job(session: Session, job_id: int) -> bool:
     if stage == DATASET_ARTIFACT_STAGE:
         return _process_dataset_artifacts(session, job, version)
 
+    if stage == PREVIEW_STAGE:
+        loaded = _load_content_for_parsing(session, document, version)
+        if loaded is not None:
+            content, content_type, filename = loaded
+            _ensure_word_pdf_preview(session, version, content, content_type, filename)
+        job.status = "completed"
+        job.finished_at = utc_now()
+        job.next_retry_at = None
+        job.last_error = None
+        session.add(job)
+        session.commit()
+        return True
+
     if stage == "embedding":
         # Lazy import: ``embedding_processor`` imports
         # ``calculate_next_retry_at`` from this module, so a
@@ -1482,6 +1624,9 @@ def _process_parsing(
                 )
 
         _apply_parse_result(session, document, version, structured_content)
+        _ensure_word_pdf_preview(
+            session, version, content_bytes, content_type, filename
+        )
 
         job.status = "completed"
         job.finished_at = utc_now()
