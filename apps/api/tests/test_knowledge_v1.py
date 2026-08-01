@@ -498,6 +498,7 @@ def test_deep_ask_stream_emits_live_tool_progress_and_result(client, monkeypatch
 
     assert response.status_code == 200
     assert events[0]["phase"] == "starting"
+    assert events[0]["max_tool_calls"] == 12
     tool_event = next(item for item in events if item.get("phase") == "tool")
     assert tool_event["step"]["tool"] == "knowledge_search"
     assert tool_event["tool_calls"] == 1

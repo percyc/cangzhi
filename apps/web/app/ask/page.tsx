@@ -319,7 +319,7 @@ function AskClient() {
         message: '正在分析问题',
         steps: [],
         toolCalls: 0,
-        maxToolCalls: 8,
+        maxToolCalls: 12,
       });
     }
     try {
@@ -609,7 +609,7 @@ function AskClient() {
           </form>
           <p className="mt-2 text-center text-[11px] text-slate-400">
             {mode === 'deep'
-              ? '深度分析会根据每次结果继续探索，最多调用 8 次只读工具 · 请核对引用原文'
+              ? '深度分析默认最多调用 12 次，只在持续获得新证据时扩展至 16 次 · 请核对引用原文'
               : 'Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文'}
           </p>
         </footer>

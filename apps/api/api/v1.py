@@ -390,7 +390,13 @@ async def knowledge_ask_stream(
 
         task = asyncio.create_task(run())
         yield _ndjson(
-            {"type": "progress", "phase": "starting", "message": "正在分析问题"}
+            {
+                "type": "progress",
+                "phase": "starting",
+                "message": "正在分析问题",
+                "tool_calls": 0,
+                "max_tool_calls": DeepAnalysisService.default_max_tool_calls,
+            }
         )
         try:
             while True:

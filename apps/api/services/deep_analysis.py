@@ -3,6 +3,28 @@
 The orchestrator uses the same Python service layer as REST, CLI and MCP, but
 never calls the application's own HTTP/MCP endpoint.  Every tool result is fed
 back to the model before it selects the next read-only action.
+
+Budget
+------
+
+The in-app loop is bounded by an *adaptive* budget instead of a fixed call
+count, so that harder questions can keep exploring when they keep producing
+new evidence, and easy questions exit as soon as the tool results plateau.
+
+* Default cap: 12 tool calls, growing up to an absolute cap of 16.
+* Decision iterations are bounded at 17 so the absolute tool cap plus a final
+  ``finish`` decision can never turn into an unbounded loop.
+* Wall-clock budget: 120 seconds per ``ask`` call. When exhausted the loop
+  stops and the model still produces a final answer from whatever evidence
+  has been collected.
+* Once the default cap of 12 is reached the budget can grow to 16 only if
+  the most recently completed step still produced new effective evidence.
+* Two consecutive completed tool calls with no new evidence or useful
+  discovery information trigger early final-answer synthesis.
+
+MCP and Skill callers are driven by an external Agent and are not affected
+by these limits: their ``knowledge_ask`` adapter simply performs one
+quick, citation-bearing answer.
 """
 
 from __future__ import annotations
@@ -48,14 +70,19 @@ from .structured_table import candidate_dataset_document_ids
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS = 8
-MAX_AGENT_ITERATIONS = 10
+# Adaptive budget for the in-app Plan-Act-Observe loop. MCP and Skill callers
+# are driven by an external Agent and are not affected by these limits.
+MAX_TOOL_CALLS_DEFAULT = 12
+MAX_TOOL_CALLS_ABSOLUTE = 16
+MAX_AGENT_ITERATIONS = 17
+DEEP_ANALYSIS_BUDGET_SECONDS = 120.0
 MAX_DEEP_EVIDENCE = 12
 MAX_DEEP_EVIDENCE_CHARS = 8_000
 MAX_OBSERVATION_CHARS = 18_000
 MAX_DATASET_ROWS_IN_CONTEXT = 20
 MAX_DECISION_ATTEMPTS = 2
 MAX_SEARCH_HITS_IN_OBSERVATION = 6
+STAGNATION_LIMIT = 2
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -105,8 +132,29 @@ class AnalysisStep:
         return payload
 
 
+@dataclass
+class _AdaptiveToolBudget:
+    """State machine for the in-app tool budget."""
+
+    tool_limit: int = MAX_TOOL_CALLS_DEFAULT
+    no_progress_calls: int = 0
+    early_exit_reason: str | None = None
+
+    def record(
+        self, *, tool_calls: int, made_progress: bool, earned_evidence: bool
+    ) -> None:
+        self.no_progress_calls = 0 if made_progress else self.no_progress_calls + 1
+        if tool_calls >= MAX_TOOL_CALLS_DEFAULT and earned_evidence:
+            self.tool_limit = MAX_TOOL_CALLS_ABSOLUTE
+        if self.no_progress_calls >= STAGNATION_LIMIT:
+            self.early_exit_reason = "no_new_information"
+
+
 class DeepAnalysisService:
     """Let the configured model iteratively explore bounded read-only tools."""
+
+    default_max_tool_calls = MAX_TOOL_CALLS_DEFAULT
+    absolute_max_tool_calls = MAX_TOOL_CALLS_ABSOLUTE
 
     def __init__(self, provider: AIProvider | None) -> None:
         self._provider = provider
@@ -139,13 +187,30 @@ class DeepAnalysisService:
         planning_degraded = False
         iterations = 0
         last_dataset_result: dict[str, Any] | None = None
+        # Adaptive budget state.
+        budget = _AdaptiveToolBudget()
+        seen_information: set[str] = set()
+        loop = asyncio.get_running_loop()
+        budget_started = loop.time()
 
         for _ in range(MAX_AGENT_ITERATIONS):
             iterations += 1
-            if len(steps) >= MAX_TOOL_CALLS:
+            if len(steps) >= budget.tool_limit:
+                break
+            remaining_seconds = DEEP_ANALYSIS_BUDGET_SECONDS - (
+                loop.time() - budget_started
+            )
+            if remaining_seconds <= 0:
+                budget.early_exit_reason = "time_budget_exhausted"
                 break
             try:
-                decision = await self._decide(question, observations, len(steps))
+                decision = await asyncio.wait_for(
+                    self._decide(question, observations, len(steps), budget.tool_limit),
+                    timeout=remaining_seconds,
+                )
+            except TimeoutError:
+                budget.early_exit_reason = "time_budget_exhausted"
+                break
             except (AIProviderError, ValidationError, TypeError, ValueError) as exc:
                 logger.warning(
                     "deep agent decision failed iteration=%s error=%s",
@@ -181,7 +246,7 @@ class DeepAnalysisService:
                         "phase": "retry",
                         "message": "检测到重复调用，正在调整分析路径",
                         "tool_calls": len(steps),
-                        "max_tool_calls": MAX_TOOL_CALLS,
+                        "max_tool_calls": budget.tool_limit,
                     },
                 )
                 continue
@@ -192,14 +257,23 @@ class DeepAnalysisService:
                     step,
                     new_evidence,
                     dataset_result,
-                ) = await self._execute_action(
-                    db,
-                    request=request,
-                    decision=decision,
-                    allowed_dataset_documents=allowed_dataset_documents,
-                    allowed_dataset_ids=allowed_dataset_ids,
-                    allowed_chunk_ids=allowed_chunk_ids,
+                ) = await asyncio.wait_for(
+                    self._execute_action(
+                        db,
+                        request=request,
+                        decision=decision,
+                        allowed_dataset_documents=allowed_dataset_documents,
+                        allowed_dataset_ids=allowed_dataset_ids,
+                        allowed_chunk_ids=allowed_chunk_ids,
+                    ),
+                    timeout=max(
+                        0.001,
+                        DEEP_ANALYSIS_BUDGET_SECONDS - (loop.time() - budget_started),
+                    ),
                 )
+            except TimeoutError:
+                budget.early_exit_reason = "time_budget_exhausted"
+                break
             except (DatasetExecutionError, KnowledgeReadError, ValueError) as exc:
                 code = getattr(exc, "code", "invalid_action")
                 observation = {
@@ -219,14 +293,21 @@ class DeepAnalysisService:
 
             observations.append(observation)
             steps.append(step)
-            for item in new_evidence:
-                allowed_chunk_ids.add(item.chunk_id)
-                if item.table_location.get("query_result"):
-                    dataset_evidence.append(item)
-                    continue
-                current = evidence_by_chunk.get(item.chunk_id)
-                if current is None or item.score > current.score:
-                    evidence_by_chunk[item.chunk_id] = item
+            earned_evidence = _record_new_evidence(
+                new_evidence=new_evidence,
+                evidence_by_chunk=evidence_by_chunk,
+                dataset_evidence=dataset_evidence,
+                allowed_chunk_ids=allowed_chunk_ids,
+            )
+            observation_progress = _record_observation_progress(
+                observation, seen_information
+            )
+            made_progress = earned_evidence or observation_progress
+            budget.record(
+                tool_calls=len(steps),
+                made_progress=made_progress,
+                earned_evidence=earned_evidence,
+            )
             retrieval = observation.get("retrieval")
             if isinstance(retrieval, dict):
                 retrieval_statuses.append(retrieval)
@@ -238,7 +319,25 @@ class DeepAnalysisService:
                     "phase": "tool",
                     "step": step.to_dict(),
                     "tool_calls": len(steps),
-                    "max_tool_calls": MAX_TOOL_CALLS,
+                    "max_tool_calls": budget.tool_limit,
+                    "iterations": iterations,
+                },
+            )
+            if budget.early_exit_reason is not None:
+                break
+
+        if budget.early_exit_reason is not None:
+            await _emit_progress(
+                on_progress,
+                {
+                    "phase": "budget",
+                    "message": (
+                        "已达到 120 秒探索时限，正在用现有证据生成回答"
+                        if budget.early_exit_reason == "time_budget_exhausted"
+                        else "连续两次调用没有获得新信息，正在用现有证据生成回答"
+                    ),
+                    "tool_calls": len(steps),
+                    "max_tool_calls": budget.tool_limit,
                     "iterations": iterations,
                 },
             )
@@ -277,7 +376,7 @@ class DeepAnalysisService:
                     "phase": "tool",
                     "step": steps[-1].to_dict(),
                     "tool_calls": len(steps),
-                    "max_tool_calls": MAX_TOOL_CALLS,
+                    "max_tool_calls": budget.tool_limit,
                     "iterations": iterations,
                 },
             )
@@ -311,6 +410,8 @@ class DeepAnalysisService:
             retrieval_statuses=retrieval_statuses,
             planning_degraded=planning_degraded,
             last_dataset_result=last_dataset_result,
+            max_tool_calls=budget.tool_limit,
+            early_exit_reason=budget.early_exit_reason,
         )
         if not evidence:
             return AskResult(
@@ -330,7 +431,7 @@ class DeepAnalysisService:
                 "phase": "synthesis",
                 "message": "证据已整理，正在生成带引用的回答",
                 "tool_calls": len(steps),
-                "max_tool_calls": MAX_TOOL_CALLS,
+                "max_tool_calls": budget.tool_limit,
                 "iterations": iterations,
             },
         )
@@ -431,6 +532,7 @@ class DeepAnalysisService:
         question: str,
         observations: list[dict[str, Any]],
         tool_calls: int,
+        max_tool_calls: int = MAX_TOOL_CALLS_DEFAULT,
     ) -> AgentDecision:
         assert self._provider is not None
         system = (
@@ -442,7 +544,7 @@ class DeepAnalysisService:
             "用户问题": question,
             "当前进度": {
                 "已调用工具": tool_calls,
-                "最多工具调用": MAX_TOOL_CALLS,
+                "最多工具调用": max_tool_calls,
             },
             "可用动作": {
                 "search": {
@@ -939,6 +1041,8 @@ def _build_retrieval(
     retrieval_statuses: list[dict[str, Any]],
     planning_degraded: bool,
     last_dataset_result: dict[str, Any] | None,
+    max_tool_calls: int = MAX_TOOL_CALLS_DEFAULT,
+    early_exit_reason: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "mode": "deep_analysis",
@@ -959,10 +1063,12 @@ def _build_retrieval(
             "plan_summary": "根据每次工具返回结果逐步选择下一步",
             "iterations": iterations,
             "tool_calls": len(steps),
-            "max_tool_calls": MAX_TOOL_CALLS,
+            "max_tool_calls": max_tool_calls,
             "steps": [item.to_dict() for item in steps],
         },
     }
+    if early_exit_reason is not None:
+        payload["analysis"]["early_exit_reason"] = early_exit_reason
     if last_dataset_result is not None:
         plan = last_dataset_result.get("query_plan") or {}
         payload["structured_table"] = {
@@ -993,3 +1099,87 @@ def _bound_evidence(items: list[Evidence]) -> list[Evidence]:
         remaining -= len(item.snippet)
         result.append(item)
     return result
+
+
+def _record_new_evidence(
+    *,
+    new_evidence: list[Evidence],
+    evidence_by_chunk: dict[int, Evidence],
+    dataset_evidence: list[Evidence],
+    allowed_chunk_ids: set[int],
+) -> bool:
+    """Fold fresh evidence into the accumulator and report whether any was new.
+
+    Dataset results are distinct when their rendered query result differs,
+    even when they anchor to the same source chunk. Text retrieval only earns
+    new evidence when it discovers a previously unseen chunk.
+    """
+
+    earned = False
+    dataset_markers = {
+        (existing.chunk_id, existing.snippet) for existing in dataset_evidence
+    }
+    for item in new_evidence:
+        if item.table_location.get("query_result"):
+            marker = (item.chunk_id, item.snippet)
+            if marker not in dataset_markers:
+                earned = True
+                dataset_markers.add(marker)
+            dataset_evidence.append(item)
+            continue
+        allowed_chunk_ids.add(item.chunk_id)
+        current = evidence_by_chunk.get(item.chunk_id)
+        if current is None or item.score > current.score:
+            if current is None:
+                earned = True
+            evidence_by_chunk[item.chunk_id] = item
+    return earned
+
+
+def _record_observation_progress(
+    observation: dict[str, Any], seen_information: set[str]
+) -> bool:
+    """Record non-citable but useful discovery progress.
+
+    Dataset discovery and schema inspection are necessary steps rather than
+    stagnation. A zero-row query only advances the plan when it carries a new
+    machine-readable recovery hint. Errors and repeated information do not.
+    """
+
+    if observation.get("status") != "completed":
+        return False
+    tool = str(observation.get("tool") or "")
+    output = observation.get("output")
+    if not isinstance(output, dict):
+        return False
+
+    keys: set[str] = set()
+    if tool == "search":
+        for hit in output.get("hits") or []:
+            if isinstance(hit, dict) and hit.get("chunk_id") is not None:
+                keys.add(f"chunk:{hit['chunk_id']}")
+    elif tool == "list_datasets":
+        for item in output.get("items") or []:
+            if isinstance(item, dict) and item.get("id") is not None:
+                keys.add(f"dataset:{item['id']}")
+    elif tool == "get_dataset_schema":
+        dataset_id = output.get("id") or output.get("dataset_id")
+        fields = output.get("fields") or []
+        if dataset_id is not None and fields:
+            keys.add(f"schema:{dataset_id}")
+    elif tool == "query_dataset":
+        if int(output.get("matched_row_count") or 0) > 0:
+            keys.add(_stable_information_key("dataset-result", observation))
+        for hint in output.get("query_hints") or []:
+            keys.add(_stable_information_key("query-hint", hint))
+    elif tool == "read_chunk" and output.get("id") is not None:
+        keys.add(f"chunk:{output['id']}")
+
+    new_keys = keys.difference(seen_information)
+    seen_information.update(keys)
+    return bool(new_keys)
+
+
+def _stable_information_key(prefix: str, value: Any) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return f"{prefix}:{serialized}"

@@ -31,7 +31,14 @@ from apps.api.models.taxonomy import (
 )
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
-from apps.api.services.deep_analysis import DeepAnalysisService, _select_dataset_chunk
+from apps.api.services.deep_analysis import (
+    MAX_TOOL_CALLS_ABSOLUTE,
+    MAX_TOOL_CALLS_DEFAULT,
+    DeepAnalysisService,
+    _AdaptiveToolBudget,
+    _record_observation_progress,
+    _select_dataset_chunk,
+)
 from apps.api.services.qa import (
     AskError,
     AskRequest,
@@ -39,6 +46,72 @@ from apps.api.services.qa import (
     _expanded_chunk_context,
     _merge_neighbor_context,
 )
+
+
+def test_adaptive_budget_expands_only_on_new_citable_evidence():
+    discovery_only = _AdaptiveToolBudget()
+    discovery_only.record(
+        tool_calls=MAX_TOOL_CALLS_DEFAULT,
+        made_progress=True,
+        earned_evidence=False,
+    )
+    assert discovery_only.tool_limit == MAX_TOOL_CALLS_DEFAULT
+
+    evidence_growing = _AdaptiveToolBudget()
+    evidence_growing.record(
+        tool_calls=MAX_TOOL_CALLS_DEFAULT,
+        made_progress=True,
+        earned_evidence=True,
+    )
+    assert evidence_growing.tool_limit == MAX_TOOL_CALLS_ABSOLUTE
+
+
+def test_adaptive_budget_stops_after_two_calls_without_new_information():
+    budget = _AdaptiveToolBudget()
+    budget.record(tool_calls=1, made_progress=False, earned_evidence=False)
+    assert budget.early_exit_reason is None
+    budget.record(tool_calls=2, made_progress=False, earned_evidence=False)
+    assert budget.early_exit_reason == "no_new_information"
+
+
+def test_dataset_discovery_schema_and_recovery_hint_count_as_progress():
+    seen: set[str] = set()
+    assert _record_observation_progress(
+        {
+            "tool": "list_datasets",
+            "status": "completed",
+            "output": {"items": [{"id": 14}]},
+        },
+        seen,
+    )
+    assert _record_observation_progress(
+        {
+            "tool": "get_dataset_schema",
+            "status": "completed",
+            "output": {"dataset_id": 14, "fields": [{"name": "地区"}]},
+        },
+        seen,
+    )
+    zero_with_hint = {
+        "tool": "query_dataset",
+        "status": "completed",
+        "output": {
+            "matched_row_count": 0,
+            "query_hints": [
+                {
+                    "type": "hierarchy_children_available",
+                    "suggested_filter": {
+                        "column": "地区",
+                        "operator": "direct_child_of",
+                        "value": "全国",
+                    },
+                }
+            ],
+        },
+    }
+    assert _record_observation_progress(zero_with_hint, seen)
+    assert not _record_observation_progress(zero_with_hint, seen)
+
 
 # --- fixtures -------------------------------------------------------------
 
@@ -437,6 +510,36 @@ def test_deep_analysis_observes_each_search_before_next_action(qa_db):
     assert result.citations[0]["title"] == "向量检索"
     assert len(provider.json_calls) == 3
     assert "向量检索" in provider.json_calls[1]["prompt"]
+
+
+def test_deep_analysis_time_budget_falls_back_to_existing_evidence(qa_db, monkeypatch):
+    import apps.api.services.deep_analysis as deep_service_module
+
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="超时降级资料",
+            body="达到探索时限后，应使用已经检索到的资料生成回答。",
+        )
+        monkeypatch.setattr(deep_service_module, "DEEP_ANALYSIS_BUDGET_SECONDS", 0.0)
+        provider = StubProvider()
+        provider.queue(
+            AnswerResult(
+                answer="达到探索时限后会使用已有资料回答。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            return await DeepAnalysisService(provider).ask(
+                session, AskRequest(question="达到探索时限后怎么办？")
+            )
+
+    result = asyncio.run(_run())
+    assert result.retrieval["analysis"]["early_exit_reason"] == (
+        "time_budget_exhausted"
+    )
+    assert result.citations[0]["title"] == "超时降级资料"
 
 
 def test_deep_analysis_revises_dataset_query_after_zero_rows(qa_db, monkeypatch):
