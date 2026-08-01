@@ -76,6 +76,19 @@ def test_file_upload_reuses_blob_but_keeps_explicit_document_records(client):
     assert downloaded_by_document.content == content
     assert "knowledge.txt" in downloaded_by_document.headers["content-disposition"]
 
+    inline_preview = test_client.get(
+        f"/api/documents/{first_body['id']}/original?inline=true"
+    )
+    assert inline_preview.status_code == 200
+    assert inline_preview.headers["content-disposition"].startswith("inline;")
+
+    overview = test_client.get("/api/documents/overview?limit=200")
+    assert overview.status_code == 200
+    overview_version = overview.json()[0]["current_version"]
+    assert overview_version["processing_status"] == "created"
+    assert "raw_content" not in overview_version
+    assert "structured_content" not in overview_version
+
 
 def test_file_upload_validates_extension_and_mime(client):
     test_client, _ = client

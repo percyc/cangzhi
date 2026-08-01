@@ -88,6 +88,39 @@ class DocumentResponse(BaseModel):
     summary: DocumentSummaryResponse | None = None
 
 
+class DocumentVersionListResponse(BaseModel):
+    """Small version projection used by collection views.
+
+    Raw and structured content can be many megabytes, so they must not be
+    serialized when the UI only needs a status badge.
+    """
+
+    id: int
+    version_number: int
+    processing_status: str
+    created_at: datetime
+
+
+class DocumentListItemResponse(BaseModel):
+    id: int
+    title: str
+    description: str | None
+    source_type: str
+    source_url: str | None
+    content_kind: str = "document"
+    origin: DocumentOriginResponse | None = None
+    is_deleted: bool
+    deleted_at: datetime | None = None
+    delete_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    current_version: DocumentVersionListResponse | None = None
+    primary_category: CategoryMini | None = None
+    categories: list[CategoryMini] = Field(default_factory=list)
+    tags: list[TagMini] = Field(default_factory=list)
+    summary: DocumentSummaryResponse | None = None
+
+
 class ProcessingJobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

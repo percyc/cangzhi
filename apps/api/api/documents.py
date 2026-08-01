@@ -25,12 +25,16 @@ from ..models.taxonomy import (
 from ..models.webdav import WebDAVEntry, WebDAVSource
 from ..security.secrets import decrypt_secret
 from ..security.url_safety import URLSecurityError
-from ..services.webdav import WebDAVError, download_file
 from ..services.document_lifecycle import (
     purge_documents as purge_document_records,
+)
+from ..services.document_lifecycle import (
     restore_documents as restore_document_records,
+)
+from ..services.document_lifecycle import (
     trash_documents as trash_document_records,
 )
+from ..services.webdav import WebDAVError, download_file
 from ..storage import get_storage
 from ..storage.base import BlobStorage
 from .schemas import (
@@ -39,11 +43,13 @@ from .schemas import (
     DocumentBatchActionRequest,
     DocumentBatchOrganizeRequest,
     DocumentCategoryUpdateRequest,
+    DocumentListItemResponse,
     DocumentMetadataUpdateRequest,
     DocumentReprocessResponse,
     DocumentResponse,
     DocumentSummaryResponse,
     DocumentTagsUpdateRequest,
+    DocumentVersionListResponse,
     DocumentVersionResponse,
     ProcessingJobResponse,
     TagMini,
@@ -60,6 +66,7 @@ def _download_response(
     filename: str,
     content_type: str,
     content_length: int,
+    disposition: str = "attachment",
 ) -> StreamingResponse:
     encoded_filename = quote(filename or "download")
     return StreamingResponse(
@@ -67,7 +74,7 @@ def _download_response(
         media_type=content_type or "application/octet-stream",
         headers={
             "Content-Disposition": (
-                f"attachment; filename*=UTF-8''{encoded_filename}"
+                f"{disposition}; filename*=UTF-8''{encoded_filename}"
             ),
             "Content-Length": str(content_length),
         },
@@ -223,8 +230,7 @@ async def build_document_response(
             "label": (
                 connector.name
                 if connector
-                else document_meta.get("webdav_source_name")
-                or "已删除的 WebDAV 连接器"
+                else document_meta.get("webdav_source_name") or "已删除的 WebDAV 连接器"
             ),
             "connector_id": connector_id,
             "remote_path": document_meta.get("webdav_path"),
@@ -286,6 +292,166 @@ async def list_documents(
         await build_document_response(db, document)
         for document in result.scalars().all()
     ]
+
+
+@router.get("/overview", response_model=list[DocumentListItemResponse])
+async def list_document_overview(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    deleted: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return collection-card data using a fixed number of database queries."""
+
+    documents = list(
+        (
+            await db.scalars(
+                select(Document)
+                .where(Document.is_deleted.is_(deleted))
+                .order_by(Document.updated_at.desc(), Document.id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+        ).all()
+    )
+    version_ids = [
+        document.current_version_id
+        for document in documents
+        if document.current_version_id is not None
+    ]
+    version_rows = (
+        (
+            await db.execute(
+                select(
+                    DocumentVersion.id,
+                    DocumentVersion.version_number,
+                    DocumentVersion.processing_status,
+                    DocumentVersion.created_at,
+                ).where(DocumentVersion.id.in_(version_ids))
+            )
+        ).all()
+        if version_ids
+        else []
+    )
+    versions = {version.id: version for version in version_rows}
+    category_map = await _load_categories_for_versions(db, version_ids)
+    tag_map = await _load_tags_for_versions(db, version_ids)
+    summary_map = await _load_summaries_for_versions(db, version_ids)
+    dataset_version_ids = set(
+        (
+            await db.scalars(
+                select(KnowledgeDataset.document_version_id).where(
+                    KnowledgeDataset.document_version_id.in_(version_ids)
+                )
+            )
+        ).all()
+        if version_ids
+        else []
+    )
+
+    webdav_documents = [
+        document
+        for document in documents
+        if (document.meta or {}).get("external_source") == "webdav"
+    ]
+    connector_ids = {
+        connector_id
+        for document in webdav_documents
+        if isinstance(
+            connector_id := (document.meta or {}).get("webdav_source_id"), int
+        )
+    }
+    connectors = {
+        source.id: source
+        for source in (
+            (
+                await db.scalars(
+                    select(WebDAVSource).where(WebDAVSource.id.in_(connector_ids))
+                )
+            ).all()
+            if connector_ids
+            else []
+        )
+    }
+    webdav_document_ids = [document.id for document in webdav_documents]
+    entries = {
+        entry.document_id: entry
+        for entry in (
+            (
+                await db.scalars(
+                    select(WebDAVEntry).where(
+                        WebDAVEntry.document_id.in_(webdav_document_ids)
+                    )
+                )
+            ).all()
+            if webdav_document_ids
+            else []
+        )
+        if entry.document_id is not None
+    }
+
+    output: list[DocumentListItemResponse] = []
+    for document in documents:
+        version = versions.get(document.current_version_id)
+        version_id = version.id if version else None
+        primary_category, categories = category_map.get(version_id, (None, []))
+        document_meta = document.meta or {}
+        origin = None
+        if document in webdav_documents:
+            connector_id = document_meta.get("webdav_source_id")
+            connector = connectors.get(connector_id)
+            entry = entries.get(document.id)
+            origin = {
+                "kind": "webdav",
+                "label": (
+                    connector.name
+                    if connector
+                    else document_meta.get("webdav_source_name")
+                    or "已删除的 WebDAV 连接器"
+                ),
+                "connector_id": connector_id,
+                "remote_path": document_meta.get("webdav_path"),
+                "connector_available": connector is not None,
+                "source_status": entry.state if entry else None,
+            }
+        content_kind = (
+            "note"
+            if document.source_type == DocumentSourceType.note
+            else "dataset"
+            if version_id in dataset_version_ids
+            else "document"
+        )
+        output.append(
+            DocumentListItemResponse(
+                id=document.id,
+                title=document.title,
+                description=document.description,
+                source_type=document.source_type.value,
+                source_url=document.source_url,
+                content_kind=content_kind,
+                origin=origin,
+                is_deleted=document.is_deleted,
+                deleted_at=document.deleted_at,
+                delete_reason=document.delete_reason,
+                created_at=document.created_at,
+                updated_at=document.updated_at,
+                current_version=(
+                    DocumentVersionListResponse(
+                        id=version.id,
+                        version_number=version.version_number,
+                        processing_status=version.processing_status,
+                        created_at=version.created_at,
+                    )
+                    if version
+                    else None
+                ),
+                primary_category=primary_category,
+                categories=categories,
+                tags=tag_map.get(version_id, []),
+                summary=summary_map.get(version_id),
+            )
+        )
+    return output
 
 
 @router.post("/batch/trash", response_model=dict)
@@ -357,11 +523,7 @@ async def empty_trash(
     storage: BlobStorage = Depends(get_storage),
 ):
     documents = list(
-        (
-            await db.execute(
-                select(Document).where(Document.is_deleted.is_(True))
-            )
-        )
+        (await db.execute(select(Document).where(Document.is_deleted.is_(True))))
         .scalars()
         .all()
     )
@@ -399,9 +561,7 @@ async def organize_documents(
     if payload.category_id is not None and category is None:
         raise HTTPException(status_code=404, detail="分类不存在")
     tags = (
-        (
-            await db.execute(select(Tag).where(Tag.id.in_(payload.add_tag_ids)))
-        )
+        (await db.execute(select(Tag).where(Tag.id.in_(payload.add_tag_ids))))
         .scalars()
         .all()
         if payload.add_tag_ids
@@ -417,8 +577,7 @@ async def organize_documents(
         if category is not None:
             await db.execute(
                 delete(DocumentCategory).where(
-                    DocumentCategory.document_version_id
-                    == document.current_version_id
+                    DocumentCategory.document_version_id == document.current_version_id
                 )
             )
             db.add(
@@ -490,8 +649,7 @@ async def update_document_metadata(
         summary = (
             await db.execute(
                 select(DocumentSummary).where(
-                    DocumentSummary.document_version_id
-                    == document.current_version_id
+                    DocumentSummary.document_version_id == document.current_version_id
                 )
             )
         ).scalar_one_or_none()
@@ -528,9 +686,7 @@ async def update_document_tags(
     if document.current_version_id is None:
         raise HTTPException(status_code=400, detail="资料没有当前版本")
     tags = (
-        (
-            await db.execute(select(Tag).where(Tag.id.in_(payload.tag_ids)))
-        )
+        (await db.execute(select(Tag).where(Tag.id.in_(payload.tag_ids))))
         .scalars()
         .all()
         if payload.tag_ids
@@ -605,6 +761,7 @@ async def permanently_delete_document(
 @router.get("/{document_id}/original")
 async def download_document_original(
     document_id: int,
+    inline: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     storage: BlobStorage = Depends(get_storage),
 ):
@@ -663,6 +820,7 @@ async def download_document_original(
             filename=entry.remote_path.rsplit("/", 1)[-1],
             content_type=upstream_type.split(";", 1)[0].strip(),
             content_length=len(payload),
+            disposition="inline" if inline else "attachment",
         )
 
     if version.blob_id is None:
@@ -679,6 +837,7 @@ async def download_document_original(
         filename=blob.original_filename or "download",
         content_type=blob.content_type,
         content_length=blob.file_size,
+        disposition="inline" if inline else "attachment",
     )
 
 
@@ -699,10 +858,7 @@ async def reprocess_document(
         raise HTTPException(status_code=404, detail="当前版本不存在")
 
     document_meta = document.meta or {}
-    if (
-        document_meta.get("external_source") == "webdav"
-        and version.blob_id is None
-    ):
+    if document_meta.get("external_source") == "webdav" and version.blob_id is None:
         source_id = document_meta.get("webdav_source_id")
         source = (
             await db.get(WebDAVSource, source_id)

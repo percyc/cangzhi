@@ -93,7 +93,7 @@ export default function DocumentsListPage() {
 
   const load = useCallback(() => {
     setLoading(true);
-    return fetch(`/api/documents?limit=200&deleted=${view === 'trash'}`)
+    return fetch(`/api/documents/overview?limit=200&deleted=${view === 'trash'}`)
       .then(res => {
         if (!res.ok) throw new Error('暂时无法读取资料');
         return res.json();

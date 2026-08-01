@@ -948,10 +948,10 @@ function CitationItem({
             </>
           )}
           <Link
-            href={`/documents/${citation.document_id}?return_to=ask`}
+            href={`/documents/${citation.document_id}?return_to=ask&chunk_id=${citation.chunk_id}${citation.page ? `&page=${citation.page}` : ''}${citation.paragraph_index !== null ? `&paragraph=${citation.paragraph_index}` : ''}`}
             className="mt-3 inline-flex text-xs font-medium text-blue-700 hover:underline"
           >
-            打开完整文档 →
+            在原文中定位 →
           </Link>
         </div>
       </details>

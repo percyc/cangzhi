@@ -194,12 +194,41 @@ export default function DocumentDetailPage() {
   const [pipelineExpanded, setPipelineExpanded] = useState(false);
   const [returnToAsk, setReturnToAsk] = useState(false);
   const [datasets, setDatasets] = useState<KnowledgeDataset[]>([]);
+  const [previewMode, setPreviewMode] = useState<'original' | 'parsed'>('parsed');
+  const [citationTarget, setCitationTarget] = useState<{
+    chunkId: number;
+    page: number | null;
+    paragraph: number | null;
+    content: string | null;
+    headingPath: string[];
+  } | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setReturnToAsk(
-        new URLSearchParams(window.location.search).get('return_to') === 'ask',
-      );
+      const query = new URLSearchParams(window.location.search);
+      setReturnToAsk(query.get('return_to') === 'ask');
+      const chunkId = Number(query.get('chunk_id'));
+      if (Number.isInteger(chunkId) && chunkId > 0) {
+        const page = Number(query.get('page'));
+        const paragraph = query.has('paragraph') ? Number(query.get('paragraph')) : null;
+        setCitationTarget({
+          chunkId,
+          page: Number.isInteger(page) && page > 0 ? page : null,
+          paragraph: paragraph !== null && Number.isInteger(paragraph) && paragraph >= 0 ? paragraph : null,
+          content: null,
+          headingPath: [],
+        });
+        void fetch(`/api/v1/knowledge/chunks/${chunkId}`, { cache: 'no-store' })
+          .then((response) => response.ok ? response.json() : Promise.reject(new Error()))
+          .then((chunk: { content?: string; heading_path?: string[] }) => {
+            setCitationTarget((current) => current?.chunkId === chunkId ? {
+              ...current,
+              content: chunk.content ?? null,
+              headingPath: chunk.heading_path ?? [],
+            } : current);
+          })
+          .catch(() => undefined);
+      }
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -243,6 +272,15 @@ export default function DocumentDetailPage() {
       if (!datasetsResponse.ok) throw new Error('读取数据集失败');
       const documentBody = (await documentResponse.json()) as Document;
       setDocument(documentBody);
+      const filename = (
+        documentBody.current_version?.blob?.original_filename ??
+        documentBody.origin?.remote_path ??
+        ''
+      ).toLowerCase();
+      const contentType = documentBody.current_version?.blob?.content_type?.toLowerCase() ?? '';
+      if (filename.endsWith('.pdf') || contentType === 'application/pdf') {
+        setPreviewMode('original');
+      }
       setLatestJob(await jobResponse.json());
       setPipeline((await pipelineResponse.json()) as ProcessingPipeline);
       const categoryBody = (await categoriesResponse.json()) as CategoryOption[];
@@ -373,6 +411,15 @@ export default function DocumentDetailPage() {
         (document.origin?.kind === 'webdav' &&
           document.origin.connector_available),
     );
+  const originalFilename = (
+    version?.blob?.original_filename ?? document.origin?.remote_path ?? ''
+  ).toLowerCase();
+  const originalContentType = version?.blob?.content_type?.toLowerCase() ?? '';
+  const isPdf =
+    originalFilename.endsWith('.pdf') || originalContentType === 'application/pdf';
+  const isWord = /\.docx?$/.test(originalFilename) ||
+    originalContentType.includes('wordprocessingml') ||
+    originalContentType === 'application/msword';
   const knowledgeStatus =
     pipeline?.overall_status === 'completed'
       ? '知识库已就绪'
@@ -597,7 +644,55 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
-      {datasets.length > 0 ? (
+      {citationTarget && (
+        <section id="citation-focus" className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-amber-950">引用原文定位</h2>
+            <span className="text-xs text-amber-800">
+              {citationTarget.headingPath.length > 0 ? citationTarget.headingPath.join(' › ') : '当前文档'}
+              {citationTarget.page ? ` · 第 ${citationTarget.page} 页` : ''}
+              {citationTarget.paragraph !== null ? ` · 第 ${citationTarget.paragraph + 1} 段` : ''}
+            </span>
+          </div>
+          {citationTarget.content ? (
+            <blockquote className="mt-3 whitespace-pre-wrap border-l-4 border-amber-400 pl-4 text-sm leading-7 text-slate-800">
+              <mark className="bg-amber-200/80 text-inherit">{citationTarget.content}</mark>
+            </blockquote>
+          ) : (
+            <p className="mt-2 text-xs text-amber-800">正在读取引用段落…</p>
+          )}
+        </section>
+      )}
+
+      {isPdf && (
+        <section className="mt-6">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="font-semibold text-slate-900">文档预览</h2>
+              <p className="mt-1 text-xs text-slate-500">原文版保持 PDF 排版；解析版用于检索核对。</p>
+            </div>
+            <div className="flex rounded-lg bg-slate-100 p-1 text-sm">
+              <button type="button" onClick={() => setPreviewMode('original')} className={`rounded-md px-3 py-1.5 ${previewMode === 'original' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>原文版</button>
+              <button type="button" onClick={() => setPreviewMode('parsed')} className={`rounded-md px-3 py-1.5 ${previewMode === 'parsed' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>解析版</button>
+            </div>
+          </div>
+          {previewMode === 'original' && (
+            <iframe
+              title={`${document.title} 原文预览`}
+              src={`/api/documents/${document.id}/original?inline=true${citationTarget?.page ? `#page=${citationTarget.page}` : ''}`}
+              className="h-[72vh] min-h-[560px] w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
+            />
+          )}
+        </section>
+      )}
+
+      {isWord && (
+        <div className="mt-6 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+          当前显示的是 Word 解析版。Word 原样预览需要生成 PDF 预览件；原文件仍可从上方下载，不会被替换。
+        </div>
+      )}
+
+      {isPdf && previewMode === 'original' ? null : datasets.length > 0 ? (
         <DatasetWorkspace datasets={datasets} />
       ) : version?.raw_content ? (
         rendersAsMarkdown ? (

@@ -61,7 +61,7 @@ export default function InboxPage() {
 
   const load = useCallback(async () => {
     try {
-      const documentsResponse = await fetch('/api/documents?limit=200', {
+      const documentsResponse = await fetch('/api/documents/overview?limit=200', {
         cache: 'no-store',
       });
       if (!documentsResponse.ok) throw new Error('资料列表读取失败');
