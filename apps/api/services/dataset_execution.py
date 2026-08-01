@@ -501,9 +501,15 @@ def validate_safe_query(
         raise DatasetExecutionError("invalid_query", "筛选条件数量无效")
     clean_filters: list[dict[str, Any]] = []
     for item in filters:
-        if not isinstance(item, dict) or set(item) != {"column", "operator", "value"}:
+        if not isinstance(item, dict):
             raise DatasetExecutionError("invalid_query", "筛选条件格式无效")
-        column, operator = str(item["column"]), str(item["operator"])
+        keys = frozenset(item)
+        canonical_keys = {"column", "operator", "value"}
+        alias_keys = {"column", "op", "value"}
+        if keys not in {frozenset(canonical_keys), frozenset(alias_keys)}:
+            raise DatasetExecutionError("invalid_query", "筛选条件格式无效")
+        column = str(item["column"])
+        operator = str(item.get("operator", item.get("op")))
         value = item["value"]
         if column not in available or operator not in ALLOWED_OPERATORS:
             raise DatasetExecutionError("invalid_query", "筛选列或运算符无效")

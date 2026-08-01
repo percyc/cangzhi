@@ -32,6 +32,7 @@ from ..services.knowledge_scopes import (
 )
 from ..services.qa import AskError, AskRequest, QAService
 from ..services.search import search_documents
+from .schemas import DatasetFilterInput
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 _mcp_identity = require_api_identity()
@@ -90,7 +91,7 @@ class DatasetPreviewArguments(DatasetIdArguments):
 
 
 class DatasetQueryArguments(DatasetIdArguments):
-    filters: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    filters: list[DatasetFilterInput] = Field(default_factory=list, max_length=8)
     columns: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, max_length=3)
     metric: str = "rows"
@@ -237,6 +238,8 @@ TOOLS = [
         "description": (
             "通过受控计划执行投影、筛选、排序、分组和聚合，由 DuckDB/Parquet 下推计算。"
             "不接受 SQL，最多返回 200 行，适合大型 Excel，避免把整表放入模型上下文。"
+            "filters 每项使用 column、operator、value；operator 支持 "
+            "eq/ne/gt/gte/lt/lte/contains/in。"
         ),
         "inputSchema": DatasetQueryArguments.model_json_schema(),
         "annotations": {

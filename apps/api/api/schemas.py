@@ -1,7 +1,32 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class DatasetFilterInput(BaseModel):
+    """Public dataset filter contract shared by REST and MCP.
+
+    ``operator`` is canonical. ``op`` remains accepted because several agent
+    clients use that conventional spelling when a nested schema is vague.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    column: str = Field(min_length=1, max_length=255)
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in"]
+    value: Any
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_op_alias(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "op" not in value:
+            return value
+        if "operator" in value and value["operator"] != value["op"]:
+            raise ValueError("op 与 operator 不能冲突")
+        normalized = dict(value)
+        normalized["operator"] = normalized.pop("op")
+        return normalized
 
 
 class BlobResponse(BaseModel):

@@ -132,6 +132,33 @@ def test_parquet_build_and_duckdb_pushdown(tmp_path: Path):
     ).is_file()
 
 
+def test_dataset_query_accepts_op_alias(tmp_path: Path):
+    _document_id, dataset_id = _seed_and_build(tmp_path)
+
+    async def run():
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'builder.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            result = await execute_dataset_query(
+                session,
+                dataset_id,
+                {
+                    "filters": [{"column": "地区", "op": "eq", "value": "华东"}],
+                    "columns": ["地区", "金额"],
+                    "limit": 10,
+                },
+                storage_root=tmp_path / "storage",
+            )
+        await engine.dispose()
+        return result
+
+    result = asyncio.run(run())
+    assert result["matched_row_count"] == 2
+    assert {row["地区"] for row in result["rows"]} == {"华东"}
+
+
 def test_query_plan_rejects_unknown_columns(tmp_path: Path):
     _document_id, dataset_id = _seed_and_build(tmp_path)
 

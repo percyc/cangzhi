@@ -16,6 +16,7 @@ from ..services.dataset_execution import (
     execute_dataset_query,
     preview_dataset,
 )
+from .schemas import DatasetFilterInput
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -230,7 +231,7 @@ async def preview_dataset_rows(
 
 
 class DatasetQueryPayload(BaseModel):
-    filters: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    filters: list[DatasetFilterInput] = Field(default_factory=list, max_length=8)
     columns: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, max_length=3)
     metric: str = "rows"

@@ -33,6 +33,7 @@ from ..services.knowledge_scopes import (
 )
 from ..services.qa import AskError, AskRequest, QAService
 from ..services.search import DEFAULT_LIMIT, MAX_LIMIT, search_documents
+from .schemas import DatasetFilterInput
 
 router = APIRouter(prefix="/v1", tags=["knowledge-v1"])
 
@@ -62,7 +63,7 @@ class KnowledgeAskPayload(ScopeSelector):
 
 
 class DatasetQueryPayload(BaseModel):
-    filters: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    filters: list[DatasetFilterInput] = Field(default_factory=list, max_length=8)
     columns: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, max_length=3)
     metric: str = "rows"

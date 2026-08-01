@@ -109,6 +109,23 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "knowledge_preview_dataset_rows",
         "knowledge_query_dataset",
     }
+    query_tool = next(
+        item
+        for item in tools.json()["result"]["tools"]
+        if item["name"] == "knowledge_query_dataset"
+    )
+    filter_schema = query_tool["inputSchema"]["$defs"]["DatasetFilterInput"]
+    assert set(filter_schema["properties"]) == {"column", "operator", "value"}
+    assert filter_schema["properties"]["operator"]["enum"] == [
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "in",
+    ]
     mcp_search = test_client.post(
         "/api/mcp",
         headers=headers,
