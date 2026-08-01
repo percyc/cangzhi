@@ -45,8 +45,9 @@ Authorization: Bearer ${CANGZHI_TOKEN}
 `/api/v1/knowledge/ask`，MCP 调用 `knowledge_ask`；对应令牌必须包含
 `knowledge:ask`。
 
-问答请求可传 `mode: "quick" | "deep"`。默认 `quick`；`deep` 由藏知内部编排器
-执行最多 5 次只读检索或数据集查询并返回动作摘要。CLI 对应 `cangzhi ask --deep`。
+网页、REST 和 CLI 问答可选择 `quick | deep`，CLI 对应 `cangzhi ask --deep`。
+MCP 的 `knowledge_ask` 固定为快速问答，不暴露 `deep`；Skill 和外部 Agent 应自行
+组合检索、读取和数据集工具，避免“外部 AI → 藏知 AI → 外部 AI”的重复推理。
 
 `knowledge_get_document` 是分页原文读取工具，默认最多返回 12000 字符，并在
 `content_window` 中给出总长度、截断状态和 `next_offset`。大型 Excel 或长文档不要

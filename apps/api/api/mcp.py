@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import build_provider_from_db
@@ -19,7 +19,6 @@ from ..services.dataset_execution import (
     list_visible_datasets,
     preview_dataset,
 )
-from ..services.deep_analysis import DeepAnalysisService
 from ..services.knowledge_read import (
     KnowledgeReadError,
     read_current_chunk,
@@ -61,8 +60,9 @@ class SearchArguments(BaseModel):
 
 
 class AskArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question: str = Field(min_length=1, max_length=500)
-    mode: Literal["quick", "deep"] = "quick"
     scope_id: int | None = Field(default=None, ge=1)
     scope_slug: str | None = Field(default=None, max_length=128)
     category_ids: list[int] = Field(default_factory=list)
@@ -153,9 +153,9 @@ TOOLS = [
         "name": "knowledge_ask",
         "title": "询问藏知",
         "description": (
-            "由藏知检索并回答问题，返回可核验引用。表格的筛选、明细、统计、"
-            "分组和排序会优先使用精确计算；需要完整答案时优先使用本工具。"
-            "mode=quick 为默认单轮问答；mode=deep 会进行最多 5 次受控只读工具调用。"
+            "由藏知执行一次快速检索并回答问题，返回可核验引用。表格的筛选、"
+            "明细、统计、分组和排序会优先使用精确计算。外部 Agent 的复杂分析"
+            "应自行组合搜索、读取和数据集工具；本工具不提供 deep 模式。"
         ),
         "inputSchema": AskArguments.model_json_schema(),
         "annotations": {
@@ -421,12 +421,7 @@ async def _call_tool(
                 document_ids=args.document_ids,
             )
             provider = await build_provider_from_db(db)
-            service = (
-                DeepAnalysisService(provider)
-                if args.mode == "deep"
-                else QAService(provider)
-            )
-            result = await service.ask(
+            result = await QAService(provider).ask(
                 db,
                 AskRequest(
                     question=args.question.strip(),
@@ -550,7 +545,9 @@ async def mcp_post(
                     "按 content_window.next_offset 分页读取，避免大型文档挤占上下文。"
                     "发现表格后先用 knowledge_list_datasets 和 "
                     "knowledge_get_dataset_schema，再用 knowledge_query_dataset 做筛选聚合；"
-                    "不要通过预览工具遍历整个数据集。"
+                    "不要通过预览工具遍历整个数据集。复杂分析应由当前外部 Agent "
+                    "组合上述工具完成；MCP 不提供藏知内部 deep 编排，以避免双重 "
+                    "Agent 和重复模型消耗。"
                 ),
             },
         )

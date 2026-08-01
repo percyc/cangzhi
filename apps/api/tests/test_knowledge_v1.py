@@ -126,6 +126,13 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "contains",
         "in",
     ]
+    ask_tool = next(
+        item
+        for item in tools.json()["result"]["tools"]
+        if item["name"] == "knowledge_ask"
+    )
+    assert "mode" not in ask_tool["inputSchema"]["properties"]
+    assert ask_tool["inputSchema"]["additionalProperties"] is False
     mcp_search = test_client.post(
         "/api/mcp",
         headers=headers,
@@ -383,6 +390,25 @@ def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
     assert tool_result["isError"] is False
     assert tool_result["structuredContent"]["answer"] == "藏知是个人知识中枢。"
     assert tool_result["structuredContent"]["citations"][0]["title"] == "中枢设计"
+
+    nested_deep = test_client.post(
+        "/api/mcp",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "knowledge_ask",
+                "arguments": {
+                    "question": "藏知是什么？",
+                    "mode": "deep",
+                },
+            },
+        },
+    ).json()["result"]
+    assert nested_deep["isError"] is True
+    assert nested_deep["structuredContent"]["error"]["code"] == "invalid_arguments"
 
 
 def test_missing_saved_scope_never_broadens_to_all(client):

@@ -30,9 +30,9 @@ Search body:
 Only send one of `scope_slug` and `scope_id`. Request-time filters narrow a
 saved scope by intersection; they never broaden it.
 
-Ask body accepts `mode: "quick"` (default) or `mode: "deep"`. Deep mode uses
-a bounded internal tool plan and includes `retrieval.analysis.steps`; use it
-for cross-document comparison or complex table analysis, not routine lookup.
+Direct REST clients may send `mode: "quick"` (default) or `mode: "deep"`.
+This skill must use quick mode only: its host AI is already the analysis
+orchestrator and should combine search/read/dataset endpoints itself.
 
 Use `facets` to discover valid category, tag, source-type, and connector IDs
 before adding request-time filters. Options in the same dimension use OR
@@ -72,6 +72,9 @@ Supported tools:
 
 Tool results include both text content and `structuredContent`. Prefer the
 structured result.
+`knowledge_ask` is quick-only over MCP. Complex work should be planned by the
+external agent with the retrieval and dataset tools; do not nest a second deep
+agent inside the MCP call.
 `knowledge_get_document` returns a bounded content window (12000 characters by
 default). Follow `content_window.next_offset` only when more source text is
 actually required; never request an entire large spreadsheet merely to answer
