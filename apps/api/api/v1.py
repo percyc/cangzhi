@@ -20,6 +20,11 @@ from ..core.db import get_db
 from ..models.datasets import KnowledgeDataset
 from ..models.documents import Document
 from ..security.api_auth import APIIdentity, require_api_identity
+from ..services.ask_history import (
+    AskHistoryError,
+    get_owned_conversation,
+    record_ask_turn,
+)
 from ..services.dataset_execution import (
     DatasetExecutionError,
     execute_dataset_query,
@@ -70,6 +75,8 @@ class KnowledgeSearchPayload(ScopeSelector):
 class KnowledgeAskPayload(ScopeSelector):
     question: str = Field(min_length=1, max_length=500)
     mode: Literal["quick", "deep"] = "quick"
+    conversation_id: int | None = Field(default=None, ge=1)
+    context_label: str | None = Field(default=None, max_length=512)
 
 
 class DatasetQueryPayload(BaseModel):
@@ -273,10 +280,15 @@ async def knowledge_search(
 @router.post("/knowledge/ask", response_model=dict[str, Any])
 async def knowledge_ask(
     payload: KnowledgeAskPayload,
-    _identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     scope = await _resolve_scope(db, payload)
+    if payload.conversation_id is not None:
+        try:
+            await get_owned_conversation(db, payload.conversation_id, identity.admin_id)
+        except AskHistoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
     provider = await build_provider_from_db(db)
     service = (
         DeepAnalysisService(provider) if payload.mode == "deep" else QAService(provider)
@@ -305,7 +317,7 @@ async def knowledge_ask(
             status_code=status,
             detail={"code": exc.code, "message": str(exc)},
         ) from None
-    return {
+    response_payload = {
         **result.to_dict(),
         "scope": {
             "id": scope.scope_id,
@@ -313,17 +325,38 @@ async def knowledge_ask(
             **scope.to_filters_dict(),
         },
     }
+    if payload.conversation_id is not None:
+        turn = await record_ask_turn(
+            db,
+            conversation_id=payload.conversation_id,
+            admin_id=identity.admin_id,
+            question=payload.question.strip(),
+            mode=payload.mode,
+            context_label=payload.context_label,
+            scope_snapshot=response_payload["scope"],
+            response_snapshot=response_payload,
+        )
+        response_payload["history"] = {
+            "conversation_id": payload.conversation_id,
+            "turn_id": turn.id,
+        }
+    return response_payload
 
 
 @router.post("/knowledge/ask/stream")
 async def knowledge_ask_stream(
     payload: KnowledgeAskPayload,
-    _identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> StreamingResponse:
     """Stream auditable tool progress and finish with the normal answer DTO."""
 
     scope = await _resolve_scope(db, payload)
+    if payload.conversation_id is not None:
+        try:
+            await get_owned_conversation(db, payload.conversation_id, identity.admin_id)
+        except AskHistoryError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
     provider = await build_provider_from_db(db)
     request = AskRequest(
         question=payload.question.strip(),
@@ -366,12 +399,23 @@ async def knowledge_ask_stream(
                             {"phase": "synthesis", "message": "正在检索并生成回答"}
                         )
                         result = await service.ask(stream_db, request)
-                await queue.put(
-                    {
-                        "type": "result",
-                        "data": {**result.to_dict(), "scope": scope_payload},
-                    }
-                )
+                    response_payload = {**result.to_dict(), "scope": scope_payload}
+                    if payload.conversation_id is not None:
+                        turn = await record_ask_turn(
+                            stream_db,
+                            conversation_id=payload.conversation_id,
+                            admin_id=identity.admin_id,
+                            question=payload.question.strip(),
+                            mode=payload.mode,
+                            context_label=payload.context_label,
+                            scope_snapshot=scope_payload,
+                            response_snapshot=response_payload,
+                        )
+                        response_payload["history"] = {
+                            "conversation_id": payload.conversation_id,
+                            "turn_id": turn.id,
+                        }
+                await queue.put({"type": "result", "data": response_payload})
             except AskError as exc:
                 await queue.put(
                     {

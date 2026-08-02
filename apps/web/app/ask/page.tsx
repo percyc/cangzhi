@@ -70,6 +70,7 @@ type AskResponse = {
     };
   };
   scope?: { slug: string };
+  history?: { conversation_id: number; turn_id: number };
 };
 
 type KnowledgeScope = {
@@ -122,6 +123,25 @@ type Turn = {
   mode: 'quick' | 'deep';
 };
 
+type ConversationSummary = {
+  id: number;
+  title: string;
+  turn_count: number;
+  last_asked_at: string | null;
+  created_at: string;
+};
+
+type ConversationDetail = ConversationSummary & {
+  memory_enabled: false;
+  turns: Array<{
+    id: number;
+    question: string;
+    mode: 'quick' | 'deep';
+    context_label: string | null;
+    response: AskResponse;
+  }>;
+};
+
 type LiveAnalysis = {
   question: string;
   contextLabel: string;
@@ -146,7 +166,7 @@ type AskStreamEvent =
   | { type: 'result'; data: AskResponse }
   | { type: 'error'; error: { code?: string; message?: string } };
 
-const ASK_SESSION_KEY = 'cangzhi:ask-session:v1';
+const ASK_SESSION_KEY = 'cangzhi:ask-preferences:v2';
 
 export default function AskPage() {
   return (
@@ -179,6 +199,10 @@ function AskClient() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [conversationId, setConversationId] = useState<number | null>(null);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [liveAnalysis, setLiveAnalysis] = useState<LiveAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -201,7 +225,6 @@ function AskClient() {
         const saved = window.sessionStorage.getItem(ASK_SESSION_KEY);
         if (saved) {
           const value = JSON.parse(saved) as {
-            turns?: Turn[];
             scopeSlug?: string;
             categoryIds?: number[];
             tagIds?: number[];
@@ -210,7 +233,6 @@ function AskClient() {
             question?: string;
             mode?: 'quick' | 'deep';
           };
-          if (Array.isArray(value.turns)) setTurns(value.turns.slice(-20));
           if (typeof value.scopeSlug === 'string') setScopeSlug(value.scopeSlug);
           if (Array.isArray(value.categoryIds)) setCategoryIds(value.categoryIds);
           if (Array.isArray(value.tagIds)) setTagIds(value.tagIds);
@@ -236,7 +258,6 @@ function AskClient() {
     window.sessionStorage.setItem(
       ASK_SESSION_KEY,
       JSON.stringify({
-        turns: turns.slice(-20),
         scopeSlug,
         categoryIds,
         tagIds,
@@ -247,7 +268,6 @@ function AskClient() {
       }),
     );
   }, [
-    turns,
     scopeSlug,
     categoryIds,
     tagIds,
@@ -257,6 +277,28 @@ function AskClient() {
     mode,
     sessionReady,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch('/api/ask/conversations', { cache: 'no-store' });
+        if (!response.ok) throw new Error('问答记录加载失败');
+        const payload = (await response.json()) as { items: ConversationSummary[] };
+        if (cancelled) return;
+        setConversations(payload.items);
+        if (!searchParams.get('q') && payload.items[0]) {
+          await loadConversation(payload.items[0].id);
+        }
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : '问答记录加载失败');
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  // Initial cloud restore only; URL search params are stable for this page mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -293,6 +335,52 @@ function AskClient() {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [turns, loading, liveAnalysis]);
 
+  const refreshConversations = async () => {
+    const response = await fetch('/api/ask/conversations', { cache: 'no-store' });
+    if (!response.ok) throw new Error('问答记录加载失败');
+    const payload = (await response.json()) as { items: ConversationSummary[] };
+    if (mountedRef.current) setConversations(payload.items);
+  };
+
+  async function loadConversation(id: number) {
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(`/api/ask/conversations/${id}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error('问答记录读取失败');
+      const payload = (await response.json()) as ConversationDetail;
+      if (!mountedRef.current) return;
+      setConversationId(payload.id);
+      setTurns(payload.turns.map((turn) => ({
+        id: turn.id,
+        question: turn.question,
+        response: turn.response,
+        contextLabel: turn.context_label ?? '全部知识',
+        mode: turn.mode,
+      })));
+      setHistoryOpen(false);
+      setError(null);
+      window.history.replaceState(null, '', '/ask');
+    } finally {
+      if (mountedRef.current) setHistoryLoading(false);
+    }
+  }
+
+  const startNewConversation = () => {
+    setConversationId(null);
+    setTurns([]);
+    setQuestion('');
+    setError(null);
+    setHistoryOpen(false);
+    window.history.replaceState(null, '', '/ask');
+  };
+
+  const deleteConversation = async (id: number) => {
+    const response = await fetch(`/api/ask/conversations/${id}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error('删除问答记录失败');
+    if (conversationId === id) startNewConversation();
+    await refreshConversations();
+  };
+
   const runAsk = async () => {
     const trimmed = question.trim();
     if (!trimmed || loading || requestAbortRef.current) return;
@@ -308,15 +396,6 @@ function AskClient() {
       sourceTypes,
       connectorIds,
     );
-    const requestBody = {
-      question: trimmed,
-      mode,
-      scope_slug: scopeSlug,
-      category_ids: categoryIds,
-      tag_ids: tagIds,
-      source_types: sourceTypes,
-      connector_ids: connectorIds,
-    };
     if (mode === 'deep') {
       setLiveAnalysis({
         question: trimmed,
@@ -327,7 +406,34 @@ function AskClient() {
         maxToolCalls: 12,
       });
     }
+    let targetConversationId = conversationId;
+    let createdConversation = false;
+    let answerSaved = false;
     try {
+      if (targetConversationId === null) {
+        const createdResponse = await fetch('/api/ask/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: '新问答' }),
+          signal: controller.signal,
+        });
+        if (!createdResponse.ok) throw new Error('无法创建问答记录');
+        const created = (await createdResponse.json()) as ConversationSummary;
+        targetConversationId = created.id;
+        createdConversation = true;
+        setConversationId(created.id);
+      }
+      const requestBody = {
+        question: trimmed,
+        mode,
+        scope_slug: scopeSlug,
+        category_ids: categoryIds,
+        tag_ids: tagIds,
+        source_types: sourceTypes,
+        connector_ids: connectorIds,
+        conversation_id: targetConversationId,
+        context_label: contextLabel,
+      };
       const response = await fetch(
         mode === 'deep'
           ? '/api/v1/knowledge/ask/stream'
@@ -376,7 +482,7 @@ function AskClient() {
       setTurns((current) => [
         ...current,
         {
-          id: Date.now(),
+          id: body.history?.turn_id ?? Date.now(),
           question: trimmed,
           response: body as AskResponse,
           contextLabel,
@@ -385,7 +491,13 @@ function AskClient() {
       ]);
       setQuestion('');
       window.history.replaceState(null, '', '/ask');
+      answerSaved = true;
+      void refreshConversations().catch(() => undefined);
     } catch (reason) {
+      if (createdConversation && !answerSaved && targetConversationId !== null) {
+        await fetch(`/api/ask/conversations/${targetConversationId}`, { method: 'DELETE' }).catch(() => undefined);
+        if (mountedRef.current) setConversationId(null);
+      }
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
       if (mountedRef.current) {
         setError(reason instanceof Error ? reason.message : '问答失败');
@@ -421,7 +533,34 @@ function AskClient() {
   return (
     <main className="ask-shell mx-auto flex w-full max-w-[1600px] gap-5 overflow-hidden px-3 py-3 sm:px-4 lg:px-6">
       <aside className="hidden w-64 shrink-0 lg:block">
-        <div className="sticky top-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="sticky top-5 space-y-3">
+          <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="flex items-center justify-between px-1">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                问答记录
+              </p>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setHistoryOpen(true)} className="text-xs text-slate-500 hover:text-slate-950">管理</button>
+                <button type="button" onClick={startNewConversation} className="text-xs font-medium text-slate-700 hover:text-slate-950">＋ 新建</button>
+              </div>
+            </div>
+            <div className="mt-2 max-h-56 space-y-1 overflow-y-auto">
+              {conversations.length === 0 ? (
+                <p className="px-2 py-3 text-xs text-slate-400">完成一次提问后会保存到云端</p>
+              ) : conversations.slice(0, 12).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => void loadConversation(item.id)}
+                  className={`w-full rounded-xl px-2.5 py-2 text-left ${conversationId === item.id ? 'bg-slate-100' : 'hover:bg-slate-50'}`}
+                >
+                  <span className="block truncate text-xs font-medium text-slate-700">{item.title}</span>
+                  <span className="mt-0.5 block text-[10px] text-slate-400">{item.turn_count} 条问答</span>
+                </button>
+              ))}
+            </div>
+          </section>
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
             当前知识范围
           </p>
@@ -442,8 +581,7 @@ function AskClient() {
             ))}
           </div>
           <p className="mt-4 border-t border-slate-100 pt-4 text-xs leading-5 text-slate-500">
-            每轮都会重新检索所选范围，并保留可核验出处。当前会话只在本页保留，
-            不会影响知识原文。
+            记录会同步到云端，但每次提问仍独立检索，不会自动读取此前问答。
           </p>
           <Link
             href="/search"
@@ -451,6 +589,7 @@ function AskClient() {
           >
             切换到精确搜索 →
           </Link>
+          </div>
         </div>
       </aside>
 
@@ -515,19 +654,26 @@ function AskClient() {
               >
                 知识范围与筛选
               </button>
-              {turns.length > 0 && (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    setTurns([]);
-                    setError(null);
-                    event.currentTarget.closest('details')?.removeAttribute('open');
-                  }}
-                  className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
-                >
-                  新对话
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={(event) => {
+                  setHistoryOpen(true);
+                  event.currentTarget.closest('details')?.removeAttribute('open');
+                }}
+                className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
+              >
+                问答记录
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  startNewConversation();
+                  event.currentTarget.closest('details')?.removeAttribute('open');
+                }}
+                className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
+              >
+                新建问答
+              </button>
               <Link href="/search" className="block rounded-xl px-3 py-2 text-slate-700 hover:bg-slate-100">
                 精确搜索
               </Link>
@@ -581,17 +727,58 @@ function AskClient() {
             {turns.length > 0 && (
               <button
                 type="button"
-                onClick={() => {
-                  setTurns([]);
-                  setError(null);
-                }}
+                onClick={startNewConversation}
                 className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50"
               >
-                新对话
+                新建问答
               </button>
             )}
           </div>
         </header>
+
+        {historyOpen && (
+          <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="问答记录">
+            <button type="button" aria-label="关闭问答记录" onClick={() => setHistoryOpen(false)} className="absolute inset-0 bg-slate-950/35" />
+            <section className="absolute inset-x-0 bottom-0 flex max-h-[82dvh] flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:inset-x-auto sm:bottom-auto sm:left-1/2 sm:top-1/2 sm:max-h-[72vh] sm:w-[34rem] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl">
+              <header className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+                <div>
+                  <h2 className="font-semibold text-slate-950">问答记录</h2>
+                  <p className="mt-0.5 text-xs text-slate-500">云端保存，仅用于回看，不作为模型记忆</p>
+                </div>
+                <button type="button" onClick={startNewConversation} className="rounded-xl bg-slate-950 px-3 py-2 text-xs font-medium text-white">新建问答</button>
+              </header>
+              <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                {historyLoading ? (
+                  <p className="p-4 text-sm text-slate-500">正在读取…</p>
+                ) : conversations.length === 0 ? (
+                  <p className="p-4 text-sm text-slate-500">还没有云端问答记录。</p>
+                ) : conversations.map((item) => (
+                  <div key={item.id} className={`mb-1 flex items-center gap-2 rounded-2xl p-2 ${conversationId === item.id ? 'bg-slate-100' : ''}`}>
+                    <button type="button" onClick={() => void loadConversation(item.id)} className="min-w-0 flex-1 px-2 py-1 text-left">
+                      <span className="block truncate text-sm font-medium text-slate-800">{item.title}</span>
+                      <span className="mt-1 block text-xs text-slate-400">{item.turn_count} 条问答</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`删除 ${item.title}`}
+                      onClick={() => {
+                        if (window.confirm('删除这条问答记录？此操作不可恢复。')) {
+                          void deleteConversation(item.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '删除失败'));
+                        }
+                      }}
+                      className="rounded-xl px-3 py-2 text-xs text-red-600 hover:bg-red-50"
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <footer className="border-t border-slate-200 px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+                <button type="button" onClick={() => setHistoryOpen(false)} className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700">返回当前问答</button>
+              </footer>
+            </section>
+          </div>
+        )}
 
         {filterOpen && (
           <>
@@ -760,10 +947,10 @@ function AskClient() {
               发送
             </button>
           </form>
-          <p className="mt-2 hidden text-center text-[11px] text-slate-400 sm:block">
+          <p className="mt-2 text-center text-[10px] leading-4 text-slate-400 sm:text-[11px]">
             {mode === 'deep'
-              ? '深度分析默认最多调用 12 次，只在持续获得新证据时扩展至 16 次 · 请核对引用原文'
-              : 'Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文'}
+              ? '每次提问独立检索，不读取此前问答 · 深度分析只在持续获得新证据时继续调用工具'
+              : '每次提问独立检索，不读取此前问答 · 请核对引用原文'}
           </p>
         </footer>
         <EvidenceDrawer

@@ -212,16 +212,16 @@ function SearchClient() {
 
   return (
     <main className="container mx-auto max-w-5xl p-4">
-      <h1 className="text-2xl font-bold text-slate-900">搜索知识库</h1>
+      <h1 className="text-2xl font-bold text-slate-900">搜索资料</h1>
       <p className="mt-1 text-sm text-slate-500">
         用关键词找到之前保存的资料。每个结果会显示命中片段、章节路径以及定位信息，点击可进入资料详情。
       </p>
-      <div className="mt-4 flex w-fit rounded-lg border border-slate-300 bg-white p-1 text-sm">
-        <span className="rounded bg-slate-900 px-3 py-1.5 text-white">找资料</span>
-        <Link href={debouncedQuery ? `/ask?q=${encodeURIComponent(debouncedQuery)}` : '/ask'} className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100">
-          问知识库
-        </Link>
-      </div>
+      <Link
+        href={debouncedQuery ? `/ask?q=${encodeURIComponent(debouncedQuery)}` : '/ask'}
+        className="mt-4 inline-flex rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+      >
+        {debouncedQuery ? '基于当前关键词提问 →' : '需要归纳分析？前往问知识库 →'}
+      </Link>
 
       <form
         className="mt-6"

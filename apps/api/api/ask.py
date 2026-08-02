@@ -18,13 +18,17 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import build_provider_from_db
 from ..core.db import get_db
+from ..models.ask_history import AskConversation, AskTurn
+from ..models.auth import Admin
 from ..models.documents import DocumentSourceType
+from ..services.ask_history import AskHistoryError, get_owned_conversation
 from ..services.deep_analysis import DeepAnalysisService
 from ..services.qa import (
     MAX_QUESTION_LENGTH,
@@ -32,6 +36,7 @@ from ..services.qa import (
     AskRequest,
     QAService,
 )
+from .auth import require_admin
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +102,138 @@ class AskPayload(BaseModel):
             connector_ids=list(self.connector_ids),
             document_ids=list(self.document_ids),
         )
+
+
+class ConversationCreatePayload(BaseModel):
+    title: str = Field(default="新问答", max_length=255)
+
+
+class ConversationUpdatePayload(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _conversation_dict(item: AskConversation, turn_count: int = 0) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "title": item.title,
+        "turn_count": turn_count,
+        "last_asked_at": _iso(item.last_asked_at),
+        "created_at": _iso(item.created_at),
+        "updated_at": _iso(item.updated_at),
+    }
+
+
+@router.get("/conversations", response_model=dict[str, Any])
+async def list_conversations(
+    limit: int = Query(default=30, ge=1, le=100),
+    admin: Admin = Depends(require_admin),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    counts = (
+        select(AskTurn.conversation_id, func.count(AskTurn.id).label("turn_count"))
+        .group_by(AskTurn.conversation_id)
+        .subquery()
+    )
+    rows = (
+        await db.execute(
+            select(AskConversation, func.coalesce(counts.c.turn_count, 0))
+            .outerjoin(counts, counts.c.conversation_id == AskConversation.id)
+            .where(AskConversation.admin_id == admin.id)
+            .order_by(
+                AskConversation.last_asked_at.desc().nullslast(),
+                AskConversation.created_at.desc(),
+            )
+            .limit(limit)
+        )
+    ).all()
+    return {"items": [_conversation_dict(item, int(count)) for item, count in rows]}
+
+
+@router.post("/conversations", response_model=dict[str, Any], status_code=201)
+async def create_conversation(
+    payload: ConversationCreatePayload,
+    admin: Admin = Depends(require_admin),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    title = payload.title.strip() or "新问答"
+    item = AskConversation(admin_id=admin.id, title=title)
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return _conversation_dict(item)
+
+
+@router.get("/conversations/{conversation_id}", response_model=dict[str, Any])
+async def get_conversation(
+    conversation_id: int,
+    admin: Admin = Depends(require_admin),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        item = await get_owned_conversation(db, conversation_id, admin.id)
+    except AskHistoryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    turns = list(
+        (
+            await db.scalars(
+                select(AskTurn)
+                .where(AskTurn.conversation_id == item.id)
+                .order_by(AskTurn.created_at, AskTurn.id)
+            )
+        ).all()
+    )
+    return {
+        **_conversation_dict(item, len(turns)),
+        "turns": [
+            {
+                "id": turn.id,
+                "question": turn.question,
+                "mode": turn.mode,
+                "context_label": turn.context_label,
+                "scope": turn.scope_snapshot,
+                "response": turn.response_snapshot,
+                "created_at": _iso(turn.created_at),
+            }
+            for turn in turns
+        ],
+        "memory_enabled": False,
+    }
+
+
+@router.patch("/conversations/{conversation_id}", response_model=dict[str, Any])
+async def update_conversation(
+    conversation_id: int,
+    payload: ConversationUpdatePayload,
+    admin: Admin = Depends(require_admin),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        item = await get_owned_conversation(db, conversation_id, admin.id)
+    except AskHistoryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    item.title = payload.title.strip()
+    await db.commit()
+    await db.refresh(item)
+    return _conversation_dict(item)
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: int,
+    admin: Admin = Depends(require_admin),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> Response:
+    try:
+        item = await get_owned_conversation(db, conversation_id, admin.id)
+    except AskHistoryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    await db.delete(item)
+    await db.commit()
+    return Response(status_code=204)
 
 
 @router.post("", response_model=dict[str, Any])

@@ -9,7 +9,8 @@ import { fetchAuthStatus, type AuthStatus } from '@/lib/api';
 const NAV_ITEMS = [
   { href: '/documents', label: '知识库', icon: 'library' },
   { href: '/inbox', label: '收件箱', icon: 'inbox' },
-  { href: '/search', label: '搜索', icon: 'search' },
+  { href: '/search', label: '搜资料', icon: 'search' },
+  { href: '/ask', label: '问知识', icon: 'ask' },
   { href: '/settings', label: '设置', icon: 'settings' },
 ] as const;
 
@@ -132,7 +133,7 @@ export function TopNav() {
         </div>
       </div>
 
-      <nav className="grid grid-cols-4 border-t border-slate-100 bg-white/95 px-2 sm:hidden">
+      <nav className="grid grid-cols-5 border-t border-slate-100 bg-white/95 px-1 sm:hidden">
         {NAV_ITEMS.map((item) => (
           <NavItem
             key={item.href}
@@ -225,8 +226,7 @@ function AddLink({
 function isActive(pathname: string, href: string) {
   return (
     pathname === href ||
-    pathname.startsWith(`${href}/`) ||
-    (href === '/search' && pathname.startsWith('/ask'))
+    pathname.startsWith(`${href}/`)
   );
 }
 
@@ -235,6 +235,7 @@ function NavIcon({ name }: { name: (typeof NAV_ITEMS)[number]['icon'] }) {
     library: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v15H6.5A2.5 2.5 0 0 0 4 20.5v-15Z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v15h4.5a2.5 2.5 0 0 1 2.5 2.5v-15Z" /></>,
     inbox: <><path d="M4 4h16v12H4z" /><path d="M4 13h4l2 3h4l2-3h4" /></>,
     search: <><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></>,
+    ask: <><path d="M5 5.5h14v10H9l-4 3v-13Z" /><path d="M9 9h6M9 12h4" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.15.37.37.7.6 1 .3.3.7.4 1.1.4h.1v4h-.1a1.7 1.7 0 0 0-1.7.6Z" /></>,
   };
   return (

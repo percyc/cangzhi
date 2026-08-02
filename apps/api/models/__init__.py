@@ -1,4 +1,5 @@
 from .auth import Admin, AIRuntimeConfig, AuthSession, PersonalAccessToken
+from .ask_history import AskConversation, AskTurn
 from .blobs import Blob
 from .chunks import DocumentChunk
 from .datasets import DatasetArtifact, DatasetField, KnowledgeDataset
@@ -22,6 +23,8 @@ __all__ = [
     "DEFAULT_CATEGORY_SLUGS",
     "AIRuntimeConfig",
     "Admin",
+    "AskConversation",
+    "AskTurn",
     "AuthSession",
     "Blob",
     "Category",
