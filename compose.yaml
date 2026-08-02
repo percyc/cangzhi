@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cangzhi-dev}
       POSTGRES_DB: ${POSTGRES_DB:-cangzhi}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -37,9 +37,9 @@ services:
     container_name: cangzhi-api
     command: ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
-      - ./storage:/app/storage
+      - "${STORAGE_HOST_PATH:-./storage}:/app/storage"
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8000}:8000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cangzhi}:${POSTGRES_PASSWORD:-cangzhi-dev}@postgres:5432/${POSTGRES_DB:-cangzhi}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
@@ -53,6 +53,11 @@ services:
       DATASET_QUERY_MEMORY_LIMIT: ${DATASET_QUERY_MEMORY_LIMIT:-512MB}
       DATASET_QUERY_THREADS: ${DATASET_QUERY_THREADS:-2}
       DATASET_QUERY_TIMEOUT_SECONDS: ${DATASET_QUERY_TIMEOUT_SECONDS:-20}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      CANGZHI_SECRET_KEY: ${CANGZHI_SECRET_KEY:-}
+      AI_REQUEST_TIMEOUT_SECONDS: ${AI_REQUEST_TIMEOUT_SECONDS:-30}
+      AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-v1}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -70,7 +75,7 @@ services:
     container_name: cangzhi-worker
     command: ["python", "-m", "apps.worker.main"]
     volumes:
-      - ./storage:/app/storage
+      - "${STORAGE_HOST_PATH:-./storage}:/app/storage"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cangzhi}:${POSTGRES_PASSWORD:-cangzhi-dev}@postgres:5432/${POSTGRES_DB:-cangzhi}
       POLL_INTERVAL: ${POLL_INTERVAL:-5}
@@ -86,6 +91,10 @@ services:
       URL_FETCH_MAX_BYTES: ${URL_FETCH_MAX_BYTES:-5242880}
       URL_FETCH_TIMEOUT_SECONDS: ${URL_FETCH_TIMEOUT_SECONDS:-20}
       URL_FETCH_MAX_REDIRECTS: ${URL_FETCH_MAX_REDIRECTS:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CANGZHI_SECRET_KEY: ${CANGZHI_SECRET_KEY:-}
+      AI_REQUEST_TIMEOUT_SECONDS: ${AI_REQUEST_TIMEOUT_SECONDS:-30}
+      AI_PROMPT_VERSION: ${AI_PROMPT_VERSION:-v1}
     depends_on:
       api:
         condition: service_healthy
@@ -105,10 +114,9 @@ services:
     container_name: cangzhi-web
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
     ports:
-      - "${WEB_PORT:-3000}:3000"
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
     environment:
       API_URL: http://api:8000
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     depends_on:
       api:
         condition: service_healthy

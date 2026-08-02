@@ -1,353 +1,262 @@
 # 藏知技术架构
 
-## 1. 架构目标
+本文描述当前代码已经实现的系统结构、数据流和边界。产品为什么存在见
+[产品定位](PRODUCT.md)，部署和运维见[部署指南](DEPLOYMENT.md)，历史技术取舍见
+[关键技术决策](DECISIONS.md)。
 
-藏知在架构上是“知识事实源 + 可重建理解与索引 + 多入口取证服务”，而不是围绕某个
-聊天页面搭建的一次性 RAG 管线。
+## 1. 架构定位
 
-当前面向个人部署，优先降低组件数量和运维成本，同时保持四项不变量：
+藏知是一个面向个人部署的模块化单体，由 Web、API、Worker、PostgreSQL 和本地文件
+存储组成。它的核心不是聊天页面，而是：
 
-1. 原文和文档版本是事实源，模型输出和索引都是可重建派生数据。
-2. 采集、解析、检索或模型失败不能导致已经接收的原文丢失。
-3. 网页、REST、CLI 和 MCP 复用同一服务层、知识范围和引用语义。
-4. 外部来源和模型可以替换，不能成为知识资产的锁定点。
+> 可追溯的知识事实源 + 可重建的理解与索引 + 面向人和 Agent 的统一取证服务。
 
-```text
-Browser
-  │
-  ├── Next.js Web
-  │      │
-  │      └── FastAPI
-  │             ├── PostgreSQL + pgvector
-  │             ├── Local object storage
-  │             ├── Ingestion worker
-  │             └── Model providers
-  │                    ├── OpenAI-compatible API
-  │                    └── Ollama/local model
-  │
-  └── Search / Ask / Manage
+系统遵守五条不变量：
 
-CLI / Hermes / OpenClaw / Other Agents
-  │
-  └── REST v1 / MCP
-             │
-             └── Shared knowledge services
-```
+1. 原文件、网页快照、随手记原文和文档版本是事实源。
+2. 摘要、分类、切片、向量、Parquet 和 PDF 预览都是可重建派生物。
+3. 解析或模型失败不能导致已经接收的原文丢失。
+4. 网页、REST、CLI、MCP 和 Skill 复用同一知识范围、检索和证据语义。
+5. 外部来源、对话模型和向量模型可以替换，不能锁定知识资产。
 
-## 2. 代码目录建议
+## 2. 运行拓扑
 
 ```text
-cangzhi/
-├── apps/
-│   ├── web/                 # Next.js 前端
-│   ├── api/                 # FastAPI 接口
-│   └── worker/              # 后台解析与索引 Worker
-├── packages/
-│   ├── prompts/             # 内置提示词与版本
-│   ├── schemas/             # 跨服务 DTO / JSON Schema
-│   └── config/              # 共享配置约定
-├── migrations/              # Alembic 数据库迁移
-├── storage/                 # 本地原文与派生文件，默认不提交
-├── tests/
-│   ├── fixtures/            # 脱敏测试文档
-│   ├── retrieval/           # 检索黄金集
-│   └── e2e/
-├── docs/
-├── compose.yaml
-├── .env.example
-└── README.md
+浏览器 ───────────────┐
+                      v
+外部 Agent / CLI ─> Web(Next.js) ──同源 /api──> API(FastAPI)
+                     :3000                       :8000
+                                                    │
+                    ┌───────────────────────────────┼──────────────┐
+                    v                               v              v
+            PostgreSQL + pgvector             storage/       模型服务
+              元数据/任务/全文/向量            原文/预览/       OpenAI-compatible
+                    ^                         Parquet         或 Ollama
+                    │
+              Worker(Python)
+          解析/理解/切片/向量/预览
 ```
 
-## 3. 核心模块
+- `web`：界面、登录引导和同源 API 转发，不保存业务事实。
+- `api`：鉴权、知识管理、检索、问答、数据集执行和外部接口。
+- `worker`：从数据库领取幂等后台任务，处理耗时工作。
+- `postgres`：PostgreSQL 16 + pgvector，是事务、任务和检索状态中心。
+- `storage/`：内容寻址的 Blob、网页快照、PDF 预览、Parquet 以及 `.secret_key`。
+- `migrate`：每次 Compose 启动前执行 Alembic，成功后 API 才启动。
 
-### 3.1 采集层
+API 和 Worker 共享同一 `storage/`，数据库使用 Docker named volume。完整恢复必须同时
+恢复两者，详见[备份与恢复](BACKUP_AND_RESTORE.md)。
 
-统一接受 `url`、`file`、`note` 三类输入，转换为不可变 Source：
-
-- URL：保存 URL、抓取时间、响应元数据、原始 HTML 和正文快照。
-- 文件：保存原文件、SHA-256、MIME、大小和上传时间。
-- 随手记：保存用户输入的原始 Markdown，不用 AI 结果替换。
-
-所有入口先完成落盘和数据库提交，再异步解析，防止 AI 或解析失败导致资料丢失。
-
-### 3.2 解析层
-
-解析器采用路由机制：
-
-1. 根据 MIME 和文件签名选择解析器，不能只依赖扩展名。
-2. 优先提取原生文本和结构。
-3. 无文本或文本质量过低时触发 OCR。
-4. 输出统一的结构树，而不是直接输出切片。
-
-统一结构节点至少包含：
-
-```json
-{
-  "type": "heading|paragraph|list|table|image|page|article",
-  "text": "...",
-  "level": 2,
-  "page": 5,
-  "path": ["第三章", "3.2 检索"],
-  "source_span": {"start": 1200, "end": 1680}
-}
-```
-
-### 3.3 理解层
-
-采用可版本化的处理 Profile：
-
-- `general_article`
-- `personal_note`
-- `legal_document`
-- `contract`
-- `research_paper`
-
-每个 Profile 指定：
-
-- 文档类型判定条件
-- 结构解析策略
-- 元数据提取 Schema
-- 切片策略
-- 分类提示词
-- 摘要提示词
-- 使用的模型能力等级
-
-所有 AI 输出必须经过 JSON Schema 校验。失败时保留原始响应并进入可重试状态。
-
-### 3.4 切片层
-
-首版使用“结构优先的父子切片”：
-
-- Parent：一个完整章节、条款或较长段落，用于回答时补充上下文。
-- Child：约 300～600 tokens，用于召回。
-- Overlap：只在缺乏自然边界时使用，默认 60 tokens。
-- 标题路径和文档摘要作为 contextual prefix 参与索引，但不冒充原文。
-
-边界优先级：
-
-1. 法律条款、标题、章节
-2. 段落、列表、表格整体
-3. 句子边界
-4. token 上限硬切
-
-Excel 等二维资料使用专用规则：先按工作表和空行识别数据区域，再保守识别表头；
-每个检索行都写成带列名的自描述文本，并携带 `sheet_name`、`region_index`、
-`row_start`、`row_end` 和 `column_names`。表格切片只能在完整行之间分割，不使用
-字符级 overlap。百分比、前导零编号和金额等同时保留显示值与原始值。
-单工作表最多 150,000 行，同时受工作簿 2,000,000 个单元格、250 MiB
-解压大小和单元格长度的分层上限保护。超限是确定性错误，直接失败并展示
-具体限制，不进入无意义的自动重试。
-大型结构化表保留原文件和逐行结构化索引，但不把全量数据重复生成为文档切片。
-每个数据区域只建立一组紧凑的“数据集目录”父子切片，包含工作表、字段、规模、
-查询说明和均匀代表行。向量只用于发现相关数据集；具体值筛选与统计由全量行索引
-执行，不依赖目录切片是否包含目标值。
-
-同一批表格行还会写入独立的 `structured_table_rows` 索引，并在
-`knowledge_datasets`、`dataset_fields` 中登记工作表区域、字段类型、语义角色、
-空值、唯一值、样例和质量画像。工作簿属于统一文档生命周期，但数据预览与查询走
-数据集 API，不渲染超长文本正文。
-
-统计型问题由模型生成
-严格受限的查询计划，再由服务端执行白名单筛选、分组和聚合；系统不会执行模型
-生成的 SQL 或代码。精确计算无法安全完成时，问答流程才回退到普通语义检索。
-
-表格路由不以“有什么”等单一关键词为准。入库理解阶段生成的文档摘要与
-表名、列名、行数和样例共同构成表格语义画像。只有当问题能映射到字段、
-字面筛选条件完整，或相关性规划器明确返回 `relevant=true` 时，才进入
-结构化查询；否则保持普通 RAG 路径。
-
-逐行 JSON 索引是兼容事实源。结构化问题在目录切片未命中时，可以从用户当前知识
-范围内的数据集目录继续做受限相关性规划，避免以代表行充当事实。全量数据同时
-生成 Parquet 列式派生文件，由 DuckDB 执行列裁剪、条件下推、聚合和分页；PostgreSQL继续保存知识
-对象、数据集目录、字段画像、版本和任务状态。向量只索引数据集、字段和代表行，
-不承担全量事实计算。
-
-数据集执行层采用可重建的双层结构：`dataset_artifacts` 记录 Parquet 版本、校验和、
-构建状态及当前原子启用版本。Worker 以 `dataset_artifact` 阶段构建产物，失败沿用
-系统任务重试机制，旧的已启用版本不会被半成品覆盖。API 只接受字段、运算符、
-分组、统计、排序和分页组成的白名单计划，不接收任意 SQL。DuckDB 设置内存、线程、
-超时和结果行数边界；迁移期间，规模安全的数据集可回退到 PostgreSQL/Python，超过
-安全上限则明确拒绝而不是返回不完整聚合。
-
-用户修改片段时，新建 chunk revision，并使旧索引失效；不直接覆盖历史记录。
-
-### 3.5 检索层
-
-首版不单独部署 Elasticsearch，使用 PostgreSQL 完成：
-
-- `tsvector` 全文索引
-- pgvector HNSW 向量索引
-- 分类、标签、时间和来源过滤
-- RRF 合并全文与向量排名
-- 可选跨编码器或 API Reranker 精排前 30 条
-
-问答检索流程：
+## 3. 代码边界
 
 ```text
-query
-  -> 意图与过滤条件提取
-  -> query embedding
-  -> BM25/FTS top 30 + vector top 30
-  -> RRF 融合
-  -> rerank top 20
-  -> 相邻片段与 parent 扩展
-  -> 去重和 token budget 裁剪
-  -> LLM 生成
-  -> 引用校验
+apps/
+├── web/          Next.js 页面、组件、同源代理
+├── api/
+│   ├── api/      HTTP / REST v1 / MCP 适配器
+│   ├── models/   SQLAlchemy 持久模型
+│   ├── services/ 检索、问答、证据、数据集等领域服务
+│   ├── parsers/  格式专用解析器
+│   ├── security/ 会话、PAT、加密、URL 安全
+│   └── storage/  Blob 存储抽象
+├── worker/       数据库任务领取与后台处理
+└── cli/          REST v1 薄客户端
+
+migrations/       Alembic 迁移
+integrations/     Skill 模板和接入说明
+packages/         提示词与跨模块资源
+scripts/          备份、校验和恢复演练
+storage/          运行数据，不进入 Git
 ```
 
-回答规则：检索证据不足时必须明确说明，不允许用模型常识伪装成知识库内容。
-涉及表格求和、计数、分组、排序等全量计算时，普通 RAG 不得冒充精确计算；后续由
-结构化查询通道执行并返回工作表及行范围引用。
+HTTP 层只做输入校验、鉴权和 DTO 转换；检索、范围解析、问答、引用和数据集执行必须
+放在服务层，避免网页、MCP 和 CLI 出现不同答案。
 
-### 3.6 知识服务与接入层
+## 4. 知识生命周期
 
-搜索、文档读取、知识范围解析、问答和引用校验由 API 服务层统一实现。浏览器业务
-接口、REST v1、CLI 和 MCP 只是不同适配器，不各自实现检索 SQL 或模型调用。
+### 4.1 采集与版本
+
+入口包括链接、上传文件、随手记和 WebDAV。一次采集会创建：
+
+- `documents`：用户看到的逻辑知识对象；
+- `document_versions`：不可变内容版本和当前处理状态；
+- `blobs`：按 SHA-256 去重的原文件或网页快照；
+- `processing_jobs`：后续幂等任务。
+
+`documents.current_version_id` 指向当前生效版本。更新内容创建新版本，不覆盖旧版本。
+回收站只改变文档可见性；永久删除才级联清理版本和派生数据，并且仅在 Blob 无其他
+引用时删除物理文件。
+
+### 4.2 后台处理管线
 
 ```text
-Browser API ─┐
-REST v1 ─────┼─> KnowledgeScope -> retrieval/read/ask services -> evidence
-CLI ─────────┤
-MCP ─────────┘
+stored/parsing
+      │
+      ├─> understanding ─> 摘要、分类、标签
+      ├─> chunking ──────> parent/child 切片与全文索引
+      ├─> dataset_catalog -> 表格区域、字段画像、结构化行
+      ├─> dataset_artifact -> Parquet 活跃产物
+      ├─> preview ───────> Word 等格式的 PDF 预览
+      └─> embedding ─────> 当前或构建中向量档案
 ```
 
-网页问答提供两种模式。`quick` 沿用单次混合检索与结构化表格精确路由；`deep` 进入
-内部 Agent Orchestrator，以 Plan–Act–Observe 循环逐次选择搜索、发现数据集、读取
-Schema、执行 DuckDB 受控查询或读取原文片段。每次真实结果（包括零行、截断和错误）
-都会返回给模型，由它修正下一次调用，证据充分后才统一作答。编排器默认最多执行
-12 次只读工具调用；第 12 次仍获得新可引用证据时可扩展至 16 次，同时受 120 秒总
-探索时限约束。连续两次调用既没有新证据，也没有新的数据集、Schema 或恢复建议时
-提前进入回答阶段。最终最多保留 12 条和 8000 字证据，并返回可审计的动作摘要。它不通过
-HTTP 回调自身 MCP；REST、CLI、MCP 与网页只是同一服务层的适配器。
+任务以 `document_version + stage + config_version` 为幂等边界，状态包含 `created`、
+`processing`、`retry`、`completed` 和 `failed`。失败记录阶段、重试次数、下次执行时间
+和脱敏错误；确定性格式上限错误不会无意义重试。
 
-网页的 `deep` 模式使用 `/api/v1/knowledge/ask/stream` 返回 NDJSON：先发送启动状态，
-随后逐步发送真实工具名称、动作摘要、结果数量和纠错状态，最终发送正常问答响应；
-等待上游模型期间发送心跳，避免反向代理把长请求误判为断开。这里展示的是可审计的
-Plan–Act–Observe 执行轨迹，不保存或展示模型不可验证的内部思维链。
+AI 理解不是解析的前置条件。模型未配置或暂时不可用时，原文、基础解析、全文切片和
+人工管理仍可用，理解任务进入可观察的降级或待处理状态。
 
-`deep` 只面向藏知网页及明确调用 REST/CLI 的直接客户端。MCP 和 Skill 已经运行在
-外部 Agent 的推理循环中，因此不嵌套内部深度编排；其 `knowledge_ask` 仅保留快速、
-带引用的一次性回答作为兼容能力。
+## 5. 双引擎知识模型
 
-外部 Agent 默认使用只读取证能力：
+### 5.1 文档引擎
 
-- 列出可用知识范围；
-- 执行混合检索；
-- 读取指定文档或切片；
-- 获得结构化定位和原文片段。
+PDF、Word、Markdown、网页和随手记按章节、条款、段落、列表与表格边界解析。
+`document_chunks` 保存两种当前切片：
 
-只有调用方明确希望由藏知模型回答时，才使用 `knowledge:ask`。这种边界避免 Hermes、
-OpenClaw 等已有推理模型的平台重复调用模型，同时让网页和 Agent 获得一致证据。
+- `child`：用于关键词和向量召回；
+- `parent`：用于补充完整上下文。
 
-## 4. 核心数据模型
+切片保留 `heading_path`、页码、段落号和 `source_start/source_end`。过长自然段先按
+句子边界切分，必要时才硬切，并携带有限重叠，降低信息在边界处被截断的风险。
 
-### 4.1 内容与版本
+原文件始终可下载。浏览时优先使用原生 PDF；Word 等格式可生成一次性 PDF 预览，
+预览不是事实源。Markdown 使用安全渲染；引用通过文档版本和切片位置回到原文。
 
-- `sources`：原始输入及来源类型
-- `documents`：用户可见的逻辑资料
-- `document_versions`：每次抓取、上传或重新解析的版本
-- `blobs`：原文件、网页快照、预览和解析产物
-- `structure_nodes`：章节、段落、表格、页面等原文结构
-- `chunks`：检索单元和父子关系
-- `chunk_revisions`：用户调整历史
+### 5.2 数据集引擎
 
-### 4.2 组织与语义
-
-- `categories`：邻接表或 materialized path 主分类树
-- `document_categories`：主分类及推荐置信度
-- `tags` / `document_tags`
-- `entities` / `entity_mentions`
-- `relations`：个人 Beta 后启用
-- `summaries`：文档级、章节级摘要及模型版本
-
-### 4.3 AI 与检索
-
-- `model_providers`：加密保存的 Provider 配置引用
-- `model_presets`：不同任务对应的模型
-- `processing_profiles`：解析和提取模板
-- `prompt_versions`：提示词版本
-- `embeddings`：对象、模型、维度、向量、内容哈希
-- `processing_jobs`：后台任务、状态、重试和错误
-- `citations`：回答句子与 chunk/source span 的对应关系
-- `user_corrections`：分类、标签、摘要和切片纠正
-
-### 4.4 外部来源与接入
-
-- `webdav_sources`：加密凭据、扫描范围、远端删除策略和运行状态
-- `webdav_entries`：远端稳定身份、同步状态、缺失确认和关联文档
-- `external_item_exclusions`：永久删除后保留的外部来源排除记录
-- `knowledge_scopes`：网页与外部客户端共享的知识范围
-- `personal_access_tokens`：外部客户端令牌摘要、权限、撤销和使用时间
-
-## 5. 后台任务状态机
+XLS/XLSX 二维数据仍属于文档生命周期，但精确查询不依赖普通文本切片：
 
 ```text
-created
-  -> stored
-  -> parsing
-  -> understanding
-  -> chunking
-  -> indexing
-  -> ready
+工作簿版本
+  ├─ knowledge_datasets    工作表中的二维区域
+  ├─ dataset_fields        字段类型、样例与质量画像
+  ├─ structured_table_rows 兼容行索引
+  └─ dataset_artifacts     可重建 Parquet 版本
+                              │
+                              └─ DuckDB 受控查询
 ```
 
-任何阶段可进入 `failed`，并记录：
+向量只负责发现相关数据集、字段和少量代表行。筛选、投影、排序、分组、计数、去重、
+求和、平均和最值由 DuckDB 下推到当前 Parquet 产物。API 只接受白名单查询计划，不
+接受模型生成的任意 SQL 或代码，并限制内存、线程、超时、分页和最大返回行数。
 
-- 失败阶段
-- 可读错误信息
-- 技术错误详情
-- 重试次数
-- 下一次重试时间
-- 使用的解析器、模型和提示词版本
+大型表格不会为每一行制造一个文档切片或向量；一个数据区域只建立紧凑目录切片。
+回答引用工作表、查询条件和证据原始行，避免用代表行冒充全量计算结果。
 
-任务必须幂等。以 `document_version + stage + config_hash` 作为幂等键，避免重试产生重复切片和向量。
+## 6. 检索、问答与证据
 
-## 6. API 边界
+### 6.1 混合检索
 
-接口分为三类：
+```text
+查询 + KnowledgeScope/临时筛选
+      ├─ PostgreSQL 全文召回
+      └─ 当前 Embedding Profile 向量召回
+                    ↓
+                 RRF 融合
+                    ↓
+          文档去重、父片段扩展、预算裁剪
+                    ↓
+                 引用证据
+```
 
-1. **浏览器业务 API**：采集、知识管理、分类标签、任务、模型配置、连接器和导出，
-   使用管理员 Cookie，允许随产品界面共同演进。
-2. **稳定 REST v1**：`/api/v1` 下的能力、知识范围、搜索、问答、文档和切片读取，
-   使用管理员 Cookie 或 Bearer PAT；同一主版本只增加兼容字段。
-3. **MCP**：`/api/mcp` 下的 Streamable HTTP 取证工具，复用 REST v1 服务与 PAT
-   权限，不复制业务逻辑。
+分类、标签、来源、连接器和指定文档在两路召回中使用相同约束。向量调用或查询失败
+时自动降级到全文搜索，并在响应中返回实际检索模式和降级原因。
 
-CLI 是 REST v1 的薄客户端，不直连数据库。稳定只读契约和接入示例见
-[外部接入](INTEGRATIONS.md)及
-[ADR-017](ADR-017-knowledge-hub-adapters.md)。
+Embedding 配置与服务索引分离。候选配置先测试固定 canary；需要重建时在后台构建
+新 Profile，旧 Profile 继续服务。覆盖完成后原子启用，并保留可回滚版本。
 
-## 7. 安全与隐私
+### 6.2 快速问答与深度分析
 
-- 默认只监听本机地址；远程部署必须启用登录和 TLS。
-- API Key 只在后端使用，数据库保存加密值或密钥引用。
-- 禁止将原文、提示词或 Key 写入普通应用日志。
-- URL 抓取需阻止访问环回地址、内网地址和云元数据地址，防止 SSRF。
-- 上传文件限制大小、类型和解压深度，并预留病毒扫描接口。
-- HTML 清洗后再显示，禁止执行原网页脚本。
-- 所有知识删除先进入回收站；永久删除只允许从回收站发起，并级联清理版本、切片、向量、任务和分类关系。
-- Blob 按内容哈希共享，永久删除后仅清理已经没有任何版本引用的原文。
-- WebDAV 远端始终只读。远端文件使用“规范化来源 + 绝对路径”的稳定身份；永久删除会保留外部排除记录，避免连接器重建或重新扫描后自动复活。
-- 单次成功扫描未发现文件时只标记为“待确认缺失”；连续成功扫描且超过保护期后才确认远端删除。默认仅把对应知识移入回收站，不自动永久删除；远端文件恢复时自动恢复知识，用户也可以将其保留为独立本地快照。
-- 删除 WebDAV 连接器默认保留已入库知识，也可选择移入回收站；停用连接器只暂停扫描同步，不删除配置或知识。
+- `quick`：一次混合检索；表格问题可进入一次受控数据集计划；随后生成带引用回答。
+- `deep`：Plan–Act–Observe 循环选择搜索、读片段、发现数据集、读 Schema 或执行
+  受控查询。默认最多 12 次有效工具调用，持续获得新证据时最多扩展至 16 次，并受
+  总时限和停滞检测约束。
 
-## 8. 可观测性
+深度分析通过 NDJSON 流式发送可审计的动作摘要和结果，不展示模型私有思维链。
+最终答案只能引用本轮实际读到的文档版本、切片或数据行；证据不足时必须明确说明。
 
-至少记录：
+### 6.3 问答记录不是模型记忆
 
-- 每阶段耗时与成功率
-- 单文档 token 和模型费用
-- 解析文本长度及 OCR 是否触发
-- 分类结果和用户纠正
-- 每路检索的命中、最终排名和引用使用情况
-- Prompt、模型、Embedding 和索引版本
+`ask_conversations` 和 `ask_turns` 保存问题、回答、知识范围、引用和执行摘要，供跨
+设备回看、删除和审计。每次请求仍只把当前问题发送给问答服务，不自动读取历史轮次。
 
-## 9. 测试策略
+连续推理和长期个性化记忆由 Hermes、OpenClaw 等外部 Agent 负责；藏知通过 MCP、
+Skill 或 REST 提供可追溯证据。这能避免界面像聊天就让用户误以为模型记住了上文，
+也避免旧答案静默污染新检索。
 
-- 单元测试：解析路由、结构切片、RRF、权限和 URL 安全。
-- 合约测试：每个 AI 输出的 JSON Schema。
-- 集成测试：文件入库到索引完成的完整链路。
-- 检索评测：固定问题、相关文档、正确片段和引用位置。
-- E2E：URL 入库、文件上传、搜索、问答、纠正和重试。
-- 恢复测试：从数据库备份与 storage 目录恢复后重新生成索引。
+## 7. 统一接入层
+
+```text
+浏览器业务 API ─┐
+REST v1 ─────────┼─> KnowledgeScope -> search/read/dataset/ask -> evidence
+CLI ─────────────┤
+MCP / Skill ─────┘
+```
+
+- 浏览器 API：Cookie 鉴权，服务产品管理页面，可随 UI 演进。
+- REST v1：Cookie 或 Bearer PAT，提供稳定只读知识契约。
+- CLI：REST v1 的 JSON 客户端，不直连数据库。
+- MCP：Streamable HTTP，只读取证工具优先；`knowledge_ask` 是可选快速回答。
+- Skill：指导外部 Agent 自主组合搜索、读取和数据集查询，不复制业务逻辑。
+
+外部 Agent 默认只申请 `knowledge:read` 和 `knowledge:search`。只有明确需要藏知内部
+模型回答时才授予 `knowledge:ask`，避免外部模型与藏知模型重复推理和计费。详细契约
+见[外部接入](INTEGRATIONS.md)。
+
+## 8. 当前核心数据表
+
+| 领域 | 当前表 |
+|---|---|
+| 身份与模型 | `admins`、`auth_sessions`、`personal_access_tokens`、`ai_runtime_configs` |
+| 文档事实源 | `documents`、`document_versions`、`blobs` |
+| 处理与检索 | `processing_jobs`、`document_chunks`、`embedding_profiles`、`chunk_embeddings` |
+| 组织 | `categories`、`document_categories`、`tags`、`document_tags`、`document_summaries`、`tag_merge_records` |
+| 数据集 | `knowledge_datasets`、`dataset_fields`、`structured_table_rows`、`dataset_artifacts` |
+| 外部来源 | `webdav_sources`、`webdav_entries`、`external_item_exclusions` |
+| 范围与问答 | `knowledge_scopes`、`ask_conversations`、`ask_turns` |
+
+这张表只列已实现模型。知识图谱、团队空间、多用户权限和通用写入 API 仍属于路线图，
+不作为当前部署依赖。
+
+## 9. 安全边界
+
+- 当前为数据库约束的单管理员系统；密码使用 scrypt，服务端会话只存 token SHA-256。
+- AI Key、Embedding Key 和 WebDAV 密码使用 Fernet 加密；主密钥来自
+  `CANGZHI_SECRET_KEY`，未设置时生成到 `storage/.secret_key`。
+- PAT 明文只显示一次，按 `read/search/ask` 最小权限授权，可撤销后删除。
+- URL 抓取限制协议、地址、重定向、响应大小和超时；访问可信内网 WebDAV 需要显式
+  启用对应选项。
+- WebDAV 始终只读；远端删除经过连续成功扫描和保护期确认，默认只移入本地回收站。
+- HTML 预览不执行来源脚本；上传和表格解析有大小、解压与单元格数量边界。
+- 公网部署必须在反向代理终止 TLS，并只开放必要端口。
+
+## 10. 故障和一致性语义
+
+- `migrate` 成功后 API 才启动，避免新代码运行在旧 Schema 上。
+- Worker 任务可重试且幂等；中途退出不会把半成品标记为当前版本。
+- 新向量 Profile 和新 Parquet 产物构建完成前，旧的活动版本继续服务。
+- 向量不可用时全文检索继续工作；对话模型不可用时采集与知识管理继续工作。
+- 删除连接器、远端删除、删除知识和永久删除是四种不同操作，不相互隐式扩大。
+- 备份必须同时包含 PostgreSQL 与 `storage/`；只备份其一不能完整恢复。
+
+## 11. 当前容量边界与演进
+
+当前架构面向单用户、单机和个人规模，优先减少 Redis、Elasticsearch、专用向量库
+等组件。达到以下条件再评估拆分：
+
+- 当前切片或向量达到十万级且精确向量查询成为持续瓶颈；
+- 数据集并发计算需要独立资源池；
+- 多用户导致权限、隔离和审计成为核心复杂度；
+- 数据库任务队列无法满足吞吐或调度要求；
+- 本地存储容量、可靠性或多节点共享要求引入 S3/MinIO。
+
+任何演进都不能改变“原文与版本是事实源、派生数据可重建、证据可追溯”的基础约束。
+
+## 12. 验证策略
+
+- 单元测试：解析、切片、检索融合、数据集计划、权限与 URL 安全。
+- API 集成测试：采集、任务、搜索、问答、引用、WebDAV 与向量生命周期。
+- 检索黄金集：标注正确文档、片段和数据行，分别评测全文、向量和混合 Top K。
+- 浏览器验证：桌面与手机的核心采集、管理、搜索、问答和证据查看流程。
+- 运维验证：Compose 健康检查、备份校验和隔离恢复演练。

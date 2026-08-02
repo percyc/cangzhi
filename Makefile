@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: up build down down-volumes logs logs-api logs-web logs-worker ps migrate migrate-up migrate-create install-python install-node install test-api test-worker test-web test lint-api lint-worker lint typecheck-api typecheck-worker typecheck clean help
+.PHONY: up upgrade build down down-volumes logs logs-api logs-web logs-worker ps doctor backup verify-backup migrate migrate-up migrate-create install-python install-node install test-api test-worker test-web test lint-api lint-worker lint typecheck-api typecheck-worker typecheck clean help
 
 # Default target
 .DEFAULT_GOAL := help
@@ -9,6 +9,9 @@ help: ## Show this help message
 
 up: ## Start all services with Docker Compose (migrate runs automatically)
 	docker compose up -d
+
+upgrade: ## Build current code, run migrations, and recreate changed services
+	docker compose up -d --build
 
 build: ## Build all services
 	docker compose build
@@ -33,6 +36,19 @@ logs-worker: ## Show logs from Worker service
 
 ps: ## Show status of running services
 	docker compose ps
+
+doctor: ## Check containers, schema revision, and HTTP health endpoints
+	@docker compose ps
+	@docker compose exec -T postgres sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Atc "SELECT '\''schema='\'' || version_num FROM alembic_version"'
+	@docker compose exec -T api python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/readiness').read().decode())"
+	@docker compose exec -T web node -e "require('http').get('http://localhost:3000/api/health', r => { let b=''; r.on('data', c => b += c); r.on('end', () => { console.log(b); process.exit(r.statusCode === 200 ? 0 : 1) }) }).on('error', () => process.exit(1))"
+
+backup: ## Create a database + storage backup
+	scripts/backup.sh
+
+verify-backup: ## Verify BACKUP=backups/cangzhi-... checksum and metadata
+	@test -n "$(BACKUP)" || (echo "用法：make verify-backup BACKUP=backups/cangzhi-..." >&2; exit 2)
+	scripts/verify-backup.sh "$(BACKUP)"
 
 migrate: ## Run database migrations locally (uses .venv)
 	@echo "Running migrations..."

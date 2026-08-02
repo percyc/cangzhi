@@ -92,6 +92,7 @@ OCR 深度增强、领域解析和受控写入 API 按[路线图](docs/ROADMAP.m
 
 - [产品定位：解决的问题、用户闭环与产品边界](docs/PRODUCT.md)
 - [技术架构：事实源、处理管线、检索和安全边界](docs/ARCHITECTURE.md)
+- [部署与首次使用：Docker Compose、升级、HTTPS 和排障](docs/DEPLOYMENT.md)
 - [开发路线图：已交付基线与下一阶段](docs/ROADMAP.md)
 - [当前任务清单](docs/BACKLOG.md)
 - [关键技术决策](docs/DECISIONS.md)
@@ -109,19 +110,22 @@ OCR 深度增强、领域解析和受控写入 API 按[路线图](docs/ROADMAP.m
 - 检索：PostgreSQL 全文搜索 + pgvector + RRF
 - 部署：Docker Compose
 
-## 启动
+## 快速部署
 
 ### 前置要求
 
-- Docker 和 Docker Compose
-- Python 3.11+（本地开发时使用）
-- Node.js 20+（本地前端开发时使用）
+- Docker Engine 与 Docker Compose v2
+- Git
+
+使用 Compose 部署不要求宿主机安装 Python 或 Node.js。
 
 ### 快速启动
 
 ```bash
 cp .env.example .env
-make up
+# 正式使用前修改 .env 中的 POSTGRES_PASSWORD
+docker compose up -d --build
+make doctor
 ```
 
 服务包括：
@@ -138,12 +142,18 @@ make up
 模型是可选配置。登录后在“设置”中分别配置对话模型和 Embedding 模型；网页配置
 立即生效并覆盖 `.env` 中的兼容配置，密钥加密保存在服务器，页面不会回显明文。
 
+完整的局域网/公网部署、端口、HTTPS、国内网络、升级、备份和排障说明见
+[部署与首次使用](docs/DEPLOYMENT.md)。
+
 ### 常用命令
 
 ```bash
 make ps               # 查看服务状态
+make doctor           # 检查容器、迁移版本和健康端点
+make upgrade          # 构建新代码、自动迁移并更新服务
 make logs             # 查看所有服务日志
 make logs-api         # 仅查看 API 日志
+make backup           # 同时备份 PostgreSQL 与 storage
 make migrate          # 运行数据库迁移
 make test             # 运行所有测试
 make test-api         # 仅运行 API 测试

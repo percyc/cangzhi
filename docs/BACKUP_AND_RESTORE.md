@@ -11,8 +11,8 @@
 ## 创建并校验备份
 
 ```bash
-scripts/backup.sh
-scripts/verify-backup.sh backups/cangzhi-YYYYMMDD-HHMMSS
+make backup
+make verify-backup BACKUP=backups/cangzhi-YYYYMMDD-HHMMSS
 ```
 
 也可以把备份写到挂载的外部磁盘：
@@ -51,3 +51,5 @@ scripts/rehearse-restore.sh backups/cangzhi-YYYYMMDD-HHMMSS
 7. 检查活动向量索引覆盖率；必要时从设置页重建索引。
 
 正式覆盖恢复应由管理员在服务器终端完成，避免网页误操作清空当前数据。
+
+服务安装、升级、监听地址和 HTTPS 配置见[部署指南](DEPLOYMENT.md)。
