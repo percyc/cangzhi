@@ -164,8 +164,8 @@ export function EvidenceDrawer({
         className="absolute inset-0 bg-slate-950/35 backdrop-blur-[1px]"
         onClick={onClose}
       />
-      <aside className="absolute inset-0 flex flex-col bg-white shadow-2xl sm:left-auto sm:w-[min(760px,92vw)]">
-        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 px-4 py-4 sm:px-6">
+      <aside className="absolute inset-0 flex h-[100dvh] flex-col bg-white shadow-2xl sm:left-auto sm:w-[min(860px,94vw)]">
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-3 sm:gap-4 sm:px-6 sm:py-4">
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-600">
               {isDataset ? '数据证据' : '原文证据'} · 版本 {citation.document_version_id}
@@ -181,9 +181,10 @@ export function EvidenceDrawer({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+            className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
           >
-            关闭
+            <span className="sm:hidden">← 返回对话</span>
+            <span className="hidden sm:inline">关闭</span>
           </button>
         </header>
 
@@ -199,7 +200,7 @@ export function EvidenceDrawer({
           {error && <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>}
           {context && isDataset && <DatasetEvidence citation={citation} context={context} rows={rows} />}
           {context && !isDataset && view === 'original' && originalUrl && (
-            <div className="h-[calc(100vh-185px)] overflow-hidden rounded-2xl border border-slate-200 bg-white">
+            <div className="h-full min-h-[20rem] overflow-hidden rounded-2xl border border-slate-200 bg-white">
               <iframe title={`${citation.title} 原版预览`} src={originalUrl} className="h-full w-full" />
             </div>
           )}
@@ -208,8 +209,15 @@ export function EvidenceDrawer({
           )}
         </div>
 
-        <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
-          <span className="text-[11px] text-slate-400">证据固定到回答生成时的版本</span>
+        <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 bg-white px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs font-semibold text-slate-700 sm:hidden"
+          >
+            ← 返回对话
+          </button>
+          <span className="hidden text-[11px] text-slate-400 sm:inline">证据固定到回答生成时的版本</span>
           <Link
             href={`/documents/${citation.document_id}?return_to=ask&chunk_id=${citation.chunk_id}${citation.page ? `&page=${citation.page}` : ''}`}
             className="text-xs font-semibold text-blue-700 hover:underline"

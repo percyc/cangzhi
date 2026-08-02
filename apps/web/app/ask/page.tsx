@@ -419,7 +419,7 @@ function AskClient() {
   };
 
   return (
-    <main className="mx-auto flex h-[calc(100dvh-4rem)] max-w-7xl gap-5 overflow-hidden px-3 py-3 sm:px-4 lg:px-6">
+    <main className="ask-shell mx-auto flex w-full max-w-[1600px] gap-5 overflow-hidden px-3 py-3 sm:px-4 lg:px-6">
       <aside className="hidden w-64 shrink-0 lg:block">
         <div className="sticky top-5 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
@@ -455,23 +455,35 @@ function AskClient() {
       </aside>
 
       <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-7">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight text-slate-950">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 sm:gap-3 sm:px-7 sm:py-4">
+          <div className="flex w-full min-w-0 items-center justify-between gap-3 sm:block sm:w-auto">
+            <h1 className="text-lg font-semibold tracking-tight text-slate-950 sm:text-xl">
               问知识库
             </h1>
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-0.5 hidden text-[11px] text-slate-500 sm:mt-1 sm:block sm:text-xs">
               {selectedScope?.name ?? '全部知识'} · 检索证据后回答
             </p>
+            {turns.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTurns([]);
+                  setError(null);
+                }}
+                className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 sm:hidden"
+              >
+                新对话
+              </button>
+            )}
           </div>
-          <div className="flex items-center gap-2">
-            <div className="flex rounded-xl bg-slate-100 p-1" aria-label="问答模式">
+          <div className="flex w-full items-center gap-2 overflow-x-auto pb-0.5 sm:w-auto sm:overflow-visible sm:pb-0">
+            <div className="flex shrink-0 rounded-xl bg-slate-100 p-1" aria-label="问答模式">
               {(['quick', 'deep'] as const).map((item) => (
                 <button
                   key={item}
                   type="button"
                   onClick={() => setMode(item)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition sm:px-3 ${
                     mode === item
                       ? 'bg-white text-slate-900 shadow-sm'
                       : 'text-slate-500 hover:text-slate-800'
@@ -489,7 +501,7 @@ function AskClient() {
             <select
               value={scopeSlug}
               onChange={(event) => changeScope(event.target.value)}
-              className="max-w-48 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 lg:hidden"
+              className="min-w-24 max-w-32 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-700 sm:min-w-28 sm:max-w-40 sm:px-3 lg:hidden"
               aria-label="知识范围"
             >
               {scopes.map((scope) => (
@@ -501,7 +513,7 @@ function AskClient() {
             <button
               type="button"
               onClick={() => setFilterOpen((current) => !current)}
-              className={`rounded-xl border px-3 py-2 text-xs font-medium ${
+              className={`shrink-0 rounded-xl border px-2.5 py-2 text-xs font-medium sm:px-3 ${
                 refinementCount > 0
                   ? 'border-slate-900 bg-slate-900 text-white'
                   : 'border-slate-200 text-slate-600 hover:bg-slate-50'
@@ -516,7 +528,7 @@ function AskClient() {
                   setTurns([]);
                   setError(null);
                 }}
-                className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50"
+                className="hidden shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 sm:block"
               >
                 新对话
               </button>
@@ -540,14 +552,14 @@ function AskClient() {
           />
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-50/60 px-4 py-6 sm:px-7">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-50/60 px-3 py-4 sm:px-7 sm:py-6">
           {turns.length === 0 && !loading && (
             <WelcomeState
               disabled={providerReady === false}
               onExample={setQuestion}
             />
           )}
-          <div className="space-y-8">
+          <div className="mx-auto w-full max-w-5xl space-y-6 sm:space-y-8">
             {turns.map((turn) => (
               <ConversationTurn
                 key={turn.id}
@@ -569,7 +581,7 @@ function AskClient() {
           <div ref={endRef} />
         </div>
 
-        <footer className="shrink-0 border-t border-slate-100 bg-white p-3 sm:px-7 sm:py-4">
+        <footer className="shrink-0 border-t border-slate-100 bg-white px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-7 sm:py-4">
           {providerReady === false && (
             <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
               尚未配置对话模型。
@@ -616,7 +628,7 @@ function AskClient() {
               发送
             </button>
           </form>
-          <p className="mt-2 text-center text-[11px] text-slate-400">
+          <p className="mt-2 hidden text-center text-[11px] text-slate-400 sm:block">
             {mode === 'deep'
               ? '深度分析默认最多调用 12 次，只在持续获得新证据时扩展至 16 次 · 请核对引用原文'
               : 'Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文'}
@@ -960,7 +972,7 @@ function LiveAnalysisCard({ analysis }: { analysis: LiveAnalysis }) {
       </div>
       <div className="flex items-start gap-3">
         <AssistantMark />
-        <div className="min-w-0 max-w-3xl flex-1 rounded-2xl rounded-tl-md border border-indigo-100 bg-white px-4 py-4 shadow-sm">
+        <div className="min-w-0 max-w-5xl flex-1 rounded-2xl rounded-tl-md border border-indigo-100 bg-white px-4 py-4 shadow-sm">
           <div className="flex items-center gap-2 text-sm font-medium text-indigo-800">
             <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
             {analysis.message}
@@ -1019,7 +1031,7 @@ function ConversationTurn({
       </div>
       <div className="flex items-start gap-3">
         <AssistantMark />
-        <div className="min-w-0 max-w-3xl flex-1">
+        <div className="min-w-0 max-w-5xl flex-1">
           <div className="prose prose-slate max-w-none rounded-2xl rounded-tl-md border border-slate-200 bg-white px-5 py-4 text-sm leading-7 shadow-sm">
             <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
               {turn.response.answer}

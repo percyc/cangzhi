@@ -137,3 +137,38 @@ details > summary::-webkit-details-marker {
     font-size: 1.5rem !important;
   }
 }
+
+.ask-shell {
+  --ask-nav-h: 64px;
+  --ask-mobile-nav-h: 120px;
+  height: calc(100dvh - var(--ask-nav-h));
+  min-height: calc(100dvh - var(--ask-nav-h));
+  max-height: calc(100dvh - var(--ask-nav-h));
+  animation: none;
+  margin: 0 auto !important;
+  padding: 0.75rem !important;
+}
+
+@media (max-width: 639px) {
+  .ask-shell {
+    height: calc(100dvh - var(--ask-mobile-nav-h));
+    min-height: calc(100dvh - var(--ask-mobile-nav-h));
+    max-height: calc(100dvh - var(--ask-mobile-nav-h));
+  }
+}
+
+@media (min-width: 640px) {
+  .ask-shell {
+    padding-inline: 1rem !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  .ask-shell {
+    padding-inline: 1.5rem !important;
+  }
+}
+
+.document-shell {
+  animation: none;
+}

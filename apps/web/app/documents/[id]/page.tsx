@@ -455,13 +455,22 @@ export default function DocumentDetailPage() {
   ].join(' · ');
 
   return (
-    <main className="mx-auto max-w-6xl px-4 sm:px-6">
+    <main className="document-shell mx-auto max-w-6xl px-4 sm:px-6">
       <Link
         href={returnToAsk ? '/ask' : '/documents'}
         className="text-sm font-medium text-slate-500 hover:text-slate-900"
       >
         {returnToAsk ? '← 返回当前对话' : '← 返回知识库'}
       </Link>
+
+      {returnToAsk && (
+        <Link
+          href="/ask"
+          className="fixed left-1/2 bottom-[max(1rem,env(safe-area-inset-bottom))] z-30 -translate-x-1/2 rounded-full border border-slate-300 bg-white/95 px-5 py-3 text-sm font-semibold text-slate-800 shadow-xl shadow-slate-950/15 backdrop-blur sm:hidden"
+        >
+          ← 返回当前对话
+        </Link>
+      )}
 
       <div className="mt-4">
         <h1 className="max-w-5xl text-2xl font-semibold text-slate-950 sm:text-3xl">{document.title}</h1>
