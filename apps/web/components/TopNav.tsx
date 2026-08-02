@@ -63,9 +63,10 @@ export function TopNav() {
 
   const status = state.kind === 'ready' ? state.status : null;
   const error = state.kind === 'error' ? state.message : null;
+  const immersiveAsk = pathname.startsWith('/ask');
 
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 shadow-[0_1px_0_rgba(15,23,42,0.02)] backdrop-blur-xl">
+    <header className={`${immersiveAsk ? 'hidden sm:block' : ''} sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 shadow-[0_1px_0_rgba(15,23,42,0.02)] backdrop-blur-xl`}>
       <div className="mx-auto flex h-16 max-w-7xl items-center gap-4 px-4 sm:px-6">
         <Link
           href="/documents"

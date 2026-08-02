@@ -454,36 +454,93 @@ function AskClient() {
         </div>
       </aside>
 
-      <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-        <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 sm:gap-3 sm:px-7 sm:py-4">
-          <div className="flex w-full min-w-0 items-center justify-between gap-3 sm:block sm:w-auto">
-            <h1 className="text-lg font-semibold tracking-tight text-slate-950 sm:text-xl">
+      <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-slate-200 bg-white shadow-sm sm:rounded-3xl">
+        <header className="relative flex h-14 shrink-0 items-center gap-2 border-b border-slate-100 px-3 sm:h-auto sm:flex-wrap sm:justify-between sm:gap-3 sm:px-7 sm:py-4">
+          <div className="hidden min-w-0 sm:block">
+            <h1 className="text-xl font-semibold tracking-tight text-slate-950">
               问知识库
             </h1>
-            <p className="mt-0.5 hidden text-[11px] text-slate-500 sm:mt-1 sm:block sm:text-xs">
+            <p className="mt-1 text-xs text-slate-500">
               {selectedScope?.name ?? '全部知识'} · 检索证据后回答
             </p>
-            {turns.length > 0 && (
+          </div>
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:hidden">
+            <Link
+              href="/search"
+              aria-label="返回搜索"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-lg text-slate-600 hover:bg-slate-100"
+            >
+              ←
+            </Link>
+            <button
+              type="button"
+              onClick={() => setFilterOpen(true)}
+              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2 py-2 text-left hover:bg-slate-100"
+            >
+              <span className="truncate text-sm font-semibold text-slate-900">
+                {selectedScope?.name ?? '全部知识'}
+              </span>
+              {refinementCount > 0 && (
+                <span className="shrink-0 rounded-full bg-slate-900 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                  {refinementCount}
+                </span>
+              )}
+              <span className="shrink-0 text-xs text-slate-400">⌄</span>
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMode((current) => current === 'quick' ? 'deep' : 'quick')}
+            className={`shrink-0 rounded-xl px-3 py-2 text-xs font-semibold sm:hidden ${
+              mode === 'deep'
+                ? 'bg-indigo-50 text-indigo-700'
+                : 'bg-slate-100 text-slate-700'
+            }`}
+            title="切换问答模式"
+          >
+            {mode === 'deep' ? '深度' : '快速'}
+          </button>
+          <details className="group relative shrink-0 sm:hidden">
+            <summary className="grid h-9 w-9 cursor-pointer list-none place-items-center rounded-xl text-xl leading-none text-slate-600 hover:bg-slate-100" aria-label="更多操作">
+              ⋯
+            </summary>
+            <div className="absolute right-0 z-30 mt-2 w-40 rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-xl shadow-slate-950/10">
               <button
                 type="button"
-                onClick={() => {
-                  setTurns([]);
-                  setError(null);
+                onClick={(event) => {
+                  setFilterOpen(true);
+                  event.currentTarget.closest('details')?.removeAttribute('open');
                 }}
-                className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 sm:hidden"
+                className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
               >
-                新对话
+                知识范围与筛选
               </button>
-            )}
-          </div>
-          <div className="flex w-full items-center gap-2 overflow-x-auto pb-0.5 sm:w-auto sm:overflow-visible sm:pb-0">
+              {turns.length > 0 && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    setTurns([]);
+                    setError(null);
+                    event.currentTarget.closest('details')?.removeAttribute('open');
+                  }}
+                  className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
+                >
+                  新对话
+                </button>
+              )}
+              <Link href="/search" className="block rounded-xl px-3 py-2 text-slate-700 hover:bg-slate-100">
+                精确搜索
+              </Link>
+            </div>
+          </details>
+          <div className="hidden items-center gap-2 sm:flex">
             <div className="flex shrink-0 rounded-xl bg-slate-100 p-1" aria-label="问答模式">
               {(['quick', 'deep'] as const).map((item) => (
                 <button
                   key={item}
                   type="button"
                   onClick={() => setMode(item)}
-                  className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition sm:px-3 ${
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
                     mode === item
                       ? 'bg-white text-slate-900 shadow-sm'
                       : 'text-slate-500 hover:text-slate-800'
@@ -501,7 +558,7 @@ function AskClient() {
             <select
               value={scopeSlug}
               onChange={(event) => changeScope(event.target.value)}
-              className="min-w-24 max-w-32 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-700 sm:min-w-28 sm:max-w-40 sm:px-3 lg:hidden"
+              className="min-w-28 max-w-40 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 lg:hidden"
               aria-label="知识范围"
             >
               {scopes.map((scope) => (
@@ -513,7 +570,7 @@ function AskClient() {
             <button
               type="button"
               onClick={() => setFilterOpen((current) => !current)}
-              className={`shrink-0 rounded-xl border px-2.5 py-2 text-xs font-medium sm:px-3 ${
+              className={`shrink-0 rounded-xl border px-3 py-2 text-xs font-medium ${
                 refinementCount > 0
                   ? 'border-slate-900 bg-slate-900 text-white'
                   : 'border-slate-200 text-slate-600 hover:bg-slate-50'
@@ -528,7 +585,7 @@ function AskClient() {
                   setTurns([]);
                   setError(null);
                 }}
-                className="hidden shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 sm:block"
+                className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50"
               >
                 新对话
               </button>
@@ -537,19 +594,94 @@ function AskClient() {
         </header>
 
         {filterOpen && (
-          <FacetPanel
-            facets={facets}
-            selectedScope={selectedScope}
-            categoryIds={categoryIds}
-            tagIds={tagIds}
-            sourceTypes={sourceTypes}
-            connectorIds={connectorIds}
-            setCategoryIds={setCategoryIds}
-            setTagIds={setTagIds}
-            setSourceTypes={setSourceTypes}
-            setConnectorIds={setConnectorIds}
-            onClear={clearRefinements}
-          />
+          <>
+            <div className="hidden sm:block">
+              <FacetPanel
+                facets={facets}
+                selectedScope={selectedScope}
+                categoryIds={categoryIds}
+                tagIds={tagIds}
+                sourceTypes={sourceTypes}
+                connectorIds={connectorIds}
+                setCategoryIds={setCategoryIds}
+                setTagIds={setTagIds}
+                setSourceTypes={setSourceTypes}
+                setConnectorIds={setConnectorIds}
+                onClear={clearRefinements}
+              />
+            </div>
+            <div
+              className="fixed inset-0 z-50 sm:hidden"
+              role="dialog"
+              aria-modal="true"
+              aria-label="知识范围与筛选"
+            >
+              <button
+                type="button"
+                aria-label="关闭知识范围"
+                onClick={() => setFilterOpen(false)}
+                className="absolute inset-0 bg-slate-950/35 backdrop-blur-[1px]"
+              />
+              <section className="absolute inset-x-0 bottom-0 flex max-h-[88dvh] flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl">
+                <header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
+                  <div>
+                    <h2 className="text-base font-semibold text-slate-950">知识范围</h2>
+                    <p className="mt-0.5 text-xs text-slate-500">选择本轮对话可以使用的知识</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setFilterOpen(false)}
+                    className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"
+                  >
+                    关闭
+                  </button>
+                </header>
+                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                  <div className="border-b border-slate-100 px-5 py-4">
+                    <p className="mb-2 text-xs font-semibold text-slate-600">基础范围</p>
+                    <div className="flex flex-wrap gap-2">
+                      {scopes.map((scope) => (
+                        <button
+                          key={`mobile-${scope.slug}`}
+                          type="button"
+                          onClick={() => changeScope(scope.slug)}
+                          className={`rounded-full border px-3 py-1.5 text-xs font-medium ${
+                            scopeSlug === scope.slug
+                              ? 'border-slate-900 bg-slate-900 text-white'
+                              : 'border-slate-200 bg-white text-slate-600'
+                          }`}
+                        >
+                          {scope.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <FacetPanel
+                    facets={facets}
+                    selectedScope={selectedScope}
+                    categoryIds={categoryIds}
+                    tagIds={tagIds}
+                    sourceTypes={sourceTypes}
+                    connectorIds={connectorIds}
+                    setCategoryIds={setCategoryIds}
+                    setTagIds={setTagIds}
+                    setSourceTypes={setSourceTypes}
+                    setConnectorIds={setConnectorIds}
+                    onClear={clearRefinements}
+                  />
+                </div>
+                <footer className="shrink-0 border-t border-slate-200 bg-white px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+                  <button
+                    type="button"
+                    onClick={() => setFilterOpen(false)}
+                    className="w-full rounded-xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white"
+                  >
+                    完成{refinementCount > 0 ? ` · 已选择 ${refinementCount} 项` : ''}
+                  </button>
+                </footer>
+              </section>
+            </div>
+          </>
         )}
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-50/60 px-3 py-4 sm:px-7 sm:py-6">

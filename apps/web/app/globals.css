@@ -140,7 +140,6 @@ details > summary::-webkit-details-marker {
 
 .ask-shell {
   --ask-nav-h: 64px;
-  --ask-mobile-nav-h: 120px;
   height: calc(100dvh - var(--ask-nav-h));
   min-height: calc(100dvh - var(--ask-nav-h));
   max-height: calc(100dvh - var(--ask-nav-h));
@@ -151,9 +150,10 @@ details > summary::-webkit-details-marker {
 
 @media (max-width: 639px) {
   .ask-shell {
-    height: calc(100dvh - var(--ask-mobile-nav-h));
-    min-height: calc(100dvh - var(--ask-mobile-nav-h));
-    max-height: calc(100dvh - var(--ask-mobile-nav-h));
+    height: 100dvh;
+    min-height: 100dvh;
+    max-height: 100dvh;
+    padding: 0 !important;
   }
 }
 
