@@ -27,6 +27,7 @@ from ..services.dataset_execution import (
     preview_dataset,
 )
 from ..services.deep_analysis import DeepAnalysisService
+from ..services.evidence import EvidenceError, EvidenceService
 from ..services.knowledge_read import (
     KnowledgeReadError,
     read_current_chunk,
@@ -129,6 +130,8 @@ async def capabilities(
             "mcp_ask": True,
             "document_read": True,
             "chunk_read": True,
+            "evidence_viewer": True,
+            "version_bound_evidence": True,
         },
     }
 
@@ -428,31 +431,172 @@ def _ndjson(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str) + "\n"
 
 
-@router.get("/knowledge/documents/{document_id}", response_model=dict[str, Any])
-async def get_knowledge_document(
-    document_id: int,
+@router.get("/knowledge/chunks/{chunk_id}", response_model=dict[str, Any])
+async def get_knowledge_chunk(
+    chunk_id: int,
+    version_id: int | None = Query(default=None, ge=1),
+    include_context: bool = Query(default=False),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
-        return await read_current_document(db, document_id)
+        chunk = await read_current_chunk(db, chunk_id)
     except KnowledgeReadError as exc:
         raise HTTPException(
             status_code=404,
             detail={"code": exc.code, "message": str(exc)},
         ) from None
+    if version_id is not None and chunk["document_version_id"] != version_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "version_mismatch",
+                "message": "片段版本已变更，无法作为原始证据返回",
+            },
+        )
+    if not include_context:
+        return chunk
+    try:
+        evidence = await EvidenceService().resolve_chunk(
+            db,
+            chunk_id=chunk_id,
+            document_version_id=chunk["document_version_id"],
+        )
+    except EvidenceError as exc:
+        raise HTTPException(
+            status_code={
+                "version_mismatch": 409,
+                "artifact_version_mismatch": 409,
+                "chunk_not_found": 404,
+                "document_not_found": 404,
+                "version_not_found": 404,
+            }.get(exc.code, 400),
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    chunk["evidence"] = evidence.to_dict()
+    return chunk
 
 
-@router.get("/knowledge/chunks/{chunk_id}", response_model=dict[str, Any])
-async def get_knowledge_chunk(
-    chunk_id: int,
+@router.get("/knowledge/documents/{document_id}", response_model=dict[str, Any])
+async def get_knowledge_document(
+    document_id: int,
+    version_id: int | None = Query(default=None, ge=1),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
-        return await read_current_chunk(db, chunk_id)
+        document = await read_current_document(db, document_id)
     except KnowledgeReadError as exc:
         raise HTTPException(
             status_code=404,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    if version_id is not None and document["version"]["id"] != version_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "version_mismatch",
+                "message": "文档版本已变更，无法作为原始证据返回",
+            },
+        )
+    return document
+
+
+@router.get("/knowledge/evidence/by-chunk/{chunk_id}", response_model=dict[str, Any])
+async def get_evidence_by_chunk(
+    chunk_id: int,
+    document_version_id: int = Query(..., ge=1),
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        evidence = await EvidenceService().resolve_chunk(
+            db,
+            chunk_id=chunk_id,
+            document_version_id=document_version_id,
+        )
+    except EvidenceError as exc:
+        raise HTTPException(
+            status_code={
+                "version_mismatch": 409,
+                "artifact_version_mismatch": 409,
+                "chunk_not_found": 404,
+                "document_not_found": 404,
+                "version_not_found": 404,
+            }.get(exc.code, 400),
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    return evidence.to_dict()
+
+
+@router.get(
+    "/knowledge/evidence/by-dataset/{dataset_id}",
+    response_model=dict[str, Any],
+)
+async def get_evidence_by_dataset(
+    dataset_id: int,
+    document_version_id: int = Query(..., ge=1),
+    artifact_version: int | None = Query(default=None, ge=1),
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        evidence = await EvidenceService().resolve_dataset(
+            db,
+            dataset_id=dataset_id,
+            document_version_id=document_version_id,
+            artifact_version=artifact_version,
+        )
+    except EvidenceError as exc:
+        raise HTTPException(
+            status_code={
+                "dataset_not_found": 404,
+                "version_mismatch": 409,
+                "artifact_version_mismatch": 409,
+                "document_not_found": 404,
+                "version_not_found": 404,
+            }.get(exc.code, 400),
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    return evidence.to_dict()
+
+
+class EvidenceRowPreviewPayload(BaseModel):
+    columns: list[str] = Field(default_factory=list, max_length=64)
+    source_rows: list[int] = Field(default_factory=list, max_length=200)
+    limit: int = Field(default=20, ge=1, le=200)
+
+
+@router.post(
+    "/knowledge/evidence/by-dataset/{dataset_id}/rows",
+    response_model=dict[str, Any],
+)
+async def preview_evidence_rows(
+    dataset_id: int,
+    payload: EvidenceRowPreviewPayload,
+    document_version_id: int = Query(..., ge=1),
+    artifact_version: int | None = Query(default=None, ge=1),
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    try:
+        return await EvidenceService().preview_dataset_rows(
+            db,
+            dataset_id=dataset_id,
+            document_version_id=document_version_id,
+            artifact_version=artifact_version,
+            source_rows=payload.source_rows,
+            columns=payload.columns,
+            limit=payload.limit,
+        )
+    except EvidenceError as exc:
+        raise HTTPException(
+            status_code={
+                "dataset_not_found": 404,
+                "version_mismatch": 409,
+                "artifact_version_mismatch": 409,
+                "document_not_found": 404,
+                "version_not_found": 404,
+            }.get(exc.code, 400),
             detail={"code": exc.code, "message": str(exc)},
         ) from None

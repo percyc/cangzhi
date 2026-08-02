@@ -39,13 +39,94 @@ from apps.api.services.deep_analysis import (
     _record_observation_progress,
     _select_dataset_chunk,
 )
+from apps.api.services.evidence import EvidenceService
 from apps.api.services.qa import (
     AskError,
     AskRequest,
+    Evidence,
     QAService,
     _expanded_chunk_context,
     _merge_neighbor_context,
 )
+
+
+def test_dataset_citation_exposes_auditable_evidence_contract():
+    citation = Evidence(
+        id=1,
+        evidence_type="dataset",
+        document_id=3,
+        document_version_id=7,
+        chunk_id=9,
+        title="统计表",
+        heading_path=["Sheet1"],
+        page=None,
+        paragraph_index=None,
+        source_start=None,
+        source_end=None,
+        snippet="精确查询结果",
+        score=1.0,
+        dataset_id=8,
+        artifact_version=2,
+        columns=["日期", "菜名"],
+        query_plan={
+            "filters": [{"column": "日期", "operator": "eq", "value": "2026-06-26"}],
+            "metric": "rows",
+        },
+        source_rows=[3, 8],
+        match_rows=2,
+    ).to_citation()
+
+    assert citation["evidence_type"] == "dataset"
+    assert citation["document_version_id"] == 7
+    assert citation["artifact_version"] == 2
+    assert citation["source_rows"] == [3, 8]
+    assert citation["query_plan"]["metric"] == "rows"
+
+
+def test_evidence_service_reads_the_cited_historical_version(qa_db):
+    document_id = asyncio.run(
+        _seed_document(
+            qa_db,
+            title="版本化说明",
+            heading="第一版",
+            body="这是回答实际引用的旧版段落。",
+        )
+    )
+
+    async def _run():
+        async with qa_db() as session:
+            document = await session.get(Document, document_id)
+            old_version_id = document.current_version_id
+            old_chunk = await session.scalar(
+                select(DocumentChunk).where(
+                    DocumentChunk.document_id == document_id,
+                    DocumentChunk.document_version_id == old_version_id,
+                    DocumentChunk.role == "child",
+                )
+            )
+            new_version = DocumentVersion(
+                document_id=document_id,
+                version_number=2,
+                content_hash="new-version",
+                raw_content="新版正文",
+                structured_content={"document_type": "markdown", "blocks": []},
+                processing_status="ready",
+            )
+            session.add(new_version)
+            await session.flush()
+            document.current_version_id = new_version.id
+            old_chunk.is_current = False
+            await session.commit()
+
+            context = await EvidenceService().resolve_chunk(
+                session,
+                chunk_id=old_chunk.id,
+                document_version_id=old_version_id,
+            )
+            assert context.document_version_id == old_version_id
+            assert "旧版段落" in context.snippet
+
+    asyncio.run(_run())
 
 
 def test_adaptive_budget_expands_only_on_new_citable_evidence():

@@ -882,6 +882,7 @@ async def _dataset_result_to_evidence(
     )
     return Evidence(
         id=1,
+        evidence_type="dataset",
         document_id=dataset.document_id,
         document_version_id=dataset.document_version_id,
         chunk_id=chunk.id,
@@ -913,6 +914,21 @@ async def _dataset_result_to_evidence(
             else ""
         ),
         source_url=document.source_url if document else None,
+        dataset_id=dataset.id,
+        artifact_version=result.get("artifact_version"),
+        sheet_name=dataset.sheet_name,
+        region_index=dataset.region_index,
+        columns=list(query_plan.get("columns") or []),
+        query_plan=dict(query_plan),
+        source_rows=[int(item) for item in (result.get("source_rows") or [])],
+        aggregate={
+            "kind": query_plan.get("metric") or "rows",
+            "rows": rows[:MAX_DATASET_ROWS_IN_CONTEXT],
+            "matched_row_count": result.get("matched_row_count", 0),
+        },
+        contributions=[],
+        match_rows=int(result.get("matched_row_count") or 0),
+        truncated=bool(result.get("truncated")),
     )
 
 

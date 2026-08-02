@@ -768,6 +768,7 @@ async def permanently_delete_document(
 async def download_document_original(
     document_id: int,
     inline: bool = Query(False),
+    version_id: int | None = Query(default=None, ge=1),
     db: AsyncSession = Depends(get_db),
     storage: BlobStorage = Depends(get_storage),
 ):
@@ -776,16 +777,17 @@ async def download_document_original(
     document = await db.get(Document, document_id)
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="资料不存在")
+    selected_version_id = version_id or document.current_version_id
     version = (
-        await db.get(DocumentVersion, document.current_version_id)
-        if document.current_version_id is not None
+        await db.get(DocumentVersion, selected_version_id)
+        if selected_version_id is not None
         else None
     )
-    if version is None:
-        raise HTTPException(status_code=404, detail="资料没有当前版本")
+    if version is None or version.document_id != document_id:
+        raise HTTPException(status_code=404, detail="资料版本不存在")
 
     document_meta = document.meta or {}
-    if document_meta.get("external_source") == "webdav":
+    if document_meta.get("external_source") == "webdav" and version_id is None:
         source_id = document_meta.get("webdav_source_id")
         source = (
             await db.get(WebDAVSource, source_id)
@@ -850,21 +852,33 @@ async def download_document_original(
 @router.get("/{document_id}/preview")
 async def preview_document(
     document_id: int,
+    version_id: int | None = Query(default=None, ge=1),
     db: AsyncSession = Depends(get_db),
     storage: BlobStorage = Depends(get_storage),
 ):
-    """Stream the current version's disposable PDF preview inline."""
+    """Stream the current (or pinned) version's disposable PDF preview inline."""
 
     document = await db.get(Document, document_id)
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="资料不存在")
-    version = (
-        await db.get(DocumentVersion, document.current_version_id)
-        if document.current_version_id is not None
-        else None
-    )
-    if version is None or version.preview_blob_id is None:
+    if version_id is None:
+        version_id = document.current_version_id
+    if version_id is None:
         raise HTTPException(status_code=404, detail="资料暂时没有预览文件")
+    version = await db.get(DocumentVersion, version_id)
+    if (
+        version is None
+        or version.document_id != document_id
+        or version.preview_blob_id is None
+    ):
+        raise HTTPException(
+            status_code=409 if version_id != document.current_version_id else 404,
+            detail=(
+                "所请求的版本不再提供版式预览"
+                if version_id != document.current_version_id
+                else "资料暂时没有预览文件"
+            ),
+        )
     blob = await db.get(Blob, version.preview_blob_id)
     if blob is None:
         raise HTTPException(status_code=404, detail="预览文件不存在")

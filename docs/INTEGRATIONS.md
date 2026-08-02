@@ -60,6 +60,9 @@ MCP 的 `knowledge_ask` 固定为快速问答，不暴露 `deep`；Skill 和外�
 - `knowledge_get_dataset_schema`：读取字段类型、画像与样例；
 - `knowledge_preview_dataset_rows`：只分页预览少量行；
 - `knowledge_query_dataset`：用白名单计划执行筛选、投影、排序、分组和聚合。
+- `knowledge_get_evidence_by_chunk`：按文档版本读取引用所在章节或解析段落；
+- `knowledge_get_evidence_by_dataset`：读取数据集与列式产物版本信息；
+- `knowledge_preview_evidence_rows`：只按引用返回的 `source_rows` 读取贡献原始行。
 
 外部 Agent 应先读 schema 再生成计划。`knowledge_query_dataset` 不接收 SQL，查询由
 DuckDB 在 Parquet 上下推执行，最多返回 200 行。不要循环调用预览工具把大型 Excel

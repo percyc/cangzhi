@@ -19,6 +19,7 @@ from ..services.dataset_execution import (
     list_visible_datasets,
     preview_dataset,
 )
+from ..services.evidence import EvidenceError, EvidenceService
 from ..services.knowledge_read import (
     KnowledgeReadError,
     read_current_chunk,
@@ -102,6 +103,30 @@ class DatasetQueryArguments(DatasetIdArguments):
     sort_order: str = "asc"
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class EvidenceChunkArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: int = Field(ge=1)
+    document_version_id: int = Field(ge=1)
+
+
+class EvidenceDatasetArguments(DatasetIdArguments):
+    model_config = ConfigDict(extra="forbid")
+
+    document_version_id: int = Field(ge=1)
+    artifact_version: int | None = Field(default=None, ge=1)
+
+
+class EvidenceRowsArguments(DatasetIdArguments):
+    model_config = ConfigDict(extra="forbid")
+
+    document_version_id: int = Field(ge=1)
+    artifact_version: int | None = Field(default=None, ge=1)
+    source_rows: list[int] = Field(default_factory=list, max_length=200)
+    columns: list[str] = Field(default_factory=list, max_length=64)
+    limit: int = Field(default=20, ge=1, le=200)
 
 
 TOOLS = [
@@ -248,6 +273,53 @@ TOOLS = [
             "不要因为首次精确查询为空就结束探索。"
         ),
         "inputSchema": DatasetQueryArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_get_evidence_by_chunk",
+        "title": "按片段读取证据上下文",
+        "description": (
+            "读取版本绑定的证据抽屉上下文：Markdown 节选/章节高亮、"
+            "PDF/Word 解析段加 PDF 页码跳转、数据集精确计算结果与贡献行。"
+            "必须传入与原始回答相同的 document_version_id；版本不匹配时返回错误，"
+            "避免读取新版本冒充原始证据。"
+        ),
+        "inputSchema": EvidenceChunkArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_get_evidence_by_dataset",
+        "title": "按数据集读取证据上下文",
+        "description": (
+            "读取与回答绑定版本的数据集证据上下文：精确计划、贡献行、"
+            "统计结果、列式产物版本号。同样要求 document_version_id 与回答一致。"
+        ),
+        "inputSchema": EvidenceDatasetArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_preview_evidence_rows",
+        "title": "按 source_rows 预览贡献行",
+        "description": (
+            "仅返回 evidence.source_rows 列表中明确请求的原始行；不返回 SQL，"
+            "不放任把整张表装载入上下文。受限 200 行以内，分页由调用方控制。"
+        ),
+        "inputSchema": EvidenceRowsArguments.model_json_schema(),
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -466,6 +538,56 @@ async def _call_tool(
         except ValidationError as exc:
             return _tool_error("invalid_arguments", str(exc))
         except DatasetExecutionError as exc:
+            return _tool_error(exc.code, str(exc))
+
+    if name in {
+        "knowledge_get_evidence_by_chunk",
+        "knowledge_get_evidence_by_dataset",
+        "knowledge_preview_evidence_rows",
+    }:
+        forbidden = _require_scope(identity, "knowledge:read")
+        if forbidden:
+            return forbidden
+        try:
+            service = EvidenceService()
+            if name == "knowledge_get_evidence_by_chunk":
+                args = EvidenceChunkArguments.model_validate(arguments)
+                return _tool_result(
+                    (
+                        await service.resolve_chunk(
+                            db,
+                            chunk_id=args.chunk_id,
+                            document_version_id=args.document_version_id,
+                        )
+                    ).to_dict()
+                )
+            if name == "knowledge_get_evidence_by_dataset":
+                args = EvidenceDatasetArguments.model_validate(arguments)
+                return _tool_result(
+                    (
+                        await service.resolve_dataset(
+                            db,
+                            dataset_id=args.dataset_id,
+                            document_version_id=args.document_version_id,
+                            artifact_version=args.artifact_version,
+                        )
+                    ).to_dict()
+                )
+            args = EvidenceRowsArguments.model_validate(arguments)
+            return _tool_result(
+                await service.preview_dataset_rows(
+                    db,
+                    dataset_id=args.dataset_id,
+                    document_version_id=args.document_version_id,
+                    artifact_version=args.artifact_version,
+                    source_rows=args.source_rows,
+                    columns=args.columns,
+                    limit=args.limit,
+                )
+            )
+        except ValidationError as exc:
+            return _tool_error("invalid_arguments", str(exc))
+        except EvidenceError as exc:
             return _tool_error(exc.code, str(exc))
 
     forbidden = _require_scope(identity, "knowledge:read")

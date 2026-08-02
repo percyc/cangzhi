@@ -110,6 +110,9 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "knowledge_get_dataset_schema",
         "knowledge_preview_dataset_rows",
         "knowledge_query_dataset",
+        "knowledge_get_evidence_by_chunk",
+        "knowledge_get_evidence_by_dataset",
+        "knowledge_preview_evidence_rows",
     }
     query_tool = next(
         item

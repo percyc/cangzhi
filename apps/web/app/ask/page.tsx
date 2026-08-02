@@ -6,8 +6,12 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
+import {
+  EvidenceDrawer,
+  type EvidenceCitation,
+} from '@/components/evidence-drawer';
 
-type Citation = {
+type Citation = EvidenceCitation & {
   id: number;
   document_id: number;
   document_version_id: number;
@@ -179,6 +183,7 @@ function AskClient() {
   const [liveAnalysis, setLiveAnalysis] = useState<LiveAnalysis | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [providerReady, setProviderReady] = useState<boolean | null>(null);
+  const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const requestAbortRef = useRef<AbortController | null>(null);
@@ -544,7 +549,11 @@ function AskClient() {
           )}
           <div className="space-y-8">
             {turns.map((turn) => (
-              <ConversationTurn key={turn.id} turn={turn} />
+              <ConversationTurn
+                key={turn.id}
+                turn={turn}
+                onOpenCitation={setSelectedCitation}
+              />
             ))}
             {liveAnalysis ? (
               <LiveAnalysisCard analysis={liveAnalysis} />
@@ -613,6 +622,11 @@ function AskClient() {
               : 'Enter 发送 · Shift + Enter 换行 · 回答可能有误，请核对引用原文'}
           </p>
         </footer>
+        <EvidenceDrawer
+          key={selectedCitation ? `${selectedCitation.document_version_id}:${selectedCitation.chunk_id}` : 'closed'}
+          citation={selectedCitation}
+          onClose={() => setSelectedCitation(null)}
+        />
       </section>
     </main>
   );
@@ -989,7 +1003,13 @@ function LiveAnalysisCard({ analysis }: { analysis: LiveAnalysis }) {
   );
 }
 
-function ConversationTurn({ turn }: { turn: Turn }) {
+function ConversationTurn({
+  turn,
+  onOpenCitation,
+}: {
+  turn: Turn;
+  onOpenCitation: (citation: Citation) => void;
+}) {
   return (
     <article className="space-y-4">
       <div className="flex justify-end">
@@ -1010,7 +1030,10 @@ function ConversationTurn({ turn }: { turn: Turn }) {
             <AnalysisTrace analysis={turn.response.retrieval.analysis} />
           )}
           {turn.response.citations.length > 0 && (
-            <CitationList citations={turn.response.citations} />
+            <CitationList
+              citations={turn.response.citations}
+              onOpen={onOpenCitation}
+            />
           )}
         </div>
       </div>
@@ -1094,7 +1117,13 @@ function ResultMeta({
   );
 }
 
-function CitationList({ citations }: { citations: Citation[] }) {
+function CitationList({
+  citations,
+  onOpen,
+}: {
+  citations: Citation[];
+  onOpen: (citation: Citation) => void;
+}) {
   return (
     <details className="mt-3 rounded-2xl border border-slate-200 bg-white">
       <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-slate-600">
@@ -1106,6 +1135,7 @@ function CitationList({ citations }: { citations: Citation[] }) {
             key={`${citation.chunk_id}-${citation.id}`}
             citation={citation}
             index={index}
+            onOpen={onOpen}
           />
         ))}
       </ol>
@@ -1116,65 +1146,20 @@ function CitationList({ citations }: { citations: Citation[] }) {
 function CitationItem({
   citation,
   index,
+  onOpen,
 }: {
   citation: Citation;
   index: number;
+  onOpen: (citation: Citation) => void;
 }) {
-  const [content, setContent] = useState<string | null>(null);
-  const [contentLabel, setContentLabel] = useState('完整引用片段');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const loadFullChunk = async () => {
-    if (content !== null || loading) return;
-    setLoading(true);
-    setError('');
-    try {
-      const response = await fetch(
-        `/api/v1/knowledge/chunks/${citation.chunk_id}`,
-        { cache: 'no-store' },
-      );
-      if (!response.ok) throw new Error('完整引用读取失败');
-      const body = (await response.json()) as {
-        content?: string;
-        parent_id?: number | null;
-      };
-      if (citation.table_location?.sheet_name) {
-        setContentLabel('表格引用行');
-        setContent(body.content || citation.snippet);
-        return;
-      }
-      if (body.parent_id) {
-        const parentResponse = await fetch(
-          `/api/v1/knowledge/chunks/${body.parent_id}`,
-          { cache: 'no-store' },
-        );
-        if (parentResponse.ok) {
-          const parent = (await parentResponse.json()) as { content?: string };
-          if (parent.content) {
-            setContentLabel('完整引用所在章节');
-            setContent(parent.content);
-            return;
-          }
-        }
-      }
-      setContent(body.content || citation.snippet);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '完整引用读取失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <li className="border-b border-slate-100 p-4 last:border-b-0">
-      <details
-        onToggle={(event) => {
-          if (event.currentTarget.open) void loadFullChunk();
-        }}
+      <button
+        type="button"
+        onClick={() => onOpen(citation)}
+        className="w-full text-left"
       >
-        <summary className="cursor-pointer list-none">
-          <div className="flex items-start gap-3">
+        <div className="flex items-start gap-3">
             <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[11px] font-semibold text-slate-600">
               {index + 1}
             </span>
@@ -1184,7 +1169,7 @@ function CitationItem({
                   {citation.title}
                 </span>
                 <span className="shrink-0 text-[11px] font-medium text-slate-500">
-                  展开引用
+                  查看证据 →
                 </span>
               </div>
               <p className="mt-1 line-clamp-3 text-xs leading-5 text-slate-500">
@@ -1209,30 +1194,7 @@ function CitationItem({
               </p>
             </div>
           </div>
-        </summary>
-        <div className="ml-9 mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-          {loading && (
-            <p className="text-xs text-slate-500">正在读取完整引用片段…</p>
-          )}
-          {error && <p className="text-xs text-red-700">{error}</p>}
-          {content !== null && (
-            <>
-              <p className="mb-2 text-[11px] font-semibold text-slate-500">
-                {contentLabel}
-              </p>
-              <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">
-                {content}
-              </p>
-            </>
-          )}
-          <Link
-            href={`/documents/${citation.document_id}?return_to=ask&chunk_id=${citation.chunk_id}${citation.page ? `&page=${citation.page}` : ''}${citation.paragraph_index !== null ? `&paragraph=${citation.paragraph_index}` : ''}`}
-            className="mt-3 inline-flex text-xs font-medium text-blue-700 hover:underline"
-          >
-            在原文中定位 →
-          </Link>
-        </div>
-      </details>
+      </button>
     </li>
   );
 }

@@ -114,6 +114,29 @@ class AskRequest:
 
 @dataclass
 class Evidence:
+    """Single piece of evidence that the model may cite.
+
+    The same dataclass covers three families of evidence so the front
+    end can render a single drawer. New keys are additive: legacy
+    callers that only read ``chunk_id``/``snippet`` keep working.
+
+    * ``document`` / ``markdown`` — a prose hit. ``heading_path``,
+      ``page`` and ``paragraph_index`` give the location. The Markdown
+      body of the surrounding section is fetched via the evidence
+      endpoint and rendered verbatim with the snippet highlighted.
+    * ``pdf_word`` — a paragraph inside the version-bound PDF. The
+      front end uses ``preview_url`` to open the version-locked PDF at
+      ``page`` while showing the parsed paragraph on the side.
+    * ``dataset`` — an aggregate from a two-dimensional dataset.
+      ``dataset_id``/``artifact_version`` identify the columnar
+      artifact that produced the result; ``query_plan`` is the safe
+      plan actually executed; ``source_rows`` / ``columns`` list the
+      rows that contributed (not the whole min..max range); the
+      aggregate value lives in ``aggregate``; ``match_rows`` is the
+      matched row count; ``contributions`` is the human-readable list
+      of source rows used to compute it.
+    """
+
     id: int
     document_id: int
     document_version_id: int
@@ -126,11 +149,24 @@ class Evidence:
     source_end: int | None
     snippet: str
     score: float
-    table_location: dict = field(default_factory=dict)
+    evidence_type: str = "document"
     source_type: str = ""
     source_url: str | None = None
     categories: list[dict] = field(default_factory=list)
     tags: list[dict] = field(default_factory=list)
+    table_location: dict = field(default_factory=dict)
+    dataset_id: int | None = None
+    artifact_version: int | None = None
+    sheet_name: str | None = None
+    region_index: int | None = None
+    columns: list[str] = field(default_factory=list)
+    query_plan: dict = field(default_factory=dict)
+    source_rows: list[int] = field(default_factory=list)
+    aggregate: dict = field(default_factory=dict)
+    contributions: list[dict] = field(default_factory=list)
+    match_rows: int | None = None
+    truncated: bool = False
+    preview_url: str | None = None
 
     def to_provider_dict(self) -> dict:
         payload = {
@@ -139,12 +175,14 @@ class Evidence:
             "heading_path": list(self.heading_path),
             "snippet": self.snippet,
         }
+        if self.evidence_type:
+            payload["evidence_type"] = self.evidence_type
         if self.table_location:
             payload["table_location"] = dict(self.table_location)
         return payload
 
     def to_citation(self) -> dict:
-        return {
+        payload: dict = {
             "id": self.id,
             "document_id": self.document_id,
             "document_version_id": self.document_version_id,
@@ -159,9 +197,28 @@ class Evidence:
             "source_type": self.source_type,
             "source_url": self.source_url,
             "snippet": self.snippet,
+            "evidence_type": self.evidence_type,
+            "preview_url": self.preview_url,
             "categories": list(self.categories),
             "tags": list(self.tags),
         }
+        if self.evidence_type == "dataset":
+            payload.update(
+                {
+                    "dataset_id": self.dataset_id,
+                    "artifact_version": self.artifact_version,
+                    "sheet_name": self.sheet_name,
+                    "region_index": self.region_index,
+                    "columns": list(self.columns),
+                    "query_plan": dict(self.query_plan),
+                    "source_rows": list(self.source_rows),
+                    "match_rows": self.match_rows,
+                    "truncated": self.truncated,
+                    "aggregate": dict(self.aggregate),
+                    "contributions": list(self.contributions),
+                }
+            )
+        return payload
 
 
 @dataclass
@@ -330,12 +387,27 @@ class QAService:
                     "mode": "structured_table",
                     "structured_table": {
                         "document_id": structured_result.dataset.document_id,
+                        "document_version_id": structured_result.dataset.document_version_id,
+                        "dataset_id": structured_result.dataset.dataset_id,
+                        "artifact_version": structured_evidence.artifact_version,
                         "sheet_name": structured_result.dataset.sheet_name,
                         "region_index": structured_result.dataset.region_index,
                         "matched_rows": structured_result.matched_row_count,
                         "metric": structured_result.plan.metric,
                         "metric_column": structured_result.plan.metric_column,
                         "group_by": list(structured_result.plan.group_by),
+                        "filters": [
+                            {
+                                "column": item.column,
+                                "operator": item.operator,
+                                "value": item.value,
+                            }
+                            for item in structured_result.plan.filters
+                        ],
+                        "columns": list(structured_result.dataset.columns),
+                        "source_rows": list(structured_result.source_rows),
+                        "aggregate": dict(structured_evidence.aggregate),
+                        "contributions": list(structured_evidence.contributions),
                         "warnings": list(structured_result.warnings),
                     },
                 }
@@ -788,9 +860,17 @@ class QAService:
             if len(snippet) > budget:
                 snippet = snippet[:budget]
             budget -= len(snippet)
+            table_location = table_location_from_extra(chunk.extra) if chunk else {}
+            evidence_type = _classify_evidence(
+                source_type_label=_source_type_label(row.source_type),
+                page=row.page,
+                table_location=table_location,
+            )
+            preview_url = _preview_url_for(row, evidence_type)
             evidence.append(
                 Evidence(
                     id=index,
+                    evidence_type=evidence_type,
                     document_id=row.document_id,
                     document_version_id=row.document_version_id,
                     chunk_id=row.chunk_id,
@@ -800,18 +880,58 @@ class QAService:
                     paragraph_index=row.paragraph_index,
                     source_start=row.source_start,
                     source_end=row.source_end,
-                    table_location=(
-                        table_location_from_extra(chunk.extra) if chunk else {}
-                    ),
+                    table_location=table_location,
                     snippet=snippet,
                     score=float(row.rank or 0.0),
                     source_type=_source_type_label(row.source_type),
                     source_url=row.source_url,
                     categories=categories_map.get(row.document_id, []),
                     tags=tags_map.get(row.document_id, []),
+                    preview_url=preview_url,
                 )
             )
         return evidence
+
+
+def _classify_evidence(
+    *,
+    source_type_label: str,
+    page: int | None,
+    table_location: dict,
+) -> str:
+    """Return the drawer routing key for a single hit.
+
+    Notes and Markdown keep the original ``markdown`` rendering; PDF
+    and Word chunks fall back to the version-bound preview with a
+    parsed-paragraph sidebar; every other chunk is treated as a
+    generic ``document`` snippet.
+    """
+
+    if table_location.get("sheet_name") or table_location.get("table_ranges"):
+        return "dataset"
+    if source_type_label == "note":
+        return "markdown"
+    if page is not None:
+        return "pdf_word"
+    return "document"
+
+
+def _preview_url_for(row, evidence_type: str) -> str | None:
+    """Build the version-bound preview URL the drawer will open.
+
+    The endpoint is auth-aware (session cookie or personal access
+    token) and 404s if the URL mentions a different document version
+    than the one that produced the chunk, so the front end can never
+    accidentally show a newer PDF as the original evidence.
+    """
+
+    if evidence_type == "document":
+        return None
+    if evidence_type == "markdown":
+        return f"/api/v1/knowledge/documents/{row.document_id}?version_id={row.document_version_id}"
+    return (
+        f"/api/documents/{row.document_id}/preview?version_id={row.document_version_id}"
+    )
 
 
 # ---- helpers --------------------------------------------------------------
@@ -902,8 +1022,22 @@ async def _structured_result_to_evidence(
         "row_end": result.source_row_end,
         "column_names": list(result.dataset.columns),
     }
+    from ..models.datasets import DatasetArtifact
+
+    artifact_version: int | None = None
+    artifact = await db.scalar(
+        select(DatasetArtifact).where(
+            DatasetArtifact.dataset_id == result.dataset.dataset_id,
+            DatasetArtifact.is_active.is_(True),
+        )
+    )
+    if artifact is not None:
+        artifact_version = artifact.version_number
+    contributions = _structured_contributions(result)
+    aggregate = _structured_aggregate(result)
     return Evidence(
         id=1,
+        evidence_type="dataset",
         document_id=result.dataset.document_id,
         document_version_id=result.dataset.document_version_id,
         chunk_id=chunk.id,
@@ -922,7 +1056,94 @@ async def _structured_result_to_evidence(
         score=10.0,
         source_type=_source_type_label(source_type),
         source_url=source_url,
+        dataset_id=result.dataset.dataset_id,
+        artifact_version=artifact_version,
+        sheet_name=result.dataset.sheet_name,
+        region_index=result.dataset.region_index,
+        columns=list(result.dataset.columns),
+        query_plan={
+            "filters": [
+                {"column": item.column, "operator": item.operator, "value": item.value}
+                for item in result.plan.filters
+            ],
+            "group_by": list(result.plan.group_by),
+            "metric": result.plan.metric,
+            "metric_column": result.plan.metric_column,
+            "sort_by": result.plan.sort_by,
+            "sort_order": result.plan.sort_order,
+            "limit": result.plan.limit,
+        },
+        source_rows=list(result.source_rows),
+        aggregate=aggregate,
+        contributions=contributions,
+        match_rows=result.matched_row_count,
+        truncated=(
+            result.matched_row_count > len(result.source_rows)
+            or bool(result.warnings and any("仅返回" in w for w in result.warnings))
+        ),
     )
+
+
+def _structured_aggregate(result: TableQueryResult) -> dict:
+    """Return the top-level aggregate value(s) the model can quote safely."""
+
+    if result.plan.metric == "rows":
+        return {
+            "kind": "rows",
+            "returned": len(result.rows),
+            "total": result.matched_row_count,
+        }
+    if result.plan.metric in {"count", "count_distinct"}:
+        if result.plan.group_by:
+            return {
+                "kind": result.plan.metric,
+                "group_by": list(result.plan.group_by),
+                "rows": list(result.rows),
+                "total": result.matched_row_count,
+            }
+        value = result.rows[0]["metric"] if result.rows else 0
+        return {
+            "kind": result.plan.metric,
+            "value": value,
+            "total": result.matched_row_count,
+        }
+    if result.plan.group_by:
+        return {
+            "kind": result.plan.metric,
+            "metric_column": result.plan.metric_column,
+            "group_by": list(result.plan.group_by),
+            "rows": list(result.rows),
+            "total": result.matched_row_count,
+        }
+    return {
+        "kind": result.plan.metric,
+        "value": result.rows[0]["metric"] if result.rows else None,
+        "metric_column": result.plan.metric_column,
+        "total": result.matched_row_count,
+    }
+
+
+def _structured_contributions(
+    result: TableQueryResult,
+    *,
+    max_rows: int = 20,
+) -> list[dict]:
+    """Return compact derived result rows; raw contributors use ``source_rows``."""
+
+    if not result.rows:
+        return []
+    contributions: list[dict] = []
+    for row in result.rows[:max_rows]:
+        if result.plan.metric == "rows":
+            contributions.append({k: v for k, v in row.items() if k != "row_number"})
+            continue
+        item: dict = {}
+        for column in result.plan.group_by:
+            item[column] = row.get(column)
+        item["metric"] = row.get("metric")
+        item["matched_rows"] = row.get("matched_rows")
+        contributions.append(item)
+    return contributions
 
 
 def _structured_provider_summary(
