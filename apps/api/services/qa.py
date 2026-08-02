@@ -42,7 +42,11 @@ from sqlalchemy.sql import ColumnElement
 from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
-from .search import extract_cjk_ngrams, normalize_query, table_location_from_extra
+from .search import (
+    extract_cjk_ngrams,
+    normalize_query,
+    table_location_from_extra,
+)
 from .structured_table import (
     TableQueryResult,
     candidate_dataset_document_ids,
@@ -843,11 +847,14 @@ class QAService:
         }
         terms = normalize_query(question)
 
+        selected_rows = list(rows[:MAX_EVIDENCE_ITEMS])
         evidence: list[Evidence] = []
         budget = EVIDENCE_TOTAL_CHARS
-        for index, row in enumerate(rows, start=1):
+        for index, row in enumerate(selected_rows, start=1):
             if budget <= 0:
                 break
+            remaining_items = len(selected_rows) - index + 1
+            fair_share = max(1, budget // remaining_items)
             content = await _expanded_chunk_context(
                 db,
                 chunks.get(row.chunk_id),
@@ -855,10 +862,12 @@ class QAService:
             )
             snippet = _build_snippet(content, terms=terms)
             chunk = chunks.get(row.chunk_id)
-            if len(snippet) > EVIDENCE_SNIPPET_CHARS:
-                snippet = snippet[:EVIDENCE_SNIPPET_CHARS] + "…"
-            if len(snippet) > budget:
-                snippet = snippet[:budget]
+            item_limit = min(EVIDENCE_SNIPPET_CHARS, fair_share)
+            if len(snippet) > item_limit:
+                if item_limit == 1:
+                    snippet = "…"
+                else:
+                    snippet = snippet[: item_limit - 1].rstrip() + "…"
             budget -= len(snippet)
             table_location = table_location_from_extra(chunk.extra) if chunk else {}
             evidence_type = _classify_evidence(

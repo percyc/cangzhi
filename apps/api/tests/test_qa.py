@@ -551,6 +551,32 @@ def test_qa_service_returns_cited_answer(qa_db):
     assert "向量检索" in citation["snippet"]
 
 
+def test_quick_evidence_budget_is_shared_without_overflow(qa_db):
+    async def _run():
+        for index in range(8):
+            await _seed_document(
+                qa_db,
+                title=f"预算资料 {index}",
+                body="共同检索词 " + (f"第{index}项内容" * 120),
+            )
+        async with qa_db() as session:
+            return await QAService(None).collect_evidence(
+                session,
+                question="共同检索词",
+                category_ids=[],
+                category_slugs=[],
+                tag_ids=[],
+                tag_slugs=[],
+                source_types=[],
+            )
+
+    evidence, _retrieval = asyncio.run(_run())
+
+    assert len(evidence) == 8
+    assert sum(len(item.snippet) for item in evidence) <= 4_000
+    assert all(0 < len(item.snippet) <= 600 for item in evidence)
+
+
 def test_deep_analysis_observes_each_search_before_next_action(qa_db):
     async def _run():
         await _seed_document(
@@ -591,6 +617,108 @@ def test_deep_analysis_observes_each_search_before_next_action(qa_db):
     assert result.citations[0]["title"] == "向量检索"
     assert len(provider.json_calls) == 3
     assert "向量检索" in provider.json_calls[1]["prompt"]
+
+
+def test_deep_search_discovers_each_document_and_reads_full_chunks(qa_db):
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="旧版规定",
+            body="外观设计专利的期限为十年，相关申请应按当时规定处理。",
+        )
+        await _seed_document(
+            qa_db,
+            title="新版规定",
+            body="外观设计专利的期限为十五年，新规定自公布日期施行。",
+        )
+        async with qa_db() as session:
+            provider = StubProvider()
+            provider.json_responses.extend(
+                [
+                    {
+                        "action": "search",
+                        "query": "外观设计专利",
+                        "summary": "发现相关规定",
+                    },
+                    {"action": "finish", "summary": "证据充分"},
+                ]
+            )
+            provider.queue(
+                AnswerResult(
+                    answer="两份规定分别记载十年和十五年。",
+                    citation_ids=[1, 2],
+                    insufficient_evidence=False,
+                )
+            )
+            result = await DeepAnalysisService(provider).ask(
+                session,
+                AskRequest(question="外观设计专利的期限有什么变化？"),
+            )
+            return result, provider
+
+    result, provider = asyncio.run(_run())
+
+    discovery_prompt = provider.json_calls[1]["prompt"]
+    assert "旧版规定" in discovery_prompt
+    assert "新版规定" in discovery_prompt
+    assert "十年" in discovery_prompt
+    assert "十五年" in discovery_prompt
+    assert [
+        step["tool"] for step in result.retrieval["analysis"]["steps"]
+    ] == ["knowledge_search", "knowledge_get_chunk", "knowledge_get_chunk"]
+    assert {citation["title"] for citation in result.citations} == {
+        "旧版规定",
+        "新版规定",
+    }
+    assert all(len(item["snippet"]) > 0 for item in result.citations)
+
+
+def test_deep_search_does_not_auto_read_dataset_catalogs(qa_db):
+    async def _run():
+        for index in range(2):
+            await _seed_document(
+                qa_db,
+                title=f"数据目录 {index}",
+                body="结构化数据目录包含字段和值域。",
+            )
+        async with qa_db() as session:
+            chunks = (
+                (await session.execute(select(DocumentChunk)))
+                .scalars()
+                .all()
+            )
+            for chunk in chunks:
+                if chunk.role == "child":
+                    chunk.chunk_type = "dataset_catalog"
+            await session.commit()
+            provider = StubProvider()
+            provider.json_responses.extend(
+                [
+                    {
+                        "action": "search",
+                        "query": "结构化数据目录",
+                        "summary": "发现数据集",
+                    },
+                    {"action": "finish", "summary": "完成发现"},
+                ]
+            )
+            provider.queue(
+                AnswerResult(
+                    answer="已发现结构化数据目录。",
+                    citation_ids=[1],
+                    insufficient_evidence=False,
+                )
+            )
+            return await DeepAnalysisService(provider).ask(
+                session,
+                AskRequest(question="有哪些结构化数据目录？"),
+            )
+
+    result = asyncio.run(_run())
+
+    assert [
+        step["tool"] for step in result.retrieval["analysis"]["steps"]
+    ] == ["knowledge_search"]
 
 
 def test_deep_analysis_time_budget_falls_back_to_existing_evidence(qa_db, monkeypatch):

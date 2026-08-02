@@ -65,7 +65,11 @@ from .qa import (
     QAService,
     _model_name,
 )
-from .search import table_location_from_extra
+from .search import (
+    SearchHit,
+    search_documents,
+    table_location_from_extra,
+)
 from .structured_table import candidate_dataset_document_ids
 
 logger = logging.getLogger(__name__)
@@ -81,7 +85,9 @@ MAX_DEEP_EVIDENCE_CHARS = 8_000
 MAX_OBSERVATION_CHARS = 18_000
 MAX_DATASET_ROWS_IN_CONTEXT = 20
 MAX_DECISION_ATTEMPTS = 2
-MAX_SEARCH_HITS_IN_OBSERVATION = 6
+MAX_SEARCH_HITS_IN_OBSERVATION = 10
+AUTO_READ_DISCOVERY_HITS = 2
+MAX_AUTO_READS_TOTAL = 4
 STAGNATION_LIMIT = 2
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -184,6 +190,8 @@ class DeepAnalysisService:
         steps: list[AnalysisStep] = []
         retrieval_statuses: list[dict[str, Any]] = []
         seen_actions: dict[str, int] = {}
+        pending_chunk_reads: list[int] = []
+        scheduled_chunk_reads: set[int] = set()
         planning_degraded = False
         iterations = 0
         last_dataset_result: dict[str, Any] | None = None
@@ -203,22 +211,37 @@ class DeepAnalysisService:
             if remaining_seconds <= 0:
                 budget.early_exit_reason = "time_budget_exhausted"
                 break
-            try:
-                decision = await asyncio.wait_for(
-                    self._decide(question, observations, len(steps), budget.tool_limit),
-                    timeout=remaining_seconds,
+            if pending_chunk_reads:
+                chunk_id = pending_chunk_reads.pop(0)
+                decision = AgentDecision(
+                    action="read_chunk",
+                    chunk_id=chunk_id,
+                    summary="读取检索命中的完整片段",
                 )
-            except TimeoutError:
-                budget.early_exit_reason = "time_budget_exhausted"
-                break
-            except (AIProviderError, ValidationError, TypeError, ValueError) as exc:
-                logger.warning(
-                    "deep agent decision failed iteration=%s error=%s",
-                    iterations,
-                    str(exc),
-                )
-                planning_degraded = True
-                break
+            else:
+                try:
+                    decision = await asyncio.wait_for(
+                        self._decide(
+                            question, observations, len(steps), budget.tool_limit
+                        ),
+                        timeout=remaining_seconds,
+                    )
+                except TimeoutError:
+                    budget.early_exit_reason = "time_budget_exhausted"
+                    break
+                except (
+                    AIProviderError,
+                    ValidationError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    logger.warning(
+                        "deep agent decision failed iteration=%s error=%s",
+                        iterations,
+                        str(exc),
+                    )
+                    planning_degraded = True
+                    break
             if decision.action == "finish":
                 break
 
@@ -293,6 +316,26 @@ class DeepAnalysisService:
 
             observations.append(observation)
             steps.append(step)
+            if observation.get("tool") == "search":
+                hits = (observation.get("output") or {}).get("hits") or []
+                text_hits = [
+                    hit
+                    for hit in hits
+                    if (
+                        isinstance(hit, dict)
+                        and not hit.get("table_location")
+                        and hit.get("chunk_type")
+                        not in {"dataset", "dataset_catalog"}
+                    )
+                ]
+                if len(text_hits) > 1:
+                    for hit in text_hits[:AUTO_READ_DISCOVERY_HITS]:
+                        if len(scheduled_chunk_reads) >= MAX_AUTO_READS_TOTAL:
+                            break
+                        chunk_id = int(hit.get("chunk_id") or 0)
+                        if chunk_id > 0 and chunk_id not in scheduled_chunk_reads:
+                            scheduled_chunk_reads.add(chunk_id)
+                            pending_chunk_reads.append(chunk_id)
             earned_evidence = _record_new_evidence(
                 new_evidence=new_evidence,
                 evidence_by_chunk=evidence_by_chunk,
@@ -606,6 +649,9 @@ class DeepAnalysisService:
             },
             "决策要求": (
                 "先观察后行动；表格通常先发现数据集、再读 schema、再查询。"
+                "search 返回的是文档级发现摘要，不代表已经读取完整证据；"
+                "命中可能直接回答问题的片段时，应先用 read_chunk 读取完整内容再 finish。"
+                "如果多个来源可能存在差异或互相补充，应分别读取相关片段后再判断。"
                 "零行、截断、跨层级或错误都不是结束，应修正参数。"
                 "层级父级精确查询为零行时，优先用 direct_child_of 验证直属子级，"
                 "不要只反复更换关键词。数据集查询不需要先读取目录片段。"
@@ -646,9 +692,9 @@ class DeepAnalysisService:
     ) -> tuple[dict[str, Any], AnalysisStep, list[Evidence], dict[str, Any] | None]:
         if decision.action == "search":
             query = decision.query or request.question
-            evidence, retrieval = await self._qa.collect_evidence(
+            search_result = await search_documents(
                 db,
-                question=query,
+                query=query,
                 category_ids=request.category_ids,
                 category_slugs=request.category_slugs,
                 tag_ids=request.tag_ids,
@@ -657,23 +703,39 @@ class DeepAnalysisService:
                 document_ids=request.document_ids,
                 connector_ids=request.connector_ids,
                 matches_none=request.matches_none,
+                limit=MAX_SEARCH_HITS_IN_OBSERVATION,
             )
-            allowed_dataset_documents.update(item.document_id for item in evidence)
-            allowed_chunk_ids.update(item.chunk_id for item in evidence)
+            candidates = search_result.hits
+            retrieval = search_result.retrieval or {
+                "mode": search_result.backend,
+                "vector_used": False,
+                "degraded_reason": None,
+                "active_profile_id": None,
+            }
+            allowed_dataset_documents.update(
+                item.document_id for item in candidates
+            )
+            allowed_chunk_ids.update(item.chunk_id for item in candidates)
             output = {
                 "query": query,
-                "total": len(evidence),
+                "total": len(candidates),
                 "hits": [
                     {
                         "document_id": item.document_id,
                         "chunk_id": item.chunk_id,
                         "title": item.title,
                         "heading_path": item.heading_path,
+                        "chunk_type": item.chunk_type,
                         "table_location": item.table_location,
+                        "snippet": item.snippet,
                     }
-                    for item in evidence[:MAX_SEARCH_HITS_IN_OBSERVATION]
+                    for item in candidates[:MAX_SEARCH_HITS_IN_OBSERVATION]
                 ],
             }
+            evidence = [
+                _candidate_to_evidence(item)
+                for item in candidates[:MAX_SEARCH_HITS_IN_OBSERVATION]
+            ]
             return (
                 {
                     "tool": "search",
@@ -681,7 +743,9 @@ class DeepAnalysisService:
                     "output": output,
                     "retrieval": retrieval,
                 },
-                AnalysisStep("knowledge_search", query, result_count=len(evidence)),
+                AnalysisStep(
+                    "knowledge_search", query, result_count=len(candidates)
+                ),
                 evidence,
                 None,
             )
@@ -1050,6 +1114,52 @@ async def _chunk_to_evidence(
     )
 
 
+def _candidate_to_evidence(item: SearchHit) -> Evidence:
+    """Keep a discovery snippet as fallback evidence until it is read fully."""
+
+    source_type = str(item.source_type or "")
+    if item.table_location:
+        evidence_type = "dataset"
+    elif source_type == "note":
+        evidence_type = "markdown"
+    elif item.page is not None:
+        evidence_type = "pdf_word"
+    else:
+        evidence_type = "document"
+    preview_url: str | None = None
+    if evidence_type == "markdown":
+        preview_url = (
+            f"/api/v1/knowledge/documents/{item.document_id}"
+            f"?version_id={item.document_version_id}"
+        )
+    elif evidence_type in {"dataset", "pdf_word"}:
+        preview_url = (
+            f"/api/documents/{item.document_id}/preview"
+            f"?version_id={item.document_version_id}"
+        )
+    return Evidence(
+        id=1,
+        evidence_type=evidence_type,
+        document_id=item.document_id,
+        document_version_id=item.document_version_id,
+        chunk_id=item.chunk_id,
+        title=item.title,
+        heading_path=list(item.heading_path),
+        page=item.page,
+        paragraph_index=item.paragraph_index,
+        source_start=item.source_start,
+        source_end=item.source_end,
+        snippet=item.snippet,
+        score=float(item.score),
+        source_type=source_type,
+        source_url=item.source_url,
+        categories=list(item.categories),
+        tags=list(item.tags),
+        table_location=dict(item.table_location),
+        preview_url=preview_url,
+    )
+
+
 def _build_retrieval(
     *,
     steps: list[AnalysisStep],
@@ -1146,8 +1256,7 @@ def _record_new_evidence(
         allowed_chunk_ids.add(item.chunk_id)
         current = evidence_by_chunk.get(item.chunk_id)
         if current is None or item.score > current.score:
-            if current is None:
-                earned = True
+            earned = True
             evidence_by_chunk[item.chunk_id] = item
     return earned
 
