@@ -637,7 +637,7 @@ def test_deep_search_discovers_each_document_and_reads_full_chunks(qa_db):
                 [
                     {
                         "action": "search",
-                        "query": "外观设计专利",
+                        "query": "申请流程",
                         "summary": "发现相关规定",
                     },
                     {"action": "finish", "summary": "证据充分"},
@@ -652,7 +652,7 @@ def test_deep_search_discovers_each_document_and_reads_full_chunks(qa_db):
             )
             result = await DeepAnalysisService(provider).ask(
                 session,
-                AskRequest(question="外观设计专利的期限有什么变化？"),
+                AskRequest(question="外观设计专利"),
             )
             return result, provider
 
@@ -666,6 +666,8 @@ def test_deep_search_discovers_each_document_and_reads_full_chunks(qa_db):
     assert [
         step["tool"] for step in result.retrieval["analysis"]["steps"]
     ] == ["knowledge_search", "knowledge_get_chunk", "knowledge_get_chunk"]
+    assert result.retrieval["analysis"]["steps"][0]["label"] == "外观设计专利"
+    assert '"planner_query": "申请流程"' in discovery_prompt
     assert {citation["title"] for citation in result.citations} == {
         "旧版规定",
         "新版规定",

@@ -691,7 +691,9 @@ class DeepAnalysisService:
         allowed_chunk_ids: set[int],
     ) -> tuple[dict[str, Any], AnalysisStep, list[Evidence], dict[str, Any] | None]:
         if decision.action == "search":
-            query = decision.query or request.question
+            planner_query = decision.query or request.question
+            initial_search = not allowed_chunk_ids
+            query = request.question if initial_search else planner_query
             search_result = await search_documents(
                 db,
                 query=query,
@@ -705,7 +707,32 @@ class DeepAnalysisService:
                 matches_none=request.matches_none,
                 limit=MAX_SEARCH_HITS_IN_OBSERVATION,
             )
-            candidates = search_result.hits
+            candidates = list(search_result.hits)
+            if (
+                initial_search
+                and planner_query.strip().casefold() != query.strip().casefold()
+            ):
+                planner_result = await search_documents(
+                    db,
+                    query=planner_query,
+                    category_ids=request.category_ids,
+                    category_slugs=request.category_slugs,
+                    tag_ids=request.tag_ids,
+                    tag_slugs=request.tag_slugs,
+                    source_types=request.source_types,
+                    document_ids=request.document_ids,
+                    connector_ids=request.connector_ids,
+                    matches_none=request.matches_none,
+                    limit=MAX_SEARCH_HITS_IN_OBSERVATION,
+                )
+                seen_documents = {item.document_id for item in candidates}
+                for item in planner_result.hits:
+                    if item.document_id in seen_documents:
+                        continue
+                    seen_documents.add(item.document_id)
+                    candidates.append(item)
+                    if len(candidates) >= MAX_SEARCH_HITS_IN_OBSERVATION:
+                        break
             retrieval = search_result.retrieval or {
                 "mode": search_result.backend,
                 "vector_used": False,
@@ -718,6 +745,7 @@ class DeepAnalysisService:
             allowed_chunk_ids.update(item.chunk_id for item in candidates)
             output = {
                 "query": query,
+                "planner_query": planner_query if planner_query != query else None,
                 "total": len(candidates),
                 "hits": [
                     {
