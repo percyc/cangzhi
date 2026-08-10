@@ -34,6 +34,13 @@ from ..services.document_lifecycle import (
 from ..services.document_lifecycle import (
     trash_documents as trash_document_records,
 )
+from ..services.processing_status import (
+    NoActiveEmbeddingProfile,
+    ProcessingStatusError,
+    compute_processing_status,
+    load_pipeline_statuses,
+    repair_document_vectors,
+)
 from ..services.webdav import WebDAVError, download_file
 from ..storage import get_storage
 from ..storage.base import BlobStorage
@@ -49,6 +56,7 @@ from .schemas import (
     DocumentResponse,
     DocumentSummaryResponse,
     DocumentTagsUpdateRequest,
+    DocumentVectorRepairResponse,
     DocumentVersionListResponse,
     DocumentVersionResponse,
     ProcessingJobResponse,
@@ -305,6 +313,7 @@ async def list_document_overview(
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     deleted: bool = Query(False),
+    include_processing: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     """Return collection-card data using a fixed number of database queries."""
@@ -353,6 +362,11 @@ async def list_document_overview(
         ).all()
         if version_ids
         else []
+    )
+    pipeline_map = (
+        await load_pipeline_statuses(db, version_ids)
+        if include_processing and not deleted
+        else {}
     )
 
     webdav_documents = [
@@ -455,6 +469,7 @@ async def list_document_overview(
                 categories=categories,
                 tags=tag_map.get(version_id, []),
                 summary=summary_map.get(version_id),
+                pipeline=pipeline_map.get(version_id),
             )
         )
     return output
@@ -494,6 +509,21 @@ async def restore_documents(
     )
     affected = await restore_document_records(db, list(documents))
     return {"ok": True, "affected": affected}
+
+
+@router.post(
+    "/batch/repair-vectors",
+    response_model=DocumentVectorRepairResponse,
+)
+async def repair_document_vector_batch(
+    payload: DocumentBatchActionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        result = await repair_document_vectors(db, payload.document_ids)
+    except NoActiveEmbeddingProfile as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.to_dict()
 
 
 @router.post("/batch/permanent-delete", response_model=dict)
@@ -1107,6 +1137,13 @@ async def get_processing_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Return the full ingestion pipeline status for the current version."""
+
+    try:
+        return await compute_processing_status(db, document_id)
+    except ProcessingStatusError as exc:
+        message = str(exc)
+        status_code = 404 if "不存在" in message else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
 
     document = await db.get(Document, document_id)
     if document is None or document.is_deleted:

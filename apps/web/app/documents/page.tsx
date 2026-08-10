@@ -30,6 +30,15 @@ type DocumentVersion = {
   created_at: string;
 };
 
+type PipelineSummary = {
+  overall_status: 'processing' | 'completed' | 'failed';
+  keyword_searchable: boolean;
+  vector_searchable: boolean;
+  stages: {
+    embedding: { status: string; completed: number; total: number; missing: number };
+  };
+};
+
 type Document = {
   id: number;
   title: string;
@@ -54,6 +63,7 @@ type Document = {
   categories: DocumentCategory[];
   tags: DocumentTag[];
   summary: DocumentSummary | null;
+  pipeline: PipelineSummary | null;
 };
 
 const statusLabels: Record<string, string> = {
@@ -63,6 +73,7 @@ const statusLabels: Record<string, string> = {
   ready: '已完成',
   failed: '处理失败',
   unsupported: '暂未提取正文',
+  completed: '已完成',
 };
 
 const sourceTypeLabels: Record<string, string> = {
@@ -93,7 +104,9 @@ export default function DocumentsListPage() {
 
   const load = useCallback(() => {
     setLoading(true);
-    return fetch(`/api/documents/overview?limit=200&deleted=${view === 'trash'}`)
+    return fetch(
+      `/api/documents/overview?limit=200&deleted=${view === 'trash'}&include_processing=${view === 'active'}`,
+    )
       .then(res => {
         if (!res.ok) throw new Error('暂时无法读取资料');
         return res.json();
@@ -382,7 +395,7 @@ export default function DocumentsListPage() {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {visibleDocuments.map(doc => {
               const version = doc.current_version;
-              const status = version?.processing_status || 'created';
+              const status = doc.pipeline?.overall_status || version?.processing_status || 'created';
               return (
                 <div
                   key={doc.id}
@@ -427,6 +440,20 @@ export default function DocumentsListPage() {
                         : sourceTypeLabels[doc.source_type] || doc.source_type}
                     </span>
                     <span>{statusLabels[status] || status}</span>
+                    {view === 'active' && doc.pipeline && (
+                      <>
+                        <span className={doc.pipeline.keyword_searchable ? 'text-emerald-700' : 'text-slate-400'}>
+                          {doc.pipeline.keyword_searchable ? '正文可检索' : '正文未就绪'}
+                        </span>
+                        <span className={doc.pipeline.vector_searchable ? 'text-violet-700' : 'text-slate-400'}>
+                          {doc.pipeline.vector_searchable
+                            ? '语义可检索'
+                            : doc.pipeline.stages.embedding.status === 'disabled'
+                              ? '未启用向量'
+                              : `缺 ${doc.pipeline.stages.embedding.missing} 个向量`}
+                        </span>
+                      </>
+                    )}
                     {doc.primary_category && (
                       <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-800">
                         {doc.primary_category.name}

@@ -139,6 +139,41 @@ class DocumentVersionListResponse(BaseModel):
     created_at: datetime
 
 
+class ProcessingStageResponse(BaseModel):
+    status: str
+    message: str
+    last_error: str | None = None
+
+
+class ChunkingStageResponse(ProcessingStageResponse):
+    child_chunks: int = 0
+
+
+class EmbeddingStageResponse(ProcessingStageResponse):
+    profile_id: int | None = None
+    model: str | None = None
+    completed: int = 0
+    total: int = 0
+    missing: int = 0
+    failed: int = 0
+
+
+class ProcessingStagesResponse(BaseModel):
+    parsing: ProcessingStageResponse
+    understanding: ProcessingStageResponse
+    chunking: ChunkingStageResponse
+    embedding: EmbeddingStageResponse
+
+
+class DocumentPipelineResponse(BaseModel):
+    document_id: int
+    document_version_id: int
+    overall_status: str
+    keyword_searchable: bool
+    vector_searchable: bool
+    stages: ProcessingStagesResponse
+
+
 class DocumentListItemResponse(BaseModel):
     id: int
     title: str
@@ -157,6 +192,7 @@ class DocumentListItemResponse(BaseModel):
     categories: list[CategoryMini] = Field(default_factory=list)
     tags: list[TagMini] = Field(default_factory=list)
     summary: DocumentSummaryResponse | None = None
+    pipeline: DocumentPipelineResponse | None = None
 
 
 class ProcessingJobResponse(BaseModel):
@@ -188,6 +224,16 @@ class DocumentCategoryUpdateRequest(BaseModel):
 
 class DocumentBatchActionRequest(BaseModel):
     document_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class DocumentVectorRepairResponse(BaseModel):
+    documents_requested: int
+    documents_eligible: int
+    chunks_expected: int
+    already_fresh: int
+    enqueued: int
+    reset: int
+    skipped: int
 
 
 class DocumentBatchOrganizeRequest(DocumentBatchActionRequest):
