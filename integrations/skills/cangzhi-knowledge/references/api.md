@@ -1,6 +1,8 @@
 # Cangzhi v1 API
 
-Send `Authorization: Bearer <PAT>` and `Accept: application/json`.
+Send `Authorization: Bearer <PAT>`, `Accept: application/json`, and
+`X-Cangzhi-Workspace: <workspace-slug>`. If the workspace header is omitted,
+Cangzhi uses `default`.
 
 ## Read endpoints
 

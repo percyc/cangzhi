@@ -16,6 +16,7 @@ Require:
 - `CANGZHI_URL`: Cangzhi API origin, for example `http://192.168.50.136:8000`
 - `CANGZHI_TOKEN`: a personal access token with `knowledge:read` and
   `knowledge:search`
+- `CANGZHI_WORKSPACE`: workspace slug; omit it to use `default`.
 
 Never print, log, quote, or persist the token in generated artifacts. Never put
 it in a query string.
@@ -24,7 +25,8 @@ Use either:
 
 - CLI: run `python -m apps.cli` from a Cangzhi checkout.
 - MCP: connect Streamable HTTP to `${CANGZHI_URL}/api/mcp` with header
-  `Authorization: Bearer ${CANGZHI_TOKEN}`.
+  `Authorization: Bearer ${CANGZHI_TOKEN}` and
+  `X-Cangzhi-Workspace: ${CANGZHI_WORKSPACE}`.
 
 Read [references/api.md](references/api.md) only when direct REST calls or
 error handling are needed.

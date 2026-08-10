@@ -25,6 +25,14 @@ class WebDAVSource(BaseModel):
 
     __tablename__ = "webdav_sources"
 
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=text("1"),
+        index=True,
+    )
+
     name = Column(String(255), nullable=False)
     base_url = Column(String(1024), nullable=False)
     username = Column(String(255), nullable=False)
@@ -51,6 +59,7 @@ class WebDAVSource(BaseModel):
     def to_public_dict(self) -> dict:
         return {
             "id": self.id,
+            "workspace_id": self.workspace_id,
             "name": self.name,
             "base_url": self.base_url,
             "username": self.username,
@@ -123,8 +132,24 @@ class ExternalItemExclusion(BaseModel):
 
     __tablename__ = "external_item_exclusions"
 
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=text("1"),
+        index=True,
+    )
+
     source_type = Column(String(32), nullable=False, server_default=text("'webdav'"))
-    external_identity = Column(String(64), nullable=False, unique=True, index=True)
+    external_identity = Column(String(64), nullable=False, index=True)
     reason = Column(String(64), nullable=False)
     display_path = Column(String(2048), nullable=True)
     source_snapshot = Column(_JSON_TYPE, nullable=False, server_default=text("'{}'"))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "external_identity",
+            name="uix_external_exclusions_workspace_identity",
+        ),
+    )

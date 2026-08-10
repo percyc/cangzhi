@@ -336,7 +336,8 @@ export default function AccessSettingsPage() {
         </dl>
         <p className="mt-4 text-xs leading-5 text-slate-500">
           CLI 使用 <code>CANGZHI_URL</code> 和 <code>CANGZHI_TOKEN</code>
-          环境变量。完整模板位于项目的
+          环境变量；通过 <code>CANGZHI_WORKSPACE</code> 选择工作空间，未设置时使用
+          <code className="ml-1">default</code>。完整模板位于项目的
           <code className="ml-1">integrations/skills/cangzhi-knowledge</code>。
         </p>
       </section>
@@ -395,6 +396,18 @@ export default function AccessSettingsPage() {
                   void copy(
                     'auth-header',
                     `Authorization: ${integration.authorization_header}`,
+                  )
+                }
+              />
+              <CopyBlock
+                className="mt-3"
+                label="工作空间请求头（按需替换 slug）"
+                value="X-Cangzhi-Workspace: default"
+                copied={copiedKey === 'workspace-header'}
+                onCopy={() =>
+                  void copy(
+                    'workspace-header',
+                    'X-Cangzhi-Workspace: default',
                   )
                 }
               />
@@ -543,6 +556,7 @@ function mcpConfig(integration: IntegrationInfo) {
           url: integration.mcp_url,
           headers: {
             Authorization: integration.authorization_header,
+            'X-Cangzhi-Workspace': 'default',
           },
         },
       },
@@ -556,6 +570,7 @@ function shellConfig(integration: IntegrationInfo, token: string) {
   return [
     `export CANGZHI_URL='${integration.base_url}'`,
     `export CANGZHI_TOKEN='${token}'`,
+    "export CANGZHI_WORKSPACE='default'",
   ].join('\n');
 }
 

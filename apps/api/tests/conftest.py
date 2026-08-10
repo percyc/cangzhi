@@ -16,14 +16,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+# Ensure every mapped table is registered before create_all.
+import apps.api.models  # noqa: F401
 from apps.api.api.auth import require_admin
 from apps.api.core.db import Base, get_db
 from apps.api.main import app
+from apps.api.models.workspaces import DEFAULT_WORKSPACE_SLUG, Workspace
 from apps.api.storage import get_storage
 from apps.api.storage.local import LocalBlobStorage
-
-# Ensure every mapped table is registered before create_all.
-import apps.api.models  # noqa: F401, E402
 
 
 @pytest.fixture
@@ -47,6 +47,17 @@ def client(tmp_path: Path):
     async def prepare_database():
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+        async with session_factory() as session:
+            session.add(
+                Workspace(
+                    slug=DEFAULT_WORKSPACE_SLUG,
+                    name="默认空间",
+                    is_default=True,
+                    status="active",
+                    settings={},
+                )
+            )
+            await session.commit()
 
     async def dispose_database():
         await engine.dispose()

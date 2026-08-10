@@ -66,6 +66,7 @@ from apps.api.services.structured_table import (
     replace_version_table_rows,
 )
 from apps.api.services.webdav import WebDAVError, download_file
+from apps.api.services.workspaces import bind_workspace_context, clear_workspace_context
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings
 
@@ -1373,6 +1374,10 @@ def process_single_job(session: Session, job_id: int) -> bool:
     succeeds, a follow-up ``understanding`` job is enqueued so the worker
     pipeline remains idempotent.
     """
+    # One worker session may process jobs from several workspaces. Resolve the
+    # job and its owning document without a stale filter, then bind all
+    # subsequent taxonomy/document reads and writes to that document's space.
+    clear_workspace_context(session)
     job = session.get(ProcessingJob, job_id)
     if job is None:
         logger.warning("job_not_found", job_id=job_id)
@@ -1407,6 +1412,8 @@ def process_single_job(session: Session, job_id: int) -> bool:
             version,
             f"文档 {job.document_id} 不存在",
         )
+
+    bind_workspace_context(session, document.workspace_id)
 
     stage = _normalize_stage(job.stage)
 

@@ -29,6 +29,7 @@ from apps.api.models.taxonomy import (
     DocumentTag,
     Tag,
 )
+from apps.api.models.workspaces import Workspace
 from apps.api.parsers.base import Block, StructuredContent
 from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
 from apps.api.services.deep_analysis import (
@@ -209,6 +210,17 @@ def qa_db(tmp_path):
     async def prepare():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        async with session_factory() as session:
+            session.add(
+                Workspace(
+                    slug="default",
+                    name="默认空间",
+                    is_default=True,
+                    status="active",
+                    settings={},
+                )
+            )
+            await session.commit()
 
     asyncio.run(prepare())
 

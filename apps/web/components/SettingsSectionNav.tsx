@@ -7,7 +7,8 @@ export type SettingsSection =
   | 'embedding'
   | 'sources'
   | 'data'
-  | 'access';
+  | 'access'
+  | 'workspaces';
 
 type Item = {
   id: SettingsSection;
@@ -47,6 +48,12 @@ const ITEMS: Item[] = [
     title: '外部接入',
     defaultHint: 'CLI、Skill 与 MCP 令牌',
   },
+  {
+    id: 'workspaces',
+    href: '/settings/workspaces',
+    title: '工作空间',
+    defaultHint: '知识隔离与默认空间',
+  },
 ];
 
 export function SettingsSectionNav({
@@ -65,7 +72,7 @@ export function SettingsSectionNav({
   return (
     <nav
       aria-label="设置分类"
-      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 md:grid-cols-5"
+      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 sm:grid-cols-3 lg:grid-cols-6"
     >
       {ITEMS.map((item) => {
         const selected = active === item.id;

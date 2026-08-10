@@ -11,8 +11,9 @@ from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.models.blobs import Blob
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
-from apps.api.models.taxonomy import DocumentCategory, DocumentSummary
+from apps.api.models.taxonomy import Category, DocumentCategory, DocumentSummary
 from apps.api.models.webdav import WebDAVEntry, WebDAVSource
+from apps.api.models.workspaces import Workspace
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
     _ensure_word_pdf_preview,
@@ -186,6 +187,69 @@ class TestCalculateNextRetry:
 
 
 class TestJobProcessing:
+    def test_reused_worker_session_rebinds_taxonomy_to_each_workspace(self, session):
+        default_workspace = Workspace(
+            slug="default",
+            name="默认空间",
+            is_default=True,
+            status="active",
+            settings={},
+        )
+        research_workspace = Workspace(
+            slug="research",
+            name="研究",
+            status="active",
+            settings={},
+        )
+        session.add_all([default_workspace, research_workspace])
+        session.flush()
+
+        jobs = []
+        for workspace, title in (
+            (default_workspace, "默认资料"),
+            (research_workspace, "研究资料"),
+        ):
+            document = Document(
+                workspace_id=workspace.id,
+                title=title,
+                source_type=DocumentSourceType.note,
+            )
+            session.add(document)
+            session.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash=f"hash-{workspace.slug}",
+                raw_content="没有配置模型时进入收件箱",
+                processing_status="ready",
+            )
+            session.add(version)
+            session.flush()
+            document.current_version_id = version.id
+            job = ProcessingJob(
+                document_id=document.id,
+                document_version_id=version.id,
+                stage="understanding",
+                idempotency_key=f"{document.id}:understanding:test",
+                config_version="test",
+            )
+            session.add(job)
+            jobs.append(job)
+        session.commit()
+
+        assert process_single_job(session, jobs[0].id) is True
+        assert process_single_job(session, jobs[1].id) is True
+
+        categories = list(
+            session.scalars(
+                select(Category).execution_options(include_all_workspaces=True)
+            ).all()
+        )
+        assert {(item.workspace_id, item.slug) for item in categories} == {
+            (default_workspace.id, "inbox"),
+            (research_workspace.id, "inbox"),
+        }
+
     def test_process_note_job(self, session):
         doc = Document(title="Test Note", source_type=DocumentSourceType.note)
         session.add(doc)

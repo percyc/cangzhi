@@ -21,6 +21,14 @@ class AskConversation(BaseModel):
 
     __tablename__ = "ask_conversations"
 
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=text("1"),
+        index=True,
+    )
+
     admin_id = Column(
         Integer,
         ForeignKey(

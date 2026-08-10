@@ -33,7 +33,15 @@ DEFAULT_CATEGORY_SLUGS: tuple[tuple[str, str], ...] = (
 class Category(BaseModel):
     __tablename__ = "categories"
 
-    slug = Column(String(64), nullable=False, unique=True, index=True)
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=text("1"),
+        index=True,
+    )
+
+    slug = Column(String(64), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     sort_order = Column(Integer, nullable=False, server_default=text("0"))
@@ -48,12 +56,15 @@ class Category(BaseModel):
     parent = relationship("Category", remote_side="Category.id", backref="children")
 
     __table_args__ = (
-        UniqueConstraint("slug", name="uix_categories_slug"),
+        UniqueConstraint(
+            "workspace_id", "slug", name="uix_categories_workspace_slug"
+        ),
     )
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "workspace_id": self.workspace_id,
             "slug": self.slug,
             "name": self.name,
             "description": self.description,
@@ -111,17 +122,26 @@ class DocumentCategory(BaseModel):
 class Tag(BaseModel):
     __tablename__ = "tags"
 
-    slug = Column(String(64), nullable=False, unique=True, index=True)
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=text("1"),
+        index=True,
+    )
+
+    slug = Column(String(64), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("slug", name="uix_tags_slug"),
+        UniqueConstraint("workspace_id", "slug", name="uix_tags_workspace_slug"),
     )
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "workspace_id": self.workspace_id,
             "slug": self.slug,
             "name": self.name,
             "description": self.description,

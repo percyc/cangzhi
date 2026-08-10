@@ -15,7 +15,6 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.schema import UniqueConstraint
 
-from ..core.db import Base
 from .base import BaseModel
 
 
@@ -27,6 +26,14 @@ class DocumentSourceType(enum.Enum):
 
 class Document(BaseModel):
     __tablename__ = "documents"
+
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+        server_default=text("1"),
+        index=True,
+    )
 
     title = Column(String(1024), nullable=False, index=True)
     description = Column(Text, nullable=True)
@@ -47,11 +54,19 @@ class Document(BaseModel):
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
     delete_reason = Column(String(64), nullable=True)
-    external_identity = Column(String(64), nullable=True, unique=True, index=True)
+    external_identity = Column(String(64), nullable=True, index=True)
     meta = Column(
         JSON().with_variant(JSONB, "postgresql"),
         nullable=False,
         server_default=text("'{}'"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "external_identity",
+            name="uix_documents_workspace_external_identity",
+        ),
     )
 
 

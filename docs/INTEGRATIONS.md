@@ -16,6 +16,18 @@ REST 的 `/api/v1/knowledge/facets` 与 MCP 的 `knowledge_list_facets`
 这三种入口不会绕过藏知的回收站、KnowledgeScope 或文档存活状态，也不会各自维护
 另一套向量索引。
 
+## 选择工作空间
+
+所有外部入口默认访问 `default`。访问其他空间时发送：
+
+```text
+X-Cangzhi-Workspace: research
+```
+
+CLI 可用 `--workspace research`，或设置 `CANGZHI_WORKSPACE=research`。远程 MCP 在
+连接配置的 `headers` 中同时放入 `Authorization` 和 `X-Cangzhi-Workspace`。令牌当前
+不绑定某一个空间；空间决定知识边界，令牌 scopes 决定允许执行的动作。
+
 ## 创建凭证
 
 使用浏览器登录藏知后调用 `POST /api/access-tokens` 创建个人访问令牌。
@@ -38,6 +50,7 @@ CANGZHI_TOKEN=cz_pat_...
 
 ```text
 Authorization: Bearer ${CANGZHI_TOKEN}
+X-Cangzhi-Workspace: ${CANGZHI_WORKSPACE}
 ```
 
 默认工作流是“藏知提供证据、外部 Agent 负责回答”，从而避免重复调用两次

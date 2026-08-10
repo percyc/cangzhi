@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import (
     JSON,
     Column,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -21,6 +22,14 @@ class KnowledgeScope(BaseModel):
 
     __tablename__ = "knowledge_scopes"
 
+    workspace_id = Column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=text("1"),
+        index=True,
+    )
+
     name = Column(String(255), nullable=False)
     slug = Column(String(128), nullable=False)
     description = Column(Text, nullable=True)
@@ -30,12 +39,15 @@ class KnowledgeScope(BaseModel):
     )
 
     __table_args__ = (
-        UniqueConstraint("slug", name="uix_knowledge_scopes_slug"),
+        UniqueConstraint(
+            "workspace_id", "slug", name="uix_knowledge_scopes_workspace_slug"
+        ),
     )
 
     def to_public_dict(self) -> dict:
         return {
             "id": self.id,
+            "workspace_id": self.workspace_id,
             "name": self.name,
             "slug": self.slug,
             "description": self.description,

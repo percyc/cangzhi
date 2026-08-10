@@ -19,6 +19,9 @@
 4. 网页、REST、CLI、MCP 和 Skill 复用同一知识范围、检索和证据语义。
 5. 外部来源、对话模型和向量模型可以替换，不能锁定知识资产。
 
+当前采用“单管理员、多工作空间”。工作空间是知识隔离边界，不是租户或权限角色。
+未明确选择时统一落入 `default`，从而兼容升级前的全部数据和调用方。
+
 ## 2. 运行拓扑
 
 ```text
@@ -204,17 +207,26 @@ MCP / Skill ─────┘
 模型回答时才授予 `knowledge:ask`，避免外部模型与藏知模型重复推理和计费。详细契约
 见[外部接入](INTEGRATIONS.md)。
 
+浏览器以 `cangzhi_workspace` Cookie 选择当前空间；REST、CLI、MCP 和 Skill 使用
+`X-Cangzhi-Workspace` 请求头。解析顺序是请求头、查询参数、Cookie、`default`。
+不存在的空间返回 404，已归档空间返回 409。后台任务根据所属文档重新绑定空间，
+避免复用 Worker 会话时发生分类或标签串库。
+
 ## 8. 当前核心数据表
 
 | 领域 | 当前表 |
 |---|---|
-| 身份与模型 | `admins`、`auth_sessions`、`personal_access_tokens`、`ai_runtime_configs` |
+| 身份、空间与模型 | `admins`、`auth_sessions`、`personal_access_tokens`、`workspaces`、`ai_runtime_configs` |
 | 文档事实源 | `documents`、`document_versions`、`blobs` |
 | 处理与检索 | `processing_jobs`、`document_chunks`、`embedding_profiles`、`chunk_embeddings` |
 | 组织 | `categories`、`document_categories`、`tags`、`document_tags`、`document_summaries`、`tag_merge_records` |
 | 数据集 | `knowledge_datasets`、`dataset_fields`、`structured_table_rows`、`dataset_artifacts` |
 | 外部来源 | `webdav_sources`、`webdav_entries`、`external_item_exclusions` |
 | 范围与问答 | `knowledge_scopes`、`ask_conversations`、`ask_turns` |
+
+`documents`、`categories`、`tags`、`knowledge_scopes`、`webdav_sources`、
+`external_item_exclusions` 和 `ask_conversations` 直接携带 `workspace_id`；其版本、切片、
+数据集和证据通过父对象继承空间边界。模型配置、向量 Profile、备份和管理员仍是全局资源。
 
 这张表只列已实现模型。知识图谱、团队空间、多用户权限和通用写入 API 仍属于路线图，
 不作为当前部署依赖。

@@ -31,6 +31,7 @@ class CLIError(RuntimeError):
 class CangzhiClient:
     base_url: str
     token: str
+    workspace: str = "default"
     timeout: float = 30.0
 
     def request(
@@ -48,6 +49,7 @@ class CangzhiClient:
                     "Authorization": f"Bearer {self.token}",
                     "Accept": "application/json",
                     "User-Agent": "cangzhi-cli/0.1",
+                    "X-Cangzhi-Workspace": self.workspace,
                 },
                 json=payload,
                 timeout=self.timeout,
@@ -143,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("CANGZHI_TOKEN"),
         help="个人访问令牌（建议使用环境变量 CANGZHI_TOKEN）",
     )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("CANGZHI_WORKSPACE", "default"),
+        help="工作空间 slug（环境变量 CANGZHI_WORKSPACE，默认 default）",
+    )
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument(
         "--compact",
@@ -234,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             CangzhiClient(
                 base_url=args.url,
                 token=args.token,
+                workspace=args.workspace,
                 timeout=args.timeout,
             ),
         )

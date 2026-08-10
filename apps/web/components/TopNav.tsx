@@ -19,10 +19,28 @@ type LoadState =
   | { kind: 'ready'; status: AuthStatus }
   | { kind: 'error'; message: string };
 
+type Workspace = {
+  slug: string;
+  name: string;
+  description: string | null;
+  is_default: boolean;
+  status: 'active' | 'archived';
+  settings: Record<string, unknown>;
+};
+
+type WorkspaceLoadState =
+  | { kind: 'idle' }
+  | { kind: 'pending' }
+  | { kind: 'ready'; list: Workspace[]; current: Workspace | null }
+  | { kind: 'fallback' };
+
 export function TopNav() {
   const pathname = usePathname() ?? '/';
   const router = useRouter();
   const [state, setState] = useState<LoadState>({ kind: 'pending' });
+  const [workspaceState, setWorkspaceState] = useState<WorkspaceLoadState>({
+    kind: 'idle',
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -41,6 +59,31 @@ export function TopNav() {
       cancelled = true;
     };
   }, [pathname]);
+
+  const isAuthenticated =
+    state.kind === 'ready' && state.status.authenticated;
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      fetchJson<Workspace[]>('/api/workspaces', '工作空间读取失败'),
+      fetchOptional<Workspace>('/api/workspaces/current'),
+    ])
+      .then(([list, current]) => {
+        if (cancelled) return;
+        setWorkspaceState({ kind: 'ready', list, current });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setWorkspaceState({ kind: 'fallback' });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname, isAuthenticated]);
 
   const handleLogout = async () => {
     try {
@@ -80,6 +123,10 @@ export function TopNav() {
           </span>
           <span className="text-lg font-semibold tracking-tight text-slate-950">藏知</span>
         </Link>
+
+        {isAuthenticated && (
+          <WorkspaceSelector state={workspaceState} />
+        )}
 
         <nav className="ml-2 hidden flex-1 items-center gap-1 sm:flex">
           {NAV_ITEMS.map((item) => (
@@ -253,4 +300,171 @@ function ChevronIcon() {
 }
 function LogoutIcon() {
   return <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden><path d="M8 4H4v12h4M12 6l4 4-4 4M6 10h10" /></svg>;
+}
+
+function WorkspaceIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      className="h-4 w-4 text-slate-500"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H8l1.5 1.5h6A1.5 1.5 0 0 1 17 8v5.5A1.5 1.5 0 0 1 15.5 15h-11A1.5 1.5 0 0 1 3 13.5v-7Z" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      className="h-4 w-4 text-emerald-600"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="m4.5 10.5 3.5 3.5 7.5-8" />
+    </svg>
+  );
+}
+
+function WorkspaceSelector({ state }: { state: WorkspaceLoadState }) {
+  if (state.kind === 'idle' || state.kind === 'pending') {
+    return null;
+  }
+  const fallback = state.kind === 'fallback';
+  const list = state.kind === 'ready' ? state.list : [];
+  const current = state.kind === 'ready' ? state.current : null;
+  const active = list.filter((workspace) => workspace.status === 'active');
+  const label = current?.name ?? '默认空间';
+
+  const handleSelect = (slug: string) => {
+    if (current?.slug === slug) return;
+    setWorkspaceCookie(slug);
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
+  };
+
+  return (
+    <details className="group relative shrink-0">
+      <summary
+        className="flex cursor-pointer list-none items-center gap-1.5 rounded-xl border border-slate-200 bg-white py-1.5 pl-2 pr-2 text-xs text-slate-700 hover:border-slate-300 hover:bg-slate-50 sm:gap-2 sm:py-2 sm:pl-2.5 sm:pr-2.5 sm:text-sm"
+        title={label}
+      >
+        <WorkspaceIcon />
+        <span
+          aria-label={fallback ? '当前工作空间：默认空间（暂未加载）' : `当前工作空间：${label}`}
+          className="max-w-16 truncate sm:max-w-32"
+        >
+          {label}
+        </span>
+        <ChevronIcon />
+      </summary>
+      <div
+        role="menu"
+        aria-label="切换工作空间"
+        className="absolute left-0 z-50 mt-2 w-72 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl shadow-slate-950/10"
+      >
+        <p className="px-3 py-1.5 text-[11px] uppercase tracking-wide text-slate-400">
+          切换工作空间
+        </p>
+        {active.length === 0 ? (
+          <p className="px-3 py-3 text-xs text-slate-500">暂无可切换的工作空间</p>
+        ) : (
+          active.map((workspace) => {
+            const isCurrent = current?.slug === workspace.slug;
+            return (
+              <button
+                key={workspace.slug}
+                type="button"
+                role="menuitemradio"
+                aria-checked={isCurrent}
+                onClick={() => handleSelect(workspace.slug)}
+                className={`flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors ${
+                  isCurrent
+                    ? 'bg-slate-50 text-slate-900'
+                    : 'text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{workspace.name}</span>
+                  {workspace.description ? (
+                    <span className="mt-0.5 block truncate text-[11px] text-slate-400">
+                      {workspace.description}
+                    </span>
+                  ) : null}
+                </span>
+                {isCurrent ? <CheckIcon /> : null}
+              </button>
+            );
+          })
+        )}
+        <div className="mt-1 border-t border-slate-100 px-3 py-2">
+          <Link
+            href="/settings/workspaces"
+            className="block text-xs font-medium text-slate-500 hover:text-slate-800"
+          >
+            管理工作空间 →
+          </Link>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+async function fetchJson<T>(url: string, fallbackMessage: string): Promise<T> {
+  const response = await fetch(url, {
+    cache: 'no-store',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(fallbackMessage);
+  }
+  const text = await response.text();
+  if (!text) {
+    throw new Error('empty response');
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error('invalid json');
+  }
+}
+
+async function fetchOptional<T>(url: string): Promise<T | null> {
+  try {
+    const response = await fetch(url, {
+      cache: 'no-store',
+      credentials: 'include',
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const text = await response.text();
+    if (!text) {
+      return null;
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function setWorkspaceCookie(slug: string) {
+  if (typeof document === 'undefined') return;
+  const encoded = encodeURIComponent(slug);
+  document.cookie = `cangzhi_workspace=${encoded}; Path=/; Max-Age=31536000; SameSite=Lax`;
 }

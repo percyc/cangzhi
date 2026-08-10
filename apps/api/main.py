@@ -36,9 +36,11 @@ from .api import (
     sources,
     v1,
     webdav,
+    workspaces,
 )
 from .api.auth import require_admin
 from .core.config import settings
+from .services.workspaces import require_workspace_context
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +74,21 @@ app.add_middleware(
     allow_origins=list(_allowed_origins),
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Requested-With",
+        "X-Cangzhi-Workspace",
+    ],
     max_age=600,
 )
 
 # Public routers — anyone may call these.
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
-app.include_router(v1.router, prefix="/api")
-app.include_router(mcp.router, prefix="/api")
+_workspace_dep = [Depends(require_workspace_context)]
+app.include_router(v1.router, prefix="/api", dependencies=_workspace_dep)
+app.include_router(mcp.router, prefix="/api", dependencies=_workspace_dep)
 
 # Protected routers — every endpoint requires an authenticated
 # admin. ``Depends(require_admin)`` reads the session cookie and
@@ -88,22 +96,26 @@ app.include_router(mcp.router, prefix="/api")
 # ``require_admin`` symbol via ``app.dependency_overrides`` to
 # inject a stub admin without going through the cookie flow.
 _admin_dep = [Depends(require_admin)]
+_admin_workspace_dep = [Depends(require_admin), Depends(require_workspace_context)]
 app.include_router(
     settings_ai.router, prefix="/api", dependencies=_admin_dep, tags=["settings"]
 )
 app.include_router(access_tokens.router, prefix="/api")
-app.include_router(notes.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(files.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(documents.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(datasets.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(sources.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(categories.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(categories.tags_router, prefix="/api", dependencies=_admin_dep)
-app.include_router(search.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(ask.router, prefix="/api", dependencies=_admin_dep)
+app.include_router(notes.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(files.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(documents.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(datasets.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(sources.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(categories.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(
+    categories.tags_router, prefix="/api", dependencies=_admin_workspace_dep
+)
+app.include_router(search.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(ask.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(embeddings.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(webdav.router, prefix="/api", dependencies=_admin_dep)
-app.include_router(exports.router, prefix="/api", dependencies=_admin_dep)
+app.include_router(webdav.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(exports.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(workspaces.router, prefix="/api", dependencies=_admin_dep)
 
 
 @app.get("/")
