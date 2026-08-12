@@ -595,6 +595,191 @@ async def _verify_profile_is_complete(
     return missing == 0, current, missing
 
 
+async def _recompute_profile_counters(
+    db: AsyncSession, profile: EmbeddingProfile
+) -> None:
+    """Recompute the profile's build counters against the live eligible corpus.
+
+    The eligible corpus is :func:`_current_child_chunks`, which
+    already honours per-version ``sampled`` strategies.
+    ``completed_chunks`` counts eligible chunks with a matching
+    stored embedding; ``failed_chunks`` is recomputed from the
+    profile's live ``processing_jobs`` rows so a previous run
+    that ended in a couple of failures is not silently wiped
+    out by an activation-time counter refresh. ``total_chunks``
+    is the count of eligible chunks the profile is supposed to
+    cover.
+
+    The function does not commit; the caller's transaction
+    controls durability.
+    """
+
+    current = await _current_child_chunks(db)
+    total = len(current)
+    if total == 0:
+        profile.total_chunks = 0
+        profile.completed_chunks = 0
+        profile.failed_chunks = 0
+        return
+    chunk_id_to_hash = {row.id: row.content_hash for row in current}
+    stored = list(
+        (
+            await db.execute(
+                select(ChunkEmbedding).where(
+                    ChunkEmbedding.profile_id == profile.id
+                )
+            )
+        ).scalars().all()
+    )
+    stored_by_chunk = {row.chunk_id: row for row in stored}
+    completed = sum(
+        1
+        for chunk_id, content_hash in chunk_id_to_hash.items()
+        if stored_by_chunk.get(chunk_id) is not None
+        and stored_by_chunk[chunk_id].content_hash == content_hash
+    )
+    failed = list(
+        (
+            await db.execute(
+                select(ProcessingJob).where(
+                    and_(
+                        ProcessingJob.embedding_profile_id == profile.id,
+                        ProcessingJob.stage == EMBEDDING_STAGE,
+                        ProcessingJob.status == "failed",
+                        ProcessingJob.embedding_chunk_id.in_(
+                            list(chunk_id_to_hash)
+                        ),
+                    )
+                )
+            )
+        ).scalars().all()
+    )
+    profile.total_chunks = total
+    profile.completed_chunks = completed
+    profile.failed_chunks = len(failed)
+
+
+async def _backfill_missing_jobs(
+    db: AsyncSession, profile: EmbeddingProfile
+) -> tuple[int, int]:
+    """Idempotently enqueue embedding jobs for eligible chunks that are
+    missing or whose ``content_hash`` is stale.
+
+    The function is the activation-time self-heal for two
+    distinct failure modes:
+
+    * A chunk exists that the profile has never embedded:
+      enqueue a fresh job.
+    * A chunk's ``content_hash`` rotated after the previous
+      build: the profile's ``chunk_embeddings`` row is stale,
+      and a previously-completed job would otherwise sit
+      forever with a vector that no longer matches the live
+      chunk. The existing job is reset to ``created`` so the
+      worker will re-execute it; jobs already in
+      ``created``/``retry``/``processing`` are left alone to
+      avoid an unnecessary duplicate. A permanently ``failed``
+      job is also reset to ``created`` so the new content hash
+      gets a real second chance.
+
+    Returns ``(enqueued, skipped)``. Re-running this on a
+    profile whose missing jobs already exist is a no-op, so
+    repeated activation attempts never duplicate work.
+
+    The function does not commit: the caller's transaction
+    controls durability. ``activate_profile`` deliberately
+    commits before raising so the operator-visible "已自动补建"
+    message reflects a real state change.
+    """
+
+    current_chunks = await _current_child_chunks(db)
+    if not current_chunks:
+        return 0, 0
+    chunk_id_to_hash = {row.id: row.content_hash for row in current_chunks}
+    stored = list(
+        (
+            await db.execute(
+                select(ChunkEmbedding).where(
+                    ChunkEmbedding.profile_id == profile.id
+                )
+            )
+        ).scalars().all()
+    )
+    stored_by_chunk = {row.chunk_id: row for row in stored}
+
+    # Locate any jobs the profile has already issued for these
+    # chunks. We will reset jobs whose stored embedding (if
+    # any) no longer matches the live ``content_hash``; jobs
+    # still in flight are skipped.
+    chunk_ids = list(chunk_id_to_hash.keys())
+    existing_jobs: list[ProcessingJob] = list(
+        (
+            await db.execute(
+                select(ProcessingJob).where(
+                    and_(
+                        ProcessingJob.embedding_profile_id == profile.id,
+                        ProcessingJob.stage == EMBEDDING_STAGE,
+                        ProcessingJob.embedding_chunk_id.in_(chunk_ids),
+                    )
+                )
+            )
+        ).scalars().all()
+    )
+    job_by_chunk: dict[int, ProcessingJob] = {
+        job.embedding_chunk_id: job
+        for job in existing_jobs
+        if job.embedding_chunk_id is not None
+    }
+
+    enqueued = 0
+    skipped = 0
+    for chunk in current_chunks:
+        stored_row = stored_by_chunk.get(chunk.id)
+        stored_hash = stored_row.content_hash if stored_row is not None else None
+        hash_stale = stored_row is None or stored_hash != chunk.content_hash
+        if not hash_stale:
+            # Chunk already has a matching embedding and we
+            # have no work to do for it.
+            continue
+        existing_job = job_by_chunk.get(chunk.id)
+        if existing_job is None:
+            db.add(
+                _enqueue_embedding_job(profile=profile, chunk=chunk)
+            )
+            enqueued += 1
+            continue
+        if existing_job.status in ("created", "retry", "processing"):
+            # A worker (or the previous backfill) is already
+            # responsible for this chunk; do not create a
+            # duplicate and do not perturb its state.
+            skipped += 1
+            continue
+        # The job has terminated (``completed`` / ``failed``)
+        # but the vector is no longer current. Reset it so the
+        # worker re-runs with the new content hash.
+        _reset_processing_job(existing_job)
+        db.add(existing_job)
+        enqueued += 1
+    return enqueued, skipped
+
+
+def _reset_processing_job(job: ProcessingJob) -> None:
+    """Reset a ``processing_jobs`` row back to the ``created`` state.
+
+    Mirrors the helper in
+    :mod:`apps.worker.services.processor` so the API path can
+    reuse the same bookkeeping. The caller is responsible for
+    adding the row to its session and committing.
+    """
+
+    job.status = "created"
+    job.retry_count = 0
+    job.next_retry_at = None
+    job.last_error = None
+    job.error_details = None
+    job.started_at = None
+    job.finished_at = None
+
+
 async def activate_profile(
     db: AsyncSession, profile_id: int
 ) -> ActivationResult:
@@ -625,6 +810,23 @@ async def activate_profile(
         db, profile
     )
     if not complete:
+        # A ``ready`` / ``retired`` profile that no longer covers the
+        # live corpus (new chunks, or chunks whose content_hash
+        # rotated after the build) is repaired on demand: we
+        # idempotently enqueue the missing chunks, flip the profile
+        # back to ``building``, and let the operator activate once
+        # the worker has finished the backfill.
+        enqueued, _skipped = await _backfill_missing_jobs(db, profile)
+        if enqueued:
+            profile.status = "building"
+            profile.build_finished_at = None
+            await _recompute_profile_counters(db, profile)
+            await db.commit()
+            await db.refresh(profile)
+            raise ProfileNotReady(
+                f"profile {profile_id} 覆盖率不足，已自动补建 {enqueued} 个任务，"
+                f"完成后可启用"
+            )
         raise ProfileNotReady(
             f"profile {profile_id} 覆盖率不足："
             f"{current_chunks - missing}/{current_chunks}"
@@ -701,13 +903,17 @@ async def enqueue_embedding_jobs_for_chunk(
 
     The function is called by the chunking stage after a new
     child chunk is materialised. It returns the number of
-    profiles it enqueued for. Profiles in states other than
-    ``active`` and ``building`` are skipped: ``ready`` and
-    ``retired`` profiles do not need new vectors, ``tested`` /
-    ``failed`` / ``draft`` are not yet ready to consume work.
+    profiles it enqueued for. Relevant profiles are ``active``,
+    ``building`` and ``ready``: ``tested`` / ``failed`` / ``draft``
+    are not yet ready to consume work.
+
+    A ``ready`` profile that actually gains new work is demoted back
+    to ``building`` (its ``build_finished_at`` cleared) and its
+    counters are recomputed against the current eligible corpus so
+    the progress view stays truthful.
     """
 
-    relevant_statuses = ("active", "building")
+    relevant_statuses = ("active", "building", "ready")
     profiles = list(
         (
             await db.execute(
@@ -730,6 +936,11 @@ async def enqueue_embedding_jobs_for_chunk(
             continue
         db.add(_enqueue_embedding_job(profile=profile, chunk=chunk))
         enqueued += 1
+        if profile.status == "ready":
+            profile.status = "building"
+            profile.build_finished_at = None
+            await _recompute_profile_counters(db, profile)
+            db.add(profile)
     return enqueued
 
 

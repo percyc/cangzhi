@@ -349,6 +349,13 @@ export default function SettingsPage() {
       setEmbeddingActionMessage(
         err instanceof Error ? err.message : '向量索引操作失败',
       );
+      // 启用时服务端可能发现新切片并自动补建。即使本次
+      // 启用返回 409，也要立即刷新为 building，让轮询接管进度展示。
+      try {
+        setEmbeddingStatus(await fetchEmbeddingStatus());
+      } catch {
+        // 保留原始操作错误，状态刷新失败不应覆盖它。
+      }
     } finally {
       setEmbeddingActionId(null);
     }

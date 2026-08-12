@@ -35,6 +35,7 @@ from apps.api.models.documents import (
     DocumentSourceType,
     DocumentVersion,
 )
+from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.table_rows import StructuredTableRow
 from apps.api.models.taxonomy import (
@@ -889,13 +890,21 @@ def _enqueue_embedding_jobs_for_new_chunks(
     document: Document,
     version: DocumentVersion,
 ) -> None:
-    """For each new child chunk, enqueue work for active/building profiles.
+    """For each new child chunk, enqueue work for active/building/ready profiles.
 
     The enqueue is a no-op when no profile is currently
-    ``active`` or ``building`` (e.g. before the operator has
-    ever run a build, or after a failed build the operator has
-    not retried). Otherwise every new child chunk becomes a
-    pending embedding job per profile.
+    ``active``, ``building`` or ``ready`` (e.g. before the
+    operator has ever run a build, or after a failed build the
+    operator has not retried). Otherwise every new child chunk
+    becomes a pending embedding job per profile.
+
+    ``ready`` profiles that actually gain new work are demoted
+    back to ``building`` and their ``build_finished_at`` is
+    cleared. The profile's build counters are recomputed against
+    the live eligible corpus so the progress view stays
+    truthful; the API side reuses this metadata in
+    :func:`_current_child_chunks` to honour the same sampled
+    strategy the worker just stamped on the version.
 
     The helper is intentionally local to the worker: the API
     side has its own ``enqueue_embedding_jobs_for_chunk`` for
@@ -903,15 +912,17 @@ def _enqueue_embedding_jobs_for_new_chunks(
     """
 
     try:
-        from apps.api.embeddings.build_service import EMBEDDING_STAGE
+        from apps.api.embeddings.build_service import (
+            EMBEDDING_STAGE,
+            _idempotency_key,
+        )
     except ImportError:  # pragma: no cover - defensive
         return
-    from apps.api.models.embedding_profiles import EmbeddingProfile
 
     profiles = list(
         session.scalars(
             select(EmbeddingProfile).where(
-                EmbeddingProfile.status.in_(("active", "building"))
+                EmbeddingProfile.status.in_(("active", "building", "ready"))
             )
         ).all()
     )
@@ -952,11 +963,11 @@ def _enqueue_embedding_jobs_for_new_chunks(
     }
     session.add(version)
 
-    for chunk in selected_chunks:
-        for profile in profiles:
-            key = (
-                f"{profile.id}:{chunk.id}:{EMBEDDING_STAGE}:"
-                f"embedding:v1:{profile.config_fingerprint}"
+    for profile in profiles:
+        profile_flipped = False
+        for chunk in selected_chunks:
+            key = _idempotency_key(
+                profile.id, chunk.id, profile.config_fingerprint
             )
             existing = session.scalar(
                 select(ProcessingJob).where(ProcessingJob.idempotency_key == key)
@@ -975,6 +986,91 @@ def _enqueue_embedding_jobs_for_new_chunks(
                     embedding_chunk_id=chunk.id,
                 )
             )
+            if profile.status == "ready":
+                profile.status = "building"
+                profile.build_finished_at = None
+                profile_flipped = True
+        if profile_flipped:
+            _recompute_profile_counters_sync(session, profile)
+            session.add(profile)
+
+
+def _recompute_profile_counters_sync(
+    session: Session,
+    profile: EmbeddingProfile,
+) -> None:
+    """Sync mirror of :func:`build_service._recompute_profile_counters`.
+
+    Used by the worker's chunking hook to refresh the
+    ``total_chunks`` / ``completed_chunks`` / ``failed_chunks``
+    counters when a ``ready`` profile gets demoted to
+    ``building``. The eligible corpus is the union of every
+    child chunk that is still current and that the profile
+    already has an embedding job for (large structured tables
+    intentionally sample embeddings; their unsampled rows stay
+    available through lexical and exact-table indexes and must
+    not leave the vector profile permanently "incomplete").
+
+    ``failed_chunks`` is recomputed from the live job state so
+    a profile that had a couple of jobs fail in a previous run
+    still reports the right number; we never zero the counter
+    unconditionally.
+    """
+
+    try:
+        from apps.api.embeddings.build_service import EMBEDDING_STAGE
+    except ImportError:  # pragma: no cover - defensive
+        return
+
+    all_current_chunks = list(
+        session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.role == "child",
+                DocumentChunk.is_current.is_(True),
+            )
+        ).all()
+    )
+    jobs = list(
+        session.scalars(
+            select(ProcessingJob).where(
+                ProcessingJob.embedding_profile_id == profile.id,
+                ProcessingJob.stage == EMBEDDING_STAGE,
+            )
+        ).all()
+    )
+    eligible_ids = {job.embedding_chunk_id for job in jobs if job.embedding_chunk_id is not None}
+    eligible_ids &= {chunk.id for chunk in all_current_chunks}
+    if not eligible_ids:
+        profile.total_chunks = 0
+        profile.completed_chunks = 0
+        profile.failed_chunks = 0
+        return
+    current_chunks = [chunk for chunk in all_current_chunks if chunk.id in eligible_ids]
+    current_ids = {chunk.id for chunk in current_chunks}
+    embeddings = list(
+        session.scalars(
+            select(ChunkEmbedding).where(
+                ChunkEmbedding.profile_id == profile.id,
+                ChunkEmbedding.chunk_id.in_(current_ids),
+            )
+        ).all()
+    )
+    current_hashes = {chunk.id: chunk.content_hash for chunk in current_chunks}
+    completed = sum(
+        1
+        for row in embeddings
+        if current_hashes.get(row.chunk_id) == row.content_hash
+        and isinstance(row.vector, list)
+        and len(row.vector) == profile.dim
+    )
+    failed = sum(
+        1
+        for job in jobs
+        if job.status == "failed" and job.embedding_chunk_id in current_ids
+    )
+    profile.total_chunks = len(current_chunks)
+    profile.completed_chunks = completed
+    profile.failed_chunks = failed
 
 
 def _replace_version_chunks(

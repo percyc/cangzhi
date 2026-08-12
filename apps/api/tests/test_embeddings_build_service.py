@@ -40,6 +40,7 @@ from apps.api.embeddings.build_service import (
     ProfileNotBuildable,
     ProfileNotFound,
     ProfileNotReady,
+    _backfill_missing_jobs,
     activate_profile,
     enqueue_embedding_jobs_for_chunk,
     get_profile_summaries,
@@ -162,6 +163,21 @@ async def _seed_profile(session, **kwargs) -> EmbeddingProfile:
             select(EmbeddingProfile).order_by(EmbeddingProfile.id.desc())
         )
     ).scalars().first()
+
+
+async def _run_backfill(
+    profile_id: int, session: AsyncSession
+) -> tuple[int, int]:
+    """Drive :func:`_backfill_missing_jobs` for tests that want to
+    exercise the activation-time self-heal without going through
+    the full :func:`activate_profile` wrapper."""
+
+    profile = (
+        await session.execute(
+            select(EmbeddingProfile).where(EmbeddingProfile.id == profile_id)
+        )
+    ).scalars().first()
+    return await _backfill_missing_jobs(session, profile)
 
 
 async def _make_doc_and_chunks(
@@ -586,6 +602,377 @@ class TestActivate:
 
         _run_async(_run())
 
+    def test_activate_backfills_missing_chunks_and_demotes(self, session_factory):
+        async def _run():
+            async with session_factory() as session:
+                _make_config(session)
+                profile = await _seed_profile(session, status="ready")
+                await _make_doc_and_chunks(session, count=3)
+                with pytest.raises(ProfileNotReady) as exc_info:
+                    await activate_profile(session, profile.id)
+                assert "已自动补建 3 个任务" in str(exc_info.value)
+                await session.refresh(profile)
+                assert profile.status == "building"
+                assert profile.build_finished_at is None
+                assert profile.total_chunks == 3
+                assert profile.completed_chunks == 0
+                jobs = list(
+                    (
+                        await session.execute(
+                            select(ProcessingJob).where(
+                                ProcessingJob.embedding_profile_id == profile.id,
+                                ProcessingJob.stage == EMBEDDING_STAGE,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                assert len(jobs) == 3
+
+        _run_async(_run())
+
+    def test_activate_backfill_is_idempotent_across_calls(self, session_factory):
+        async def _run():
+            async with session_factory() as session:
+                _make_config(session)
+                profile = await _seed_profile(session, status="ready")
+                await _make_doc_and_chunks(session, count=3)
+                with pytest.raises(ProfileNotReady):
+                    await activate_profile(session, profile.id)
+                await session.refresh(profile)
+                assert profile.status == "building"
+                profile.status = "ready"
+                profile.build_finished_at = None
+                session.add(profile)
+                await _commit(session)
+                with pytest.raises(ProfileNotReady):
+                    await activate_profile(session, profile.id)
+                jobs = list(
+                    (
+                        await session.execute(
+                            select(ProcessingJob).where(
+                                ProcessingJob.embedding_profile_id == profile.id,
+                                ProcessingJob.stage == EMBEDDING_STAGE,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                assert len(jobs) == 3
+                assert profile.status == "ready"
+
+        _run_async(_run())
+
+    def test_activate_backfills_retired_profile(self, session_factory):
+        async def _run():
+            async with session_factory() as session:
+                _make_config(session)
+                profile = await _seed_profile(
+                    session,
+                    status="retired",
+                    base_url="https://retired.example.com/v1",
+                )
+                await _make_doc_and_chunks(session, count=2)
+                with pytest.raises(ProfileNotReady) as exc_info:
+                    await activate_profile(session, profile.id)
+                assert "已自动补建 2 个任务" in str(exc_info.value)
+                await session.refresh(profile)
+                assert profile.status == "building"
+                jobs = list(
+                    (
+                        await session.execute(
+                            select(ProcessingJob).where(
+                                ProcessingJob.embedding_profile_id == profile.id,
+                                ProcessingJob.stage == EMBEDDING_STAGE,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                assert len(jobs) == 2
+
+        _run_async(_run())
+
+    def test_activate_backfill_resets_completed_job_for_stale_hash(
+        self, session_factory
+    ):
+        """A profile that previously completed a chunk whose content
+        has since rotated must not stay permanently stuck: the old
+        job is reset to ``created`` so the worker re-embeds it."""
+
+        async def _run():
+            async with session_factory() as session:
+                _make_config(session)
+                profile = await _seed_profile(session, status="ready")
+                document, version, chunks = await _make_doc_and_chunks(
+                    session, count=2
+                )
+                # Pre-populate embeddings + completed jobs for the
+                # historical content hash, then rotate the hash
+                # to simulate a chunk that changed after the build.
+                for chunk in chunks:
+                    session.add(
+                        ChunkEmbedding(
+                            profile_id=profile.id,
+                            chunk_id=chunk.id,
+                            content_hash=chunk.content_hash,
+                            vector=[0.1] * 4,
+                        )
+                    )
+                    key = (
+                        f"{profile.id}:{chunk.id}:{EMBEDDING_STAGE}:"
+                        f"embedding:v1:{profile.config_fingerprint}"
+                    )
+                    session.add(
+                        ProcessingJob(
+                            document_id=document.id,
+                            document_version_id=version.id,
+                            stage=EMBEDDING_STAGE,
+                            status="completed",
+                            idempotency_key=key,
+                            config_version=profile.config_fingerprint,
+                            embedding_profile_id=profile.id,
+                            embedding_chunk_id=chunk.id,
+                        )
+                    )
+                await _commit(session)
+                for chunk in chunks:
+                    chunk.content_hash = f"rotated-{chunk.id}"
+                    session.add(chunk)
+                await _commit(session)
+
+                with pytest.raises(ProfileNotReady) as exc_info:
+                    await activate_profile(session, profile.id)
+                assert "已自动补建 2 个任务" in str(exc_info.value)
+
+                await session.refresh(profile)
+                assert profile.status == "building"
+                jobs = list(
+                    (
+                        await session.execute(
+                            select(ProcessingJob).where(
+                                ProcessingJob.embedding_profile_id == profile.id,
+                                ProcessingJob.stage == EMBEDDING_STAGE,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                assert len(jobs) == 2
+                # The completed jobs were reset so the worker
+                # re-runs them; the unique idempotency_key is
+                # preserved, so no duplicate rows are inserted.
+                statuses = sorted(job.status for job in jobs)
+                assert statuses == ["created", "created"]
+                for job in jobs:
+                    assert job.retry_count == 0
+                    assert job.last_error is None
+
+        _run_async(_run())
+
+    def test_activate_backfill_preserves_in_flight_jobs(self, session_factory):
+        """A chunk whose job is still ``created`` / ``retry`` /
+        ``processing`` must not be duplicated or reset by the
+        backfill self-heal: another worker is already responsible
+        for it."""
+
+        async def _run():
+            async with session_factory() as session:
+                _make_config(session)
+                profile = await _seed_profile(session, status="ready")
+                document, version, chunks = await _make_doc_and_chunks(
+                    session, count=3
+                )
+                in_flight_statuses = ["created", "retry", "processing"]
+                for index, chunk in enumerate(chunks):
+                    status = in_flight_statuses[index]
+                    key = (
+                        f"{profile.id}:{chunk.id}:{EMBEDDING_STAGE}:"
+                        f"embedding:v1:{profile.config_fingerprint}"
+                    )
+                    session.add(
+                        ProcessingJob(
+                            document_id=document.id,
+                            document_version_id=version.id,
+                            stage=EMBEDDING_STAGE,
+                            status=status,
+                            idempotency_key=key,
+                            config_version=profile.config_fingerprint,
+                            embedding_profile_id=profile.id,
+                            embedding_chunk_id=chunk.id,
+                            retry_count=2 if status == "retry" else 0,
+                        )
+                    )
+                await _commit(session)
+
+                enqueued, skipped = await _run_backfill(profile.id, session)
+                assert enqueued == 0
+                assert skipped == 3
+                jobs = list(
+                    (
+                        await session.execute(
+                            select(ProcessingJob).where(
+                                ProcessingJob.embedding_profile_id == profile.id,
+                                ProcessingJob.stage == EMBEDDING_STAGE,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                # No duplicate rows; in-flight statuses are
+                # preserved verbatim.
+                assert len(jobs) == 3
+                assert sorted(job.status for job in jobs) == sorted(in_flight_statuses)
+                retry_job = next(
+                    job for job in jobs if job.status == "retry"
+                )
+                assert retry_job.retry_count == 2
+
+        _run_async(_run())
+
+    def test_activate_backfill_resets_failed_job(self, session_factory):
+        """A previously failed job whose chunk is still missing
+        must be re-queued: the new content hash needs a real
+        second chance, not a stale ``failed`` row."""
+
+        async def _run():
+            async with session_factory() as session:
+                _make_config(session)
+                profile = await _seed_profile(session, status="ready")
+                document, version, chunks = await _make_doc_and_chunks(
+                    session, count=1
+                )
+                chunk = chunks[0]
+                key = (
+                    f"{profile.id}:{chunk.id}:{EMBEDDING_STAGE}:"
+                    f"embedding:v1:{profile.config_fingerprint}"
+                )
+                session.add(
+                    ProcessingJob(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        stage=EMBEDDING_STAGE,
+                        status="failed",
+                        idempotency_key=key,
+                        config_version=profile.config_fingerprint,
+                        embedding_profile_id=profile.id,
+                        embedding_chunk_id=chunk.id,
+                        retry_count=3,
+                        last_error="upstream 503",
+                    )
+                )
+                await _commit(session)
+
+                enqueued, skipped = await _run_backfill(profile.id, session)
+                assert enqueued == 1
+                assert skipped == 0
+                job = (
+                    await session.execute(
+                        select(ProcessingJob).where(
+                            ProcessingJob.embedding_profile_id == profile.id,
+                            ProcessingJob.stage == EMBEDDING_STAGE,
+                        )
+                    )
+                ).scalars().first()
+                assert job.status == "created"
+                assert job.retry_count == 0
+                assert job.last_error is None
+                assert job.started_at is None
+                assert job.finished_at is None
+
+        _run_async(_run())
+
+    def test_recompute_counters_preserves_failed_chunks(self, session_factory):
+        """``_recompute_profile_counters`` must not unconditionally
+        zero ``failed_chunks``; previous failures stay visible
+        until the worker actually makes progress on them."""
+
+        from apps.api.embeddings.build_service import _recompute_profile_counters
+
+        async def _run():
+            async with session_factory() as session:
+                profile = await _seed_profile(session, status="building")
+                profile.failed_chunks = 2
+                profile.completed_chunks = 0
+                profile.total_chunks = 0
+                session.add(profile)
+                _make_config(session)
+                document, version, chunks = await _make_doc_and_chunks(
+                    session, count=3
+                )
+                # Two failed jobs that the worker has not yet
+                # recovered; one still missing entirely.
+                for index, chunk in enumerate(chunks[:2]):
+                    key = (
+                        f"{profile.id}:{chunk.id}:{EMBEDDING_STAGE}:"
+                        f"embedding:v1:{profile.config_fingerprint}"
+                    )
+                    session.add(
+                        ProcessingJob(
+                            document_id=document.id,
+                            document_version_id=version.id,
+                            stage=EMBEDDING_STAGE,
+                            status="failed",
+                            idempotency_key=key,
+                            config_version=profile.config_fingerprint,
+                            embedding_profile_id=profile.id,
+                            embedding_chunk_id=chunk.id,
+                            last_error="upstream timeout",
+                        )
+                    )
+                await _commit(session)
+
+                await _recompute_profile_counters(session, profile)
+                await _commit(session)
+                await session.refresh(profile)
+                assert profile.total_chunks == 3
+                assert profile.completed_chunks == 0
+                # failed_chunks tracks the live job state, not
+                # the old, pre-recompute value.
+                assert profile.failed_chunks == 2
+
+        _run_async(_run())
+
+    def test_recompute_counters_counts_completed_only_for_matching_hash(
+        self, session_factory
+    ):
+        """A stored embedding whose content_hash no longer matches
+        the live chunk must not count as completed."""
+
+        from apps.api.embeddings.build_service import _recompute_profile_counters
+
+        async def _run():
+            async with session_factory() as session:
+                profile = await _seed_profile(session, status="building")
+                profile.failed_chunks = 0
+                profile.completed_chunks = 0
+                profile.total_chunks = 0
+                session.add(profile)
+                _document, _version, chunks = await _make_doc_and_chunks(
+                    session, count=2
+                )
+                # One matching stored vector, one stale.
+                session.add(
+                    ChunkEmbedding(
+                        profile_id=profile.id,
+                        chunk_id=chunks[0].id,
+                        content_hash=chunks[0].content_hash,
+                        vector=[0.1] * 4,
+                    )
+                )
+                session.add(
+                    ChunkEmbedding(
+                        profile_id=profile.id,
+                        chunk_id=chunks[1].id,
+                        content_hash="old-hash",
+                        vector=[0.1] * 4,
+                    )
+                )
+                await _commit(session)
+
+                await _recompute_profile_counters(session, profile)
+                await _commit(session)
+                await session.refresh(profile)
+                assert profile.total_chunks == 2
+                assert profile.completed_chunks == 1
+
+        _run_async(_run())
+
 
 class TestRollback:
     def test_rollback_to_retired_profile(self, session_factory):
@@ -713,6 +1100,62 @@ class TestAutoEnqueue:
                 assert second == 0
 
         _run_async(_run())
+
+    def test_ready_profile_auto_enqueues_and_demotes_to_building(self, session_factory):
+        async def _run():
+            async with session_factory() as session:
+                await _make_doc_and_chunks(session, count=3)
+                profile = await _seed_profile(session, status="ready")
+                profile.total_chunks = 3
+                profile.completed_chunks = 3
+                profile.failed_chunks = 0
+                profile.build_started_at = None
+                profile.build_finished_at = None
+                session.add(profile)
+                await _commit(session)
+                chunk = (await session.execute(select(DocumentChunk).order_by(DocumentChunk.id))).scalars().first()
+                enqueued = await enqueue_embedding_jobs_for_chunk(session, chunk=chunk)
+                assert enqueued == 1
+                await _commit(session)
+                await session.refresh(profile)
+                assert profile.status == "building"
+                assert profile.build_finished_at is None
+                assert profile.total_chunks == 3
+                assert profile.completed_chunks == 0
+                assert profile.failed_chunks == 0
+                jobs = list(
+                    (
+                        await session.execute(
+                            select(ProcessingJob).where(
+                                ProcessingJob.embedding_profile_id == profile.id,
+                                ProcessingJob.stage == EMBEDDING_STAGE,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                assert len(jobs) == 1
+
+        _run_async(_run())
+
+    def test_ready_profile_with_existing_job_is_not_demoted(self, session_factory):
+        async def _run():
+            async with session_factory() as session:
+                await _make_doc_and_chunks(session, count=1)
+                profile = await _seed_profile(session, status="ready")
+                chunk = (await session.execute(select(DocumentChunk).order_by(DocumentChunk.id))).scalars().first()
+                first = await enqueue_embedding_jobs_for_chunk(session, chunk=chunk)
+                assert first == 1
+                await _commit(session)
+                await session.refresh(profile)
+                assert profile.status == "building"
+                profile.status = "ready"
+                profile.build_finished_at = None
+                session.add(profile)
+                await _commit(session)
+                second = await enqueue_embedding_jobs_for_chunk(session, chunk=chunk)
+                assert second == 0
+                await session.refresh(profile)
+                assert profile.status == "ready"
 
 
 # --- get_profile_summaries ------------------------------------------------

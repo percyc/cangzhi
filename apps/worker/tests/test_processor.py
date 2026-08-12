@@ -6,16 +6,26 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
+import apps.api.models  # noqa: F401 - register all mapped tables
 from apps.api.core.db import Base
+from apps.api.embeddings import compute_config_fingerprint
+from apps.api.embeddings.build_service import (
+    EMBEDDING_STAGE,
+    _idempotency_key,
+)
+from apps.api.embeddings.canary import CANARY_VERSION
 from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.models.blobs import Blob
+from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
+from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.taxonomy import Category, DocumentCategory, DocumentSummary
 from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.api.models.workspaces import Workspace
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
+    _enqueue_embedding_jobs_for_new_chunks,
     _ensure_word_pdf_preview,
     _is_terminal_parse_failure,
     _load_content_for_preview,
@@ -429,3 +439,414 @@ class TestJobProcessing:
         session.refresh(version)
         assert version.processing_status == "ready"
         assert version.meta["ai_status"] == "not_configured"
+
+
+# --- _enqueue_embedding_jobs_for_new_chunks -----------------------------
+
+
+def _make_embedding_profile(
+    session,
+    *,
+    status: str = "active",
+    base_url: str = "https://embed.example.com/v1",
+) -> EmbeddingProfile:
+    fingerprint = compute_config_fingerprint(
+        provider="openai",
+        base_url=base_url,
+        model="m",
+        dim=4,
+        has_api_key=False,
+        key_fingerprint=None,
+        canary_version=CANARY_VERSION,
+    )
+    profile = EmbeddingProfile(
+        provider="openai",
+        base_url=base_url,
+        model="m",
+        dim=4,
+        has_api_key=False,
+        key_fingerprint=None,
+        config_fingerprint=fingerprint,
+        status=status,
+        total_chunks=0,
+        completed_chunks=0,
+        failed_chunks=0,
+    )
+    session.add(profile)
+    session.flush()
+    return profile
+
+
+def _make_child_chunks(
+    session,
+    *,
+    version: DocumentVersion,
+    count: int,
+    content_hash_prefix: str = "h",
+) -> list[DocumentChunk]:
+    document_id = version.document_id
+    chunks: list[DocumentChunk] = []
+    for index in range(count):
+        chunk = DocumentChunk(
+            document_id=document_id,
+            document_version_id=version.id,
+            external_id=f"chunk-{index}",
+            role="child",
+            chunk_type="paragraph",
+            order_index=index,
+            content=f"chunk {index}",
+            search_text=f"chunk {index}",
+            content_hash=f"{content_hash_prefix}-{index}",
+            char_count=10,
+            token_estimate=2,
+            is_current=True,
+        )
+        session.add(chunk)
+        chunks.append(chunk)
+    session.flush()
+    return chunks
+
+
+class TestEnqueueEmbeddingJobsForNewChunks:
+    def test_no_profile_is_a_noop(self, session):
+        document = Document(title="空", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="doc-hash",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        _make_child_chunks(session, version=version, count=3)
+        session.commit()
+
+        _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+        session.commit()
+
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.stage == EMBEDDING_STAGE
+                )
+            ).all()
+        )
+        assert jobs == []
+
+    def test_active_profile_enqueues_for_every_current_child(self, session):
+        document = Document(title="active", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="doc-hash",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        _make_child_chunks(session, version=version, count=3)
+        profile = _make_embedding_profile(session, status="active")
+        session.commit()
+
+        _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+        session.commit()
+
+        session.refresh(profile)
+        assert profile.status == "active"
+        assert profile.build_finished_at is None
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.embedding_profile_id == profile.id,
+                    ProcessingJob.stage == EMBEDDING_STAGE,
+                )
+            ).all()
+        )
+        assert len(jobs) == 3
+        for job in jobs:
+            assert job.status == "created"
+            assert (
+                job.idempotency_key
+                == _idempotency_key(
+                    profile.id, job.embedding_chunk_id, profile.config_fingerprint
+                )
+            )
+
+    def test_ready_profile_is_demoted_when_new_work_arrives(self, session):
+        """The chunking hook must now treat ``ready`` profiles
+        like ``active``/``building``: a newly materialised child
+        chunk needs a vector, the profile is demoted to
+        ``building`` and its counters are recomputed."""
+
+        document = Document(title="ready", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="doc-hash",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        chunks = _make_child_chunks(session, version=version, count=2)
+        profile = _make_embedding_profile(session, status="ready")
+        # The first chunk is already covered: stored vector
+        # matches the live content hash and a completed job
+        # already exists so the helper does not re-enqueue it.
+        session.add(
+            ChunkEmbedding(
+                profile_id=profile.id,
+                chunk_id=chunks[0].id,
+                content_hash=chunks[0].content_hash,
+                vector=[0.1, 0.2, 0.3, 0.4],
+            )
+        )
+        existing_key = _idempotency_key(
+            profile.id, chunks[0].id, profile.config_fingerprint
+        )
+        session.add(
+            ProcessingJob(
+                document_id=document.id,
+                document_version_id=version.id,
+                stage=EMBEDDING_STAGE,
+                status="completed",
+                idempotency_key=existing_key,
+                config_version=profile.config_fingerprint,
+                embedding_profile_id=profile.id,
+                embedding_chunk_id=chunks[0].id,
+            )
+        )
+        profile.total_chunks = 2
+        profile.completed_chunks = 1
+        profile.failed_chunks = 0
+        profile.build_started_at = None
+        profile.build_finished_at = datetime.datetime(
+            2026, 1, 1, tzinfo=datetime.timezone.utc
+        )
+        session.add(profile)
+        session.commit()
+
+        _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+        session.commit()
+        session.refresh(profile)
+
+        assert profile.status == "building"
+        assert profile.build_finished_at is None
+        # The new chunk got a fresh job; the chunk already
+        # covered by a stored embedding + completed job is
+        # left alone.
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.embedding_profile_id == profile.id,
+                    ProcessingJob.stage == EMBEDDING_STAGE,
+                )
+            ).all()
+        )
+        assert len(jobs) == 2
+        new_chunk_id = chunks[1].id
+        enqueued_for_new = [
+            job
+            for job in jobs
+            if job.embedding_chunk_id == new_chunk_id
+        ]
+        assert len(enqueued_for_new) == 1
+        assert enqueued_for_new[0].status == "created"
+        # Counters reflect the live corpus: only the chunks the
+        # profile has any job for, with the already-embedded
+        # one counted as completed.
+        assert profile.total_chunks == 2
+        assert profile.completed_chunks == 1
+
+    def test_ready_profile_without_real_work_keeps_status(self, session):
+        """A ``ready`` profile whose existing jobs already cover
+        the new chunks must stay in ``ready``: the helper must
+        not touch the profile state when nothing was enqueued."""
+
+        document = Document(title="ready-idle", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="doc-hash",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        chunks = _make_child_chunks(session, version=version, count=2)
+        profile = _make_embedding_profile(session, status="ready")
+        # Pre-populate a job for every chunk so the helper
+        # cannot create a duplicate and never flips the profile.
+        for chunk in chunks:
+            existing_key = _idempotency_key(
+                profile.id, chunk.id, profile.config_fingerprint
+            )
+            session.add(
+                ProcessingJob(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    stage=EMBEDDING_STAGE,
+                    status="created",
+                    idempotency_key=existing_key,
+                    config_version=profile.config_fingerprint,
+                    embedding_profile_id=profile.id,
+                    embedding_chunk_id=chunk.id,
+                )
+            )
+        session.commit()
+
+        _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+        session.commit()
+        session.refresh(profile)
+        assert profile.status == "ready"
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.embedding_profile_id == profile.id,
+                    ProcessingJob.stage == EMBEDDING_STAGE,
+                )
+            ).all()
+        )
+        assert len(jobs) == 2
+        assert {job.embedding_chunk_id for job in jobs} == {
+            chunks[0].id,
+            chunks[1].id,
+        }
+
+    def test_large_table_sampled_strategy_only_enqueues_sample(self, session):
+        """When the version marks a large structured table, the
+        helper enqueues jobs for the sampled slice and stamps
+        the same strategy on ``version.meta`` so the API side
+        :func:`_current_child_chunks` reads it back.  The number
+        of jobs must match the sampled count, not the full
+        child-chunk count."""
+
+        document = Document(
+            title="big table", source_type=DocumentSourceType.note
+        )
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="doc-hash",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        # 1_500 children, version says "we are a sampled table
+        # with 10_000 structured rows" → triggers sampling.
+        chunks = _make_child_chunks(
+            session, version=version, count=1_500, content_hash_prefix="h"
+        )
+        version.meta = {
+            "structured_table_row_count": 10_000,
+        }
+        session.add(version)
+        profile = _make_embedding_profile(session, status="active")
+        session.commit()
+
+        _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+        session.commit()
+
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.embedding_profile_id == profile.id,
+                    ProcessingJob.stage == EMBEDDING_STAGE,
+                )
+            ).all()
+        )
+        # The helper samples 256 chunks out of 1_500.
+        assert len(jobs) == 256
+        covered_chunk_ids = {job.embedding_chunk_id for job in jobs}
+        assert covered_chunk_ids.issubset({chunk.id for chunk in chunks})
+        # The strategy block is stamped on the version so the
+        # API path's :func:`_current_child_chunks` reuses the
+        # same sampled slice.
+        session.refresh(version)
+        strategy = (version.meta or {}).get("embedding_strategy") or {}
+        assert strategy.get("mode") == "sampled"
+        assert strategy.get("total_child_chunks") == 1_500
+        assert strategy.get("selected_chunks") == 256
+        assert strategy.get("structured_table_rows") == 10_000
+
+    def test_small_corpus_uses_full_strategy(self, session):
+        """The opposite of the sampled path: a small version
+        does not cross the threshold, every child chunk becomes
+        a job and the strategy is stamped as ``full``."""
+
+        document = Document(title="small", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="doc-hash",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        _make_child_chunks(session, version=version, count=5)
+        profile = _make_embedding_profile(session, status="active")
+        session.commit()
+
+        _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+        session.commit()
+
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.embedding_profile_id == profile.id,
+                    ProcessingJob.stage == EMBEDDING_STAGE,
+                )
+            ).all()
+        )
+        assert len(jobs) == 5
+        session.refresh(version)
+        strategy = (version.meta or {}).get("embedding_strategy") or {}
+        assert strategy.get("mode") == "full"
+        assert strategy.get("selected_chunks") == 5
+        assert strategy.get("total_child_chunks") == 5
+
+    def test_idempotency_key_matches_api_helper(self, session):
+        """The worker's auto-enqueue must use the exact same
+        :func:`_idempotency_key` the API path produces so an
+        operator-issued rebuild and a chunking-time enqueue
+        never duplicate the same job."""
+
+        document = Document(title="keys", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="doc-hash",
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        chunks = _make_child_chunks(session, version=version, count=2)
+        profile = _make_embedding_profile(session, status="active")
+        session.commit()
+
+        _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+        session.commit()
+
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob).where(
+                    ProcessingJob.embedding_profile_id == profile.id,
+                    ProcessingJob.stage == EMBEDDING_STAGE,
+                )
+            ).all()
+        )
+        assert {job.idempotency_key for job in jobs} == {
+            _idempotency_key(profile.id, chunk.id, profile.config_fingerprint)
+            for chunk in chunks
+        }
