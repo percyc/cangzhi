@@ -403,10 +403,11 @@ export async function importDatabaseTable(
   id: number,
   schema_name: string,
   table: string,
+  signal?: AbortSignal,
 ): Promise<DatabaseImportResult> {
   return apiRequest<DatabaseImportResult>(
     `${DB_BASE}/${id}/tables/import`,
-    { method: 'POST', body: JSON.stringify({ schema_name, table }) },
+    { method: 'POST', body: JSON.stringify({ schema_name, table }), signal },
     '导入快照失败',
   );
 }

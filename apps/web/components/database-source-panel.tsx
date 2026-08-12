@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   DatabaseCatalogTable,
@@ -87,6 +87,23 @@ type RemoveDialog = {
   documentAction: 'keep' | 'trash';
 };
 
+type BulkTable = { schema: string; table: string; key: string };
+type BulkFailure = BulkTable & { error: string };
+type BulkConfirm = {
+  source: DatabaseSource;
+  schemaCount: number;
+  tables: BulkTable[];
+};
+type BulkRun = {
+  running: boolean;
+  cancelled: boolean;
+  total: number;
+  done: number;
+  success: number;
+  current: string | null;
+  failed: BulkFailure[];
+};
+
 export function DatabaseSourcePanel() {
   const [sources, setSources] = useState<DatabaseSource[]>([]);
   const [creating, setCreating] = useState(false);
@@ -98,6 +115,9 @@ export function DatabaseSourcePanel() {
   const [error, setError] = useState('');
   const [removeDialog, setRemoveDialog] = useState<RemoveDialog | null>(null);
   const [browse, setBrowse] = useState<Record<number, BrowseState>>({});
+  const [bulkConfirm, setBulkConfirm] = useState<BulkConfirm | null>(null);
+  const [bulkRuns, setBulkRuns] = useState<Record<number, BulkRun>>({});
+  const bulkAbortRef = useRef<Record<number, AbortController>>({});
 
   const load = useCallback(async () => {
     setSources(await fetchDatabaseSources());
@@ -108,6 +128,13 @@ export function DatabaseSourcePanel() {
       setError(caught instanceof Error ? caught.message : '数据库来源读取失败'),
     );
   }, [load]);
+
+  useEffect(
+    () => () => {
+      Object.values(bulkAbortRef.current).forEach((controller) => controller.abort());
+    },
+    [],
+  );
 
   const startCreate = () => {
     setCreateForm(emptyForm());
@@ -352,6 +379,134 @@ export function DatabaseSourcePanel() {
     }
   };
 
+  const prepareBulkImport = async (source: DatabaseSource) => {
+    setBusy(`${source.id}:bulk:prepare`);
+    setError('');
+    setMessage('');
+    try {
+      const schemas = await fetchDatabaseSchemas(source.id);
+      const seen = new Set<string>();
+      const tables: BulkTable[] = [];
+      for (const schema of schemas) {
+        const catalog = await fetchDatabaseCatalog(source.id, schema);
+        for (const item of catalog) {
+          const key = `${item.schema_name}.${item.table_name}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          tables.push({ schema: item.schema_name, table: item.table_name, key });
+        }
+      }
+      setBulkConfirm({ source, schemaCount: schemas.length, tables });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '读取数据库目录失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const runBulkImport = async (source: DatabaseSource, tables: BulkTable[]) => {
+    const controller = new AbortController();
+    bulkAbortRef.current[source.id]?.abort();
+    bulkAbortRef.current[source.id] = controller;
+    setBusy(`${source.id}:bulk:run`);
+    setError('');
+    setMessage('');
+    setBulkRuns((current) => ({
+      ...current,
+      [source.id]: {
+        running: true,
+        cancelled: false,
+        total: tables.length,
+        done: 0,
+        success: 0,
+        current: null,
+        failed: [],
+      },
+    }));
+
+    let done = 0;
+    let success = 0;
+    const failures: BulkFailure[] = [];
+    for (const item of tables) {
+      if (controller.signal.aborted) break;
+      setBulkRuns((current) => ({
+        ...current,
+        [source.id]: {
+          ...current[source.id],
+          current: item.key,
+          done,
+          success,
+          failed: [...failures],
+        },
+      }));
+      try {
+        await importDatabaseTable(source.id, item.schema, item.table, controller.signal);
+        success += 1;
+      } catch (caught) {
+        if (controller.signal.aborted) break;
+        failures.push({
+          ...item,
+          error: caught instanceof Error ? caught.message : '导入失败',
+        });
+      }
+      done += 1;
+      setBulkRuns((current) => ({
+        ...current,
+        [source.id]: {
+          ...current[source.id],
+          current: null,
+          done,
+          success,
+          failed: [...failures],
+        },
+      }));
+    }
+
+    const cancelled = controller.signal.aborted;
+    delete bulkAbortRef.current[source.id];
+    setBulkRuns((current) => ({
+      ...current,
+      [source.id]: {
+        ...current[source.id],
+        running: false,
+        cancelled,
+        current: null,
+        done,
+        success,
+        failed: failures,
+      },
+    }));
+    setBusy('');
+    await load();
+    setMessage(
+      cancelled
+        ? `批量导入已停止：完成 ${done}/${tables.length}，成功 ${success}，失败 ${failures.length}。`
+        : failures.length
+          ? `批量导入完成：成功 ${success}，失败 ${failures.length}。`
+          : `全部 ${success} 张表/视图已导入。`,
+    );
+  };
+
+  const startBulkImport = async () => {
+    if (!bulkConfirm) return;
+    const { source, tables } = bulkConfirm;
+    setBulkConfirm(null);
+    await runBulkImport(source, tables);
+  };
+
+  const retryBulkFailures = async (source: DatabaseSource) => {
+    const failures = bulkRuns[source.id]?.failed ?? [];
+    if (!failures.length) return;
+    await runBulkImport(
+      source,
+      failures.map(({ schema, table, key }) => ({ schema, table, key })),
+    );
+  };
+
+  const stopBulkImport = (sourceId: number) => {
+    bulkAbortRef.current[sourceId]?.abort();
+  };
+
   return (
     <div className="mt-6">
       <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-4 text-sm leading-6 text-blue-900/80">
@@ -359,8 +514,8 @@ export function DatabaseSourcePanel() {
           数据库连接器为<strong>只读快照</strong>，绝不修改远程数据库。
         </p>
         <p className="mt-1">
-          建立连接后，可选择单张表导入为本地快照，导入后在数据集、API 与 MCP 中即可查询。首版单表上限{' '}
-          <strong>10 万行</strong>；重复导入同一张表会更新已有资料，不会重复新增。
+          建立连接后，可逐表导入，也可一键将当前数据库的全部表和视图导入为本地快照；导入后可在数据集、API 与 MCP
+          中查询。首版单表上限 <strong>10 万行</strong>；重复导入会更新已有资料，不会重复新增。
         </p>
       </div>
 
@@ -487,6 +642,18 @@ export function DatabaseSourcePanel() {
                   </button>
                   <button
                     type="button"
+                    disabled={Boolean(busy) || !source.is_enabled}
+                    onClick={() => void prepareBulkImport(source)}
+                    className="rounded-xl bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+                  >
+                    {busy === `${source.id}:bulk:prepare`
+                      ? '正在读取全部表…'
+                      : busy === `${source.id}:bulk:run`
+                        ? '正在批量导入…'
+                        : '一键导入全部'}
+                  </button>
+                  <button
+                    type="button"
                     disabled={Boolean(busy)}
                     onClick={() => startEditing(source)}
                     className="rounded px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-40"
@@ -527,6 +694,13 @@ export function DatabaseSourcePanel() {
                         },
                       }))
                     }
+                  />
+                )}
+                {bulkRuns[source.id] && (
+                  <BulkImportProgress
+                    run={bulkRuns[source.id]}
+                    onStop={() => stopBulkImport(source.id)}
+                    onRetry={() => void retryBulkFailures(source)}
                   />
                 )}
               </>
@@ -601,7 +775,129 @@ export function DatabaseSourcePanel() {
           </div>
         </div>
       )}
+
+      {bulkConfirm && (
+        <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/40 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bulk-import-title"
+            className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
+          >
+            <h2 id="bulk-import-title" className="text-lg font-semibold text-slate-900">
+              导入“{bulkConfirm.source.name}”的全部表？
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-slate-600">
+              已发现 {bulkConfirm.schemaCount} 个 Schema、
+              <strong>{bulkConfirm.tables.length} 张表/视图</strong>。藏知会逐张串行导入，
+              单表失败不会中断后续任务。
+            </p>
+            {!bulkConfirm.tables.length && (
+              <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
+                当前数据库没有可导入的表或视图。
+              </p>
+            )}
+            <ul className="mt-4 space-y-2 text-xs leading-5 text-slate-600">
+              <li className="rounded-xl bg-amber-50 p-3 text-amber-800">
+                单张表最多 10 万行；超出上限的表会失败，建议先建立只读视图。
+              </li>
+              <li className="rounded-xl bg-slate-50 p-3">
+                重复导入会更新已有知识及快照版本，不会重复新增资料。
+              </li>
+              <li className="rounded-xl bg-slate-50 p-3">
+                当前批次依赖此页面继续发起请求；关闭或刷新页面会停止尚未发出的表。
+              </li>
+            </ul>
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setBulkConfirm(null)}
+                className="rounded-xl border border-slate-300 px-4 py-2 text-sm"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={!bulkConfirm.tables.length}
+                onClick={() => void startBulkImport()}
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
+              >
+                确认导入 {bulkConfirm.tables.length} 张
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function BulkImportProgress({
+  run,
+  onStop,
+  onRetry,
+}: {
+  run: BulkRun;
+  onStop: () => void;
+  onRetry: () => void;
+}) {
+  const percent = run.total ? Math.round((run.done / run.total) * 100) : 0;
+  return (
+    <section className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/50 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900">
+            {run.running ? '正在批量导入' : run.cancelled ? '批量导入已停止' : '批量导入结果'}
+          </h3>
+          <p className="mt-1 text-xs text-slate-600">
+            已完成 {run.done}/{run.total} · 成功 {run.success} · 失败 {run.failed.length}
+          </p>
+          {run.current && (
+            <p className="mt-1 break-all text-xs text-indigo-700">当前：{run.current}</p>
+          )}
+        </div>
+        {run.running ? (
+          <button
+            type="button"
+            onClick={onStop}
+            className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs text-red-700"
+          >
+            停止后续导入
+          </button>
+        ) : (
+          run.failed.length > 0 && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white"
+            >
+              重试失败项（{run.failed.length}）
+            </button>
+          )
+        )}
+      </div>
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white">
+        <div
+          className="h-full rounded-full bg-indigo-500 transition-[width]"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      {run.failed.length > 0 && (
+        <details className="mt-3 rounded-lg border border-red-100 bg-white p-3">
+          <summary className="cursor-pointer text-xs font-medium text-red-700">
+            查看 {run.failed.length} 个失败项
+          </summary>
+          <ul className="mt-2 max-h-56 space-y-2 overflow-y-auto">
+            {run.failed.map((failure) => (
+              <li key={failure.key} className="text-xs leading-5">
+                <p className="break-all font-medium text-slate-800">{failure.key}</p>
+                <p className="break-words text-red-600">{failure.error}</p>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </section>
   );
 }
 
