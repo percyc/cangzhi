@@ -111,6 +111,13 @@ class AgentDecision(BaseModel):
     query_plan: dict[str, Any] = Field(default_factory=dict)
     summary: str = Field(default="", max_length=120)
 
+    @field_validator("query_plan", mode="before")
+    @classmethod
+    def normalize_optional_query_plan(cls, value: Any) -> Any:
+        # OpenAI-compatible reasoning models commonly serialize an unused
+        # optional object as null. It is equivalent to omitting the field.
+        return {} if value is None else value
+
     @field_validator("query")
     @classmethod
     def normalize_query(cls, value: str) -> str:

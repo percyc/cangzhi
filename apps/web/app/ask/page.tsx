@@ -513,6 +513,10 @@ function AskClient() {
     }
   };
 
+  const cancelAsk = () => {
+    requestAbortRef.current?.abort();
+  };
+
   const selectedScope = scopes.find((item) => item.slug === scopeSlug);
   const refinementCount =
     categoryIds.length +
@@ -939,13 +943,23 @@ function AskClient() {
               maxLength={500}
               className="max-h-40 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400"
             />
-            <button
-              type="submit"
-              disabled={!question.trim() || loading || providerReady === false}
-              className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-            >
-              发送
-            </button>
+            {loading ? (
+              <button
+                type="button"
+                onClick={cancelAsk}
+                className="rounded-xl bg-red-50 px-4 py-3 text-sm font-medium text-red-700 hover:bg-red-100"
+              >
+                停止
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!question.trim() || providerReady === false}
+                className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                发送
+              </button>
+            )}
           </form>
           <p className="mt-2 text-center text-[10px] leading-4 text-slate-400 sm:text-[11px]">
             {mode === 'deep'

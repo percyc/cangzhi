@@ -35,6 +35,7 @@ from apps.api.services.chunker import build_chunk_specs, chunk_content_hash
 from apps.api.services.deep_analysis import (
     MAX_TOOL_CALLS_ABSOLUTE,
     MAX_TOOL_CALLS_DEFAULT,
+    AgentDecision,
     DeepAnalysisService,
     _AdaptiveToolBudget,
     _record_observation_progress,
@@ -146,6 +147,13 @@ def test_adaptive_budget_expands_only_on_new_citable_evidence():
         earned_evidence=True,
     )
     assert evidence_growing.tool_limit == MAX_TOOL_CALLS_ABSOLUTE
+
+
+def test_agent_decision_accepts_null_unused_query_plan():
+    decision = AgentDecision.model_validate(
+        {"action": "search", "query": "订单状态", "query_plan": None}
+    )
+    assert decision.query_plan == {}
 
 
 def test_adaptive_budget_stops_after_two_calls_without_new_information():

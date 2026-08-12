@@ -378,6 +378,7 @@ async def knowledge_ask_stream(
 
     async def events() -> AsyncIterator[str]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        stream_started = asyncio.get_running_loop().time()
 
         async def on_progress(event: dict[str, Any]) -> None:
             await queue.put({"type": "progress", **event})
@@ -450,7 +451,14 @@ async def knowledge_ask_stream(
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=10)
                 except TimeoutError:
-                    yield _ndjson({"type": "heartbeat"})
+                    elapsed = int(asyncio.get_running_loop().time() - stream_started)
+                    yield _ndjson(
+                        {
+                            "type": "progress",
+                            "phase": "waiting",
+                            "message": f"正在等待模型或数据响应（已 {elapsed} 秒）",
+                        }
+                    )
                     continue
                 yield _ndjson(event)
                 if event.get("type") in {"result", "error"}:
