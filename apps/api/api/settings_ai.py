@@ -272,6 +272,12 @@ async def _enqueue_unclassified_documents(
     ).scalars().all()
     queued = 0
     for document in documents:
+        # Database tables are structured datasets. Their deterministic
+        # catalog chunks provide discovery metadata without one costly LLM
+        # call per table; optional semantic enrichment belongs to a separate
+        # schema-level workflow.
+        if (document.meta or {}).get("external_source") == "database":
+            continue
         version_id = document.current_version_id
         if version_id is None:
             continue

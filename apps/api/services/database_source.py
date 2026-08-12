@@ -31,13 +31,15 @@ from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import URL, Connection, Engine, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from ..core.config import settings as core_settings
+from ..embeddings.build_service import enqueue_embedding_jobs_for_chunk
+from ..models.chunks import DocumentChunk
 from ..models.database_source import DatabaseSnapshot, DatabaseSource
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
@@ -58,6 +60,8 @@ MAX_CELL_SIZE = 4_096
 MAX_CATALOG_TABLES = 500
 MAX_SCHEMAS = 200
 MAX_COLUMNS = 1_000
+DATABASE_CATALOG_VERSION = "database-catalog:v1"
+DATABASE_CATALOG_MAX_CHARS = 6_000
 
 BIT_DATA_TYPES = {"bit"}
 
@@ -784,6 +788,221 @@ async def purge_empty_database_snapshots(
     )
 
 
+def _database_catalog_content(
+    source: DatabaseSource,
+    dataset: KnowledgeDataset,
+    fields: Sequence[DatasetField],
+) -> str:
+    profile = dataset.profile or {}
+    schema_name = str(profile.get("schema_name") or "")
+    table_name = str(profile.get("table_name") or dataset.name)
+    field_labels = [
+        f"{field.name}（{field.inferred_type or 'unknown'}）" for field in fields
+    ]
+    prefix = "、".join(field_labels)
+    omitted = 0
+    if len(prefix) > DATABASE_CATALOG_MAX_CHARS:
+        kept: list[str] = []
+        used = 0
+        for label in field_labels:
+            addition = len(label) + (1 if kept else 0)
+            if used + addition > DATABASE_CATALOG_MAX_CHARS:
+                break
+            kept.append(label)
+            used += addition
+        omitted = len(field_labels) - len(kept)
+        prefix = "、".join(kept)
+    field_text = prefix or "未识别"
+    if omitted:
+        field_text += f"；另有 {omitted} 个字段未展开"
+    qualified_name = ".".join(
+        item for item in (source.database_name, schema_name, table_name) if item
+    )
+    return "\n".join(
+        [
+            f"数据库数据集：{qualified_name}",
+            f"连接器：{source.name}",
+            f"数据库类型：{source.engine}",
+            f"规模：{dataset.row_count} 行，{dataset.column_count} 个字段",
+            f"字段：{field_text}",
+            (
+                "用途：这是可计算的结构化数据。语义检索用于发现本数据集；"
+                "精确筛选、计数、求和、分组和排序应由数据集查询执行器完成。"
+            ),
+        ]
+    )
+
+
+async def ensure_database_catalog_chunks(
+    db: AsyncSession,
+    source: DatabaseSource,
+    document: Document,
+    version: DocumentVersion,
+    dataset: KnowledgeDataset,
+) -> tuple[DocumentChunk, int]:
+    """Create one Excel-style catalog child chunk for a database table."""
+
+    fields = list(
+        (
+            await db.scalars(
+                select(DatasetField)
+                .where(DatasetField.dataset_id == dataset.id)
+                .order_by(DatasetField.position)
+            )
+        ).all()
+    )
+    content = _database_catalog_content(source, dataset, fields)
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    external_seed = f"dbcat:{dataset.id}:{content_hash[:16]}"
+    child_external_id = f"{external_seed}:c"
+    existing = await db.scalar(
+        select(DocumentChunk).where(
+            DocumentChunk.document_version_id == version.id,
+            DocumentChunk.external_id == child_external_id,
+            DocumentChunk.role == "child",
+            DocumentChunk.is_current.is_(True),
+        )
+    )
+    if existing is not None and existing.content_hash == content_hash:
+        enqueued = await enqueue_embedding_jobs_for_chunk(db, chunk=existing)
+        return existing, enqueued
+
+    await db.execute(
+        update(DocumentChunk)
+        .where(
+            DocumentChunk.document_id == document.id,
+            DocumentChunk.is_current.is_(True),
+        )
+        .values(is_current=False)
+    )
+    schema_name = str((dataset.profile or {}).get("schema_name") or "")
+    table_name = str((dataset.profile or {}).get("table_name") or dataset.name)
+    heading_path = [item for item in (source.name, schema_name, table_name) if item]
+    common_extra = {
+        "dataset_catalog": True,
+        "catalog_source": "database",
+        "database_source_id": source.id,
+        "schema_name": schema_name,
+        "table_name": table_name,
+        "dataset_id": dataset.id,
+        "column_names": [field.name for field in fields],
+        "catalog_row_count": dataset.row_count,
+        "catalog_version": DATABASE_CATALOG_VERSION,
+    }
+    search_text = f"{document.title}\n{content}".strip()
+    token_estimate = max(1, len(content) // 4)
+    parent = DocumentChunk(
+        document_id=document.id,
+        document_version_id=version.id,
+        external_id=f"{external_seed}:p",
+        role="parent",
+        chunk_type="dataset",
+        order_index=0,
+        content=content,
+        search_text=search_text,
+        content_hash=content_hash,
+        heading_path=heading_path,
+        source_start=1,
+        source_end=dataset.row_count,
+        char_count=len(content),
+        token_estimate=token_estimate,
+        language="zh",
+        extra=common_extra,
+        is_current=True,
+    )
+    db.add(parent)
+    await db.flush()
+    child = DocumentChunk(
+        document_id=document.id,
+        document_version_id=version.id,
+        parent_id=parent.id,
+        external_id=child_external_id,
+        role="child",
+        chunk_type="dataset_catalog",
+        order_index=0,
+        content=content,
+        search_text=search_text,
+        content_hash=content_hash,
+        heading_path=heading_path,
+        source_start=1,
+        source_end=dataset.row_count,
+        char_count=len(content),
+        token_estimate=token_estimate,
+        language="zh",
+        extra=common_extra,
+        is_current=True,
+    )
+    db.add(child)
+    await db.flush()
+    meta = dict(version.meta or {})
+    meta.update(
+        {
+            "ai_status": "deterministic",
+            "catalog_version": DATABASE_CATALOG_VERSION,
+            "chunk_count": 1,
+            "parent_count": 1,
+            "embedding_strategy": {
+                "mode": "full",
+                "total_child_chunks": 1,
+                "selected_chunks": 1,
+                "structured_table_rows": dataset.row_count,
+            },
+        }
+    )
+    version.meta = meta
+    db.add(version)
+    enqueued = await enqueue_embedding_jobs_for_chunk(db, chunk=child)
+    return child, enqueued
+
+
+async def backfill_database_catalog_chunks(
+    db: AsyncSession,
+    source: DatabaseSource,
+) -> dict[str, int]:
+    snapshots = list(
+        (
+            await db.scalars(
+                select(DatabaseSnapshot)
+                .where(DatabaseSnapshot.source_id == source.id)
+                .order_by(DatabaseSnapshot.id)
+            )
+        ).all()
+    )
+    created = 0
+    enqueued = 0
+    skipped = 0
+    for snapshot in snapshots:
+        document = await db.get(Document, snapshot.document_id)
+        dataset = await db.get(KnowledgeDataset, snapshot.dataset_id)
+        version = (
+            await db.get(DocumentVersion, document.current_version_id)
+            if document is not None and document.current_version_id is not None
+            else None
+        )
+        if document is None or version is None or dataset is None:
+            skipped += 1
+            continue
+        before = await db.scalar(
+            select(DocumentChunk.id).where(
+                DocumentChunk.document_version_id == version.id,
+                DocumentChunk.role == "child",
+                DocumentChunk.chunk_type == "dataset_catalog",
+                DocumentChunk.is_current.is_(True),
+            )
+        )
+        _, queued = await ensure_database_catalog_chunks(
+            db,
+            source,
+            document,
+            version,
+            dataset,
+        )
+        created += int(before is None)
+        enqueued += queued
+    await db.commit()
+    return {"snapshots": len(snapshots), "created": created, "enqueued": enqueued, "skipped": skipped}
+
+
 async def import_database_table(
     db: AsyncSession,
     source: DatabaseSource,
@@ -1085,6 +1304,7 @@ async def import_database_table(
     db.add(source)
 
     await db.flush()
+    await ensure_database_catalog_chunks(db, source, document, version, dataset)
 
     # Build the columnar artifact in a sync sub-greenthread so the Parquet
     # builder participates in the active transaction. ``run_sync`` keeps the
@@ -1190,7 +1410,9 @@ __all__ = [
     "DatabaseSnapshotCleanupResult",
     "DatabaseSourceError",
     "DatabaseTable",
+    "backfill_database_catalog_chunks",
     "delete_database_source_documents",
+    "ensure_database_catalog_chunks",
     "fetch_database_catalog",
     "fetch_database_table",
     "import_database_table",

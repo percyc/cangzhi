@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from apps.api.core.db import get_db
 from apps.api.main import app
+from apps.api.models.chunks import DocumentChunk
 from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
 from apps.api.models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
@@ -546,6 +547,22 @@ def test_first_import_creates_document_dataset_and_artifact(
             assert snapshot.document_id == document_id
             assert snapshot.dataset_id == dataset_id
             assert snapshot.row_count == 3
+            chunks = list(
+                (
+                    await session.scalars(
+                        select(DocumentChunk)
+                        .where(DocumentChunk.document_version_id == version.id)
+                        .order_by(DocumentChunk.role.desc())
+                    )
+                ).all()
+            )
+            assert len(chunks) == 2
+            child = next(chunk for chunk in chunks if chunk.role == "child")
+            assert child.chunk_type == "dataset_catalog"
+            assert "3 行，2 个字段" in child.content
+            assert "id（number）" in child.content
+            assert "alpha" not in child.content
+            assert child.extra["dataset_id"] == dataset_id
         finally:
             clear_workspace_context(session.sync_session)
             await generator.aclose()

@@ -231,12 +231,14 @@ async def load_pipeline_statuses(
 
         understanding = _stage_payload(jobs.get("understanding"))
         ai_status = (version.meta or {}).get("ai_status")
-        if ai_status in {"completed", "not_configured"}:
+        if ai_status in {"completed", "not_configured", "deterministic"}:
             understanding = {
                 "status": "completed" if ai_status == "completed" else "skipped",
                 "message": (
                     "AI 整理已完成"
                     if ai_status == "completed"
+                    else "结构化数据已按目录规则整理"
+                    if ai_status == "deterministic"
                     else "未配置对话模型，已按默认规则整理"
                 ),
                 "last_error": None,
