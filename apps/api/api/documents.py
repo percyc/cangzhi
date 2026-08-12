@@ -1,9 +1,9 @@
 from io import BytesIO
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
@@ -290,14 +290,19 @@ async def build_document_response(
 
 @router.get("", response_model=list[DocumentResponse])
 async def list_documents(
+    response: Response,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     deleted: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
+    condition = Document.is_deleted.is_(deleted)
+    response.headers["X-Total-Count"] = str(
+        await db.scalar(select(func.count(Document.id)).where(condition)) or 0
+    )
     result = await db.execute(
         select(Document)
-        .where(Document.is_deleted.is_(deleted))
+        .where(condition)
         .order_by(Document.updated_at.desc(), Document.id.desc())
         .offset(offset)
         .limit(limit)
@@ -310,19 +315,35 @@ async def list_documents(
 
 @router.get("/overview", response_model=list[DocumentListItemResponse])
 async def list_document_overview(
+    response: Response,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     deleted: bool = Query(False),
     include_processing: bool = Query(False),
+    category_id: int | None = Query(None, ge=1),
     db: AsyncSession = Depends(get_db),
 ):
     """Return collection-card data using a fixed number of database queries."""
 
+    conditions = [Document.is_deleted.is_(deleted)]
+    if category_id is not None:
+        conditions.append(
+            exists(
+                select(DocumentCategory.id).where(
+                    DocumentCategory.document_version_id
+                    == Document.current_version_id,
+                    DocumentCategory.category_id == category_id,
+                )
+            )
+        )
+    response.headers["X-Total-Count"] = str(
+        await db.scalar(select(func.count(Document.id)).where(*conditions)) or 0
+    )
     documents = list(
         (
             await db.scalars(
                 select(Document)
-                .where(Document.is_deleted.is_(deleted))
+                .where(*conditions)
                 .order_by(Document.updated_at.desc(), Document.id.desc())
                 .offset(offset)
                 .limit(limit)

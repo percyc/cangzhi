@@ -25,6 +25,7 @@ from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
 from apps.api.models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.table_rows import StructuredTableRow
+from apps.api.models.taxonomy import DocumentCategory, DocumentTag, Tag
 from apps.api.models.workspaces import DEFAULT_WORKSPACE_SLUG, Workspace
 from apps.api.security.secrets import (
     decrypt_secret,
@@ -476,6 +477,11 @@ def test_first_import_creates_document_dataset_and_artifact(
         monkeypatch,
         rows=[(1, "alpha"), (2, "beta"), (3, "gamma")],
     )
+    category_response = test_client.post(
+        "/api/categories", json={"slug": "tech", "name": "技术与产品"}
+    )
+    assert category_response.status_code == 201
+    category_id = category_response.json()["id"]
     created = test_client.post("/api/database-sources", json=_create_source_payload())
     assert created.status_code == 201, created.text
     source_id = created.json()["id"]
@@ -487,6 +493,12 @@ def test_first_import_creates_document_dataset_and_artifact(
     assert body["version_number"] == 1
     assert body["row_count"] == 3
     assert body["column_count"] == 2
+    overview = test_client.get(
+        f"/api/documents/overview?limit=1&category_id={category_id}"
+    )
+    assert overview.status_code == 200
+    assert overview.headers["X-Total-Count"] == "1"
+    assert overview.json()[0]["primary_category"]["slug"] == "tech"
 
     document_id = body["document_id"]
     dataset_id = body["dataset_id"]
@@ -563,6 +575,23 @@ def test_first_import_creates_document_dataset_and_artifact(
             assert "id（number）" in child.content
             assert "alpha" not in child.content
             assert child.extra["dataset_id"] == dataset_id
+            category_link = await session.scalar(
+                select(DocumentCategory).where(
+                    DocumentCategory.document_version_id == version.id
+                )
+            )
+            assert category_link is not None
+            assert category_link.source == "database"
+            tag_names = set(
+                (
+                    await session.scalars(
+                        select(Tag.name)
+                        .join(DocumentTag, DocumentTag.tag_id == Tag.id)
+                        .where(DocumentTag.document_version_id == version.id)
+                    )
+                ).all()
+            )
+            assert tag_names == {"数据库", "数据库表", "postgresql"}
         finally:
             clear_workspace_context(session.sync_session)
             await generator.aclose()
@@ -585,6 +614,15 @@ def test_reimport_creates_new_version_and_replaces_dataset(
     first = _import_via_api(test_client, source_id).json()
     first_dataset_id = first["dataset_id"]
     first_document_id = first["document_id"]
+    custom_tag = test_client.post(
+        "/api/tags", json={"slug": "business-data", "name": "业务数据"}
+    )
+    assert custom_tag.status_code == 201
+    updated_tags = test_client.patch(
+        f"/api/documents/{first_document_id}/tags",
+        json={"tag_ids": [custom_tag.json()["id"]]},
+    )
+    assert updated_tags.status_code == 200
     first_path = (
         Path(tmp_path) / "storage" / "datasets" / str(first_dataset_id) / "v1.parquet"
     )
@@ -642,6 +680,16 @@ def test_reimport_creates_new_version_and_replaces_dataset(
                 ).all()
             )
             assert len(snapshots) == 1
+            tag_names = set(
+                (
+                    await session.scalars(
+                        select(Tag.name)
+                        .join(DocumentTag, DocumentTag.tag_id == Tag.id)
+                        .where(DocumentTag.document_version_id == current.id)
+                    )
+                ).all()
+            )
+            assert tag_names == {"业务数据", "数据库", "数据库表", "postgresql"}
         finally:
             clear_workspace_context(session.sync_session)
             await generator.aclose()

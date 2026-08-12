@@ -21,6 +21,8 @@ type DocumentTag = {
 };
 type OrganizeOption = { id: number; name: string };
 
+const PAGE_SIZE = 24;
+
 type DocumentVersion = {
   id: number;
   version_number: number;
@@ -90,6 +92,8 @@ const contentKindLabels: Record<string, string> = {
 
 export default function DocumentsListPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [view, setView] = useState<'active' | 'trash'>('active');
   const [manageMode, setManageMode] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
@@ -104,15 +108,29 @@ export default function DocumentsListPage() {
 
   const load = useCallback(() => {
     setLoading(true);
+    const params = new URLSearchParams({
+      limit: String(PAGE_SIZE),
+      offset: String((page - 1) * PAGE_SIZE),
+      deleted: String(view === 'trash'),
+      include_processing: String(view === 'active'),
+    });
+    if (view === 'active' && categoryId !== null)
+      params.set('category_id', String(categoryId));
     return fetch(
-      `/api/documents/overview?limit=200&deleted=${view === 'trash'}&include_processing=${view === 'active'}`,
+      `/api/documents/overview?${params.toString()}`,
     )
       .then(res => {
         if (!res.ok) throw new Error('暂时无法读取资料');
-        return res.json();
+        const resultTotal = Number(res.headers.get('X-Total-Count') || '0');
+        return res.json().then(data => ({ data, resultTotal }));
       })
-      .then(data => {
+      .then(({ data, resultTotal }) => {
+        if (resultTotal > 0 && (page - 1) * PAGE_SIZE >= resultTotal) {
+          setPage(Math.max(1, Math.ceil(resultTotal / PAGE_SIZE)));
+          return;
+        }
         setDocuments(data);
+        setTotal(resultTotal);
         setSelected([]);
         setError('');
         setLoading(false);
@@ -121,7 +139,7 @@ export default function DocumentsListPage() {
         setError(err.message);
         setLoading(false);
       });
-  }, [view]);
+  }, [categoryId, page, view]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
@@ -197,9 +215,9 @@ export default function DocumentsListPage() {
 
   const emptyTrash = async () => {
     if (
-      !documents.length ||
+      !total ||
       !window.confirm(
-        `清空回收站中的 ${documents.length} 条资料？此操作无法恢复，WebDAV 远端文件不会被删除。`,
+        `清空回收站中的 ${total} 条资料？此操作无法恢复，WebDAV 远端文件不会被删除。`,
       )
     ) return;
     setActing(true);
@@ -283,17 +301,8 @@ export default function DocumentsListPage() {
     }
   };
 
-  const categories = Array.from(
-    new Map(
-      documents.flatMap((document) => document.categories).map((item) => [item.id, item]),
-    ).values(),
-  );
-  const visibleDocuments =
-    categoryId === null
-      ? documents
-      : documents.filter((document) =>
-          document.categories.some((category) => category.id === categoryId),
-        );
+  const visibleDocuments = documents;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <main className="mx-auto max-w-7xl px-4 sm:px-6">
@@ -304,14 +313,14 @@ export default function DocumentsListPage() {
           <p className="mt-1 text-sm text-slate-500">让收藏、文档和想法在这里持续沉淀。</p>
         </div>
         <div className="flex items-center gap-2">
-          {view === 'trash' && documents.length > 0 && (
+          {view === 'trash' && total > 0 && (
             <button type="button" disabled={acting} onClick={() => void emptyTrash()} className="rounded-xl px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
               清空回收站
             </button>
           )}
           <div className="flex rounded-xl border border-slate-300 bg-white p-1 text-sm shadow-sm">
-            <button type="button" onClick={() => setView('active')} className={`rounded-lg px-3 py-1.5 ${view === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>全部资料</button>
-            <button type="button" onClick={() => setView('trash')} className={`rounded-lg px-3 py-1.5 ${view === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>回收站</button>
+            <button type="button" onClick={() => { setView('active'); setCategoryId(null); setPage(1); setSelected([]); }} className={`rounded-lg px-3 py-1.5 ${view === 'active' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>全部资料</button>
+            <button type="button" onClick={() => { setView('trash'); setCategoryId(null); setPage(1); setSelected([]); }} className={`rounded-lg px-3 py-1.5 ${view === 'trash' ? 'bg-slate-900 text-white' : 'text-slate-600'}`}>回收站</button>
           </div>
         </div>
       </div>
@@ -331,11 +340,11 @@ export default function DocumentsListPage() {
         </Link>
       </div>}
 
-      {view === 'active' && categories.length > 0 && (
+      {view === 'active' && categoryOptions.length > 0 && (
         <div className="mb-4 flex flex-wrap gap-2">
-          <button type="button" onClick={() => setCategoryId(null)} className={`rounded-full px-3 py-1.5 text-sm ${categoryId === null ? 'bg-slate-900 text-white' : 'border border-slate-300 bg-white text-slate-600'}`}>全部分类</button>
-          {categories.map((category) => (
-            <button key={category.id} type="button" onClick={() => setCategoryId(category.id)} className={`rounded-full px-3 py-1.5 text-sm ${categoryId === category.id ? 'bg-slate-900 text-white' : 'border border-slate-300 bg-white text-slate-600'}`}>{category.name}</button>
+          <button type="button" onClick={() => { setCategoryId(null); setPage(1); setSelected([]); }} className={`rounded-full px-3 py-1.5 text-sm ${categoryId === null ? 'bg-slate-900 text-white' : 'border border-slate-300 bg-white text-slate-600'}`}>全部分类</button>
+          {categoryOptions.map((category) => (
+            <button key={category.id} type="button" onClick={() => { setCategoryId(category.id); setPage(1); setSelected([]); }} className={`rounded-full px-3 py-1.5 text-sm ${categoryId === category.id ? 'bg-slate-900 text-white' : 'border border-slate-300 bg-white text-slate-600'}`}>{category.name}</button>
           ))}
         </div>
       )}
@@ -489,6 +498,31 @@ export default function DocumentsListPage() {
             })}
           </div>
         )
+      )}
+      {!loading && !error && total > 0 && (
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 py-5 text-sm text-slate-600">
+          <span>
+            共 {total} 条 · 第 {page}/{totalPages} 页
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
+            >
+              上一页
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
+            >
+              下一页
+            </button>
+          </div>
+        </div>
       )}
     </main>
   );

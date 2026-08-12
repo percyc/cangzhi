@@ -515,6 +515,23 @@ def test_overview_includes_pipeline_only_when_requested(client):
     assert next(row for row in enriched if row["id"] == document_id)["pipeline"]
 
 
+def test_overview_exposes_total_for_pagination(client):
+    test_client, _ = client
+    for index in range(3):
+        test_client.post(
+            "/api/notes",
+            json={"title": f"分页资料 {index}", "content": f"正文 {index}"},
+        )
+
+    first = test_client.get("/api/documents/overview?limit=2&offset=0")
+    second = test_client.get("/api/documents/overview?limit=2&offset=2")
+    assert first.status_code == 200
+    assert first.headers["X-Total-Count"] == "3"
+    assert len(first.json()) == 2
+    assert second.headers["X-Total-Count"] == "3"
+    assert len(second.json()) == 1
+
+
 def test_vector_repair_endpoint_reports_missing_active_profile(client):
     test_client, _ = client
     created = test_client.post(

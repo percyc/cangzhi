@@ -58,9 +58,12 @@ type RepairResult = {
   reset?: number;
 };
 
+const PAGE_SIZE = 25;
+
 export default function InboxPage() {
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [filter, setFilter] = useState<Filter>('attention');
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [feedback, setFeedback] = useState('');
@@ -69,12 +72,27 @@ export default function InboxPage() {
 
   const load = useCallback(async () => {
     try {
-      const response = await fetch(
-        '/api/documents/overview?limit=200&include_processing=true',
-        { cache: 'no-store' },
+      const fetchPage = async (offset: number) => {
+        const response = await fetch(
+          `/api/documents/overview?limit=200&offset=${offset}&include_processing=true`,
+          { cache: 'no-store' },
+        );
+        if (!response.ok) throw new Error('资料列表读取失败');
+        return {
+          rows: (await response.json()) as DocumentItem[],
+          total: Number(response.headers.get('X-Total-Count') || '0'),
+        };
+      };
+      const first = await fetchPage(0);
+      const offsets = Array.from(
+        { length: Math.max(0, Math.ceil(first.total / 200) - 1) },
+        (_, index) => (index + 1) * 200,
       );
-      if (!response.ok) throw new Error('资料列表读取失败');
-      setDocuments((await response.json()) as DocumentItem[]);
+      const remaining = await Promise.all(offsets.map(fetchPage));
+      setDocuments([
+        ...first.rows,
+        ...remaining.flatMap((result) => result.rows),
+      ]);
       setError('');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '读取处理中心失败');
@@ -172,6 +190,12 @@ export default function InboxPage() {
       );
     return document.pipeline.overall_status === filter;
   });
+  const totalPages = Math.max(1, Math.ceil(visibleDocuments.length / PAGE_SIZE));
+  const effectivePage = Math.min(page, totalPages);
+  const pagedDocuments = visibleDocuments.slice(
+    (effectivePage - 1) * PAGE_SIZE,
+    effectivePage * PAGE_SIZE,
+  );
 
   const parseStageFailedDocuments = useMemo(
     () =>
@@ -294,7 +318,7 @@ export default function InboxPage() {
           <button
             key={item.key}
             type="button"
-            onClick={() => setFilter(item.key)}
+            onClick={() => { setFilter(item.key); setPage(1); }}
             className={`rounded-full px-3 py-1.5 text-sm ${
               filter === item.key
                 ? 'bg-slate-900 text-white'
@@ -323,7 +347,7 @@ export default function InboxPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {visibleDocuments.map((document) => {
+              {pagedDocuments.map((document) => {
                 const pipeline = document.pipeline;
                 const embedding = pipeline.stages.embedding;
                 return (
@@ -384,6 +408,31 @@ export default function InboxPage() {
               当前筛选下没有资料。
             </p>
           )}
+        </div>
+      )}
+      {!loading && !error && visibleDocuments.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
+          <span>
+            当前筛选共 {visibleDocuments.length} 条 · 第 {effectivePage}/{totalPages} 页
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={effectivePage <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
+            >
+              上一页
+            </button>
+            <button
+              type="button"
+              disabled={effectivePage >= totalPages}
+              onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
+            >
+              下一页
+            </button>
+          </div>
         </div>
       )}
     </main>

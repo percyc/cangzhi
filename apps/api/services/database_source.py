@@ -44,6 +44,7 @@ from ..models.database_source import DatabaseSnapshot, DatabaseSource
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from ..models.table_rows import StructuredTableRow
+from ..models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
 from ..security.secrets import decrypt_secret
 from .dataset_execution import DatasetExecutionError, build_dataset_parquet
 
@@ -62,6 +63,11 @@ MAX_SCHEMAS = 200
 MAX_COLUMNS = 1_000
 DATABASE_CATALOG_VERSION = "database-catalog:v1"
 DATABASE_CATALOG_MAX_CHARS = 6_000
+DATABASE_DEFAULT_CATEGORY_SLUG = "tech"
+DATABASE_TAGS = (
+    ("database", "数据库"),
+    ("database-table", "数据库表"),
+)
 
 BIT_DATA_TYPES = {"bit"}
 
@@ -955,6 +961,124 @@ async def ensure_database_catalog_chunks(
     return child, enqueued
 
 
+async def ensure_database_taxonomy(
+    db: AsyncSession,
+    source: DatabaseSource,
+    document: Document,
+    version: DocumentVersion,
+    *,
+    previous_version_id: int | None = None,
+) -> None:
+    """Attach stable, low-noise taxonomy to an imported database table.
+
+    Database snapshots are organized by deterministic source metadata rather
+    than sending every table to a chat model. This keeps bulk imports fast and
+    makes category/tag availability independent from model configuration.
+    """
+
+    if previous_version_id is not None and previous_version_id != version.id:
+        previous_categories = list(
+            (
+                await db.scalars(
+                    select(DocumentCategory).where(
+                        DocumentCategory.document_version_id == previous_version_id
+                    )
+                )
+            ).all()
+        )
+        for link in previous_categories:
+            db.add(
+                DocumentCategory(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    category_id=link.category_id,
+                    is_primary=link.is_primary,
+                    confidence=link.confidence,
+                    source=link.source,
+                    rationale=link.rationale,
+                )
+            )
+        previous_tags = list(
+            (
+                await db.scalars(
+                    select(DocumentTag).where(
+                        DocumentTag.document_version_id == previous_version_id
+                    )
+                )
+            ).all()
+        )
+        for link in previous_tags:
+            db.add(
+                DocumentTag(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    tag_id=link.tag_id,
+                    confidence=link.confidence,
+                    source=link.source,
+                )
+            )
+        await db.flush()
+
+    existing_category = await db.scalar(
+        select(DocumentCategory.id).where(
+            DocumentCategory.document_version_id == version.id
+        )
+    )
+    if existing_category is None:
+        category = await db.scalar(
+            select(Category).where(
+                Category.workspace_id == source.workspace_id,
+                Category.slug == DATABASE_DEFAULT_CATEGORY_SLUG,
+            )
+        )
+        if category is not None:
+            db.add(
+                DocumentCategory(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    category_id=category.id,
+                    is_primary=True,
+                    confidence=1.0,
+                    source="database",
+                    rationale="数据库快照按结构化数据规则自动归类",
+                )
+            )
+
+    tag_specs = [*DATABASE_TAGS, (source.engine, source.engine)]
+    for slug, name in tag_specs:
+        tag = await db.scalar(
+            select(Tag).where(
+                Tag.workspace_id == source.workspace_id,
+                Tag.name == name,
+            )
+        )
+        if tag is None:
+            tag = Tag(
+                workspace_id=source.workspace_id,
+                slug=slug,
+                name=name,
+                description="数据库快照自动标签",
+            )
+            db.add(tag)
+            await db.flush()
+        link = await db.scalar(
+            select(DocumentTag.id).where(
+                DocumentTag.document_version_id == version.id,
+                DocumentTag.tag_id == tag.id,
+            )
+        )
+        if link is None:
+            db.add(
+                DocumentTag(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    tag_id=tag.id,
+                    confidence=1.0,
+                    source="database",
+                )
+            )
+
+
 async def backfill_database_catalog_chunks(
     db: AsyncSession,
     source: DatabaseSource,
@@ -997,10 +1121,16 @@ async def backfill_database_catalog_chunks(
             version,
             dataset,
         )
+        await ensure_database_taxonomy(db, source, document, version)
         created += int(before is None)
         enqueued += queued
     await db.commit()
-    return {"snapshots": len(snapshots), "created": created, "enqueued": enqueued, "skipped": skipped}
+    return {
+        "snapshots": len(snapshots),
+        "created": created,
+        "enqueued": enqueued,
+        "skipped": skipped,
+    }
 
 
 async def import_database_table(
@@ -1080,11 +1210,16 @@ async def import_database_table(
         )
 
     document = await db.scalar(
-        select(Document).where(Document.external_identity == external_identity)
+        select(Document).where(
+            Document.workspace_id == source.workspace_id,
+            Document.external_identity == external_identity,
+        )
     )
     reused_document = document is not None
+    previous_version_id = document.current_version_id if document is not None else None
     if document is None:
         document = Document(
+            workspace_id=source.workspace_id,
             title=f"{source.name}.{schema_name}.{table_name}"[:1024],
             source_type=DocumentSourceType.file,
             external_identity=external_identity,
@@ -1278,6 +1413,7 @@ async def import_database_table(
     now = datetime.now(timezone.utc)
     if existing_snapshot is None:
         snapshot = DatabaseSnapshot(
+            workspace_id=source.workspace_id,
             source_id=source.id,
             schema_name=schema_name,
             table_name=table_name,
@@ -1305,6 +1441,13 @@ async def import_database_table(
 
     await db.flush()
     await ensure_database_catalog_chunks(db, source, document, version, dataset)
+    await ensure_database_taxonomy(
+        db,
+        source,
+        document,
+        version,
+        previous_version_id=previous_version_id,
+    )
 
     # Build the columnar artifact in a sync sub-greenthread so the Parquet
     # builder participates in the active transaction. ``run_sync`` keeps the
