@@ -59,6 +59,8 @@ MAX_CATALOG_TABLES = 500
 MAX_SCHEMAS = 200
 MAX_COLUMNS = 1_000
 
+BIT_DATA_TYPES = {"bit"}
+
 _ENGINE_VALUES_PUBLIC = ("postgresql", "mysql")
 _SSL_MODES = {
     "postgresql": {"disable", "prefer", "require"},
@@ -423,18 +425,37 @@ def _catalog_impl(source: DatabaseSource, schema: str) -> list[DatabaseTable]:
         return result
 
 
-def _truncate_cell(value: Any, max_cell_size: int) -> Any:
+def _safe_text(value: str, max_cell_size: int) -> str:
+    # PostgreSQL text/JSONB rejects U+0000 even when the remote database
+    # considers it a valid character. Preserve readability without allowing
+    # one control byte to abort the entire snapshot.
+    return value.replace("\x00", "�")[:max_cell_size]
+
+
+def _truncate_cell(
+    value: Any,
+    max_cell_size: int,
+    *,
+    data_type: str = "",
+) -> Any:
     if value is None:
         return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")[:max_cell_size]
+    normalized_type = data_type.lower().split("(", 1)[0].strip()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        payload = bytes(value)
+        if normalized_type in BIT_DATA_TYPES:
+            return int.from_bytes(payload, byteorder="big", signed=False)
+        # Raw binary is unsuitable for tabular QA. A stable descriptor keeps
+        # provenance without injecting NULs or huge Base64 strings.
+        digest = hashlib.sha256(payload).hexdigest()
+        return f"[binary {len(payload)} bytes sha256:{digest}]"
     if isinstance(value, str):
-        return value[:max_cell_size]
+        return _safe_text(value, max_cell_size)
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, (int, float, bool)):
         return value
-    return str(value)[:max_cell_size]
+    return _safe_text(str(value), max_cell_size)
 
 
 def _stream_table_impl(
@@ -459,6 +480,7 @@ def _stream_table_impl(
         if not columns:
             raise DatabaseSourceError("table_not_found", "远程表没有可导入的列")
         column_names = [name for name, _data_type, _nullable in columns]
+        column_types = {name: data_type for name, data_type, _nullable in columns}
         quoted_columns = ", ".join(
             _quote_driver_identifier(source.engine, name) for name in column_names
         )
@@ -481,7 +503,11 @@ def _stream_table_impl(
                     )
                 rows.append(
                     {
-                        name: _truncate_cell(value, max_cell_size)
+                        name: _truncate_cell(
+                            value,
+                            max_cell_size,
+                            data_type=column_types.get(name, ""),
+                        )
                         for name, value in zip(column_names, raw)
                     }
                 )
@@ -619,15 +645,25 @@ async def fetch_database_table(
 
 @dataclass(frozen=True)
 class DatabaseImportResult:
-    document_id: int
-    document_version_id: int
-    dataset_id: int
-    snapshot_id: int
+    document_id: int | None
+    document_version_id: int | None
+    dataset_id: int | None
+    snapshot_id: int | None
     version_number: int
     row_count: int
     column_count: int
     fingerprint: str
     reused_document: bool
+    status: str = "imported"
+    skip_reason: str | None = None
+    removed_existing: bool = False
+
+
+@dataclass(frozen=True)
+class DatabaseSnapshotCleanupResult:
+    affected: int
+    deleted_artifacts: int
+    cleanup_warnings: tuple[str, ...] = ()
 
 
 def _artifact_storage_path(artifact: Any, root: str | Path | None) -> Path:
@@ -638,6 +674,114 @@ def _artifact_storage_path(artifact: Any, root: str | Path | None) -> Path:
     if base != path and base not in path.parents:
         raise DatabaseSourceError("artifact_invalid", "数据集产物路径无效")
     return path
+
+
+async def _purge_database_snapshots(
+    db: AsyncSession,
+    snapshots: Sequence[DatabaseSnapshot],
+    *,
+    storage_root: str | Path | None = None,
+) -> DatabaseSnapshotCleanupResult:
+    """Permanently remove generated database documents and Parquet files."""
+
+    if not snapshots:
+        return DatabaseSnapshotCleanupResult(affected=0, deleted_artifacts=0)
+    document_ids = sorted({snapshot.document_id for snapshot in snapshots})
+    dataset_ids = sorted({snapshot.dataset_id for snapshot in snapshots})
+    version_ids = list(
+        (
+            await db.scalars(
+                select(DocumentVersion.id).where(
+                    DocumentVersion.document_id.in_(document_ids)
+                )
+            )
+        ).all()
+    )
+    artifacts = list(
+        (
+            await db.scalars(
+                select(DatasetArtifact).where(
+                    DatasetArtifact.dataset_id.in_(dataset_ids)
+                )
+            )
+        ).all()
+    )
+    artifact_paths: list[Path] = []
+    warnings: list[str] = []
+    for artifact in artifacts:
+        try:
+            artifact_paths.append(_artifact_storage_path(artifact, storage_root))
+        except DatabaseSourceError as exc:
+            warnings.append(str(exc))
+
+    documents = list(
+        (await db.scalars(select(Document).where(Document.id.in_(document_ids)))).all()
+    )
+    for document in documents:
+        document.current_version_id = None
+    await db.flush()
+    await db.execute(
+        delete(DatabaseSnapshot).where(
+            DatabaseSnapshot.id.in_([snapshot.id for snapshot in snapshots])
+        )
+    )
+    await db.execute(
+        delete(DatasetArtifact).where(DatasetArtifact.dataset_id.in_(dataset_ids))
+    )
+    await db.execute(
+        delete(DatasetField).where(DatasetField.dataset_id.in_(dataset_ids))
+    )
+    await db.execute(
+        delete(StructuredTableRow).where(
+            StructuredTableRow.dataset_id.in_(dataset_ids)
+        )
+    )
+    await db.execute(
+        delete(KnowledgeDataset).where(KnowledgeDataset.id.in_(dataset_ids))
+    )
+    await db.execute(
+        delete(DocumentVersion).where(DocumentVersion.id.in_(version_ids))
+    )
+    await db.execute(delete(Document).where(Document.id.in_(document_ids)))
+    await db.commit()
+
+    deleted_artifacts = 0
+    for artifact_path in artifact_paths:
+        try:
+            artifact_path.unlink()
+            deleted_artifacts += 1
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            warnings.append(f"{artifact_path.name} 清理失败：{type(exc).__name__}")
+    return DatabaseSnapshotCleanupResult(
+        affected=len(snapshots),
+        deleted_artifacts=deleted_artifacts,
+        cleanup_warnings=tuple(warnings),
+    )
+
+
+async def purge_empty_database_snapshots(
+    db: AsyncSession,
+    source: DatabaseSource,
+    *,
+    storage_root: str | Path | None = None,
+) -> DatabaseSnapshotCleanupResult:
+    snapshots = list(
+        (
+            await db.scalars(
+                select(DatabaseSnapshot).where(
+                    DatabaseSnapshot.source_id == source.id,
+                    DatabaseSnapshot.row_count == 0,
+                )
+            )
+        ).all()
+    )
+    return await _purge_database_snapshots(
+        db,
+        snapshots,
+        storage_root=storage_root,
+    )
 
 
 async def import_database_table(
@@ -679,6 +823,42 @@ async def import_database_table(
     if not columns:
         raise DatabaseSourceError("table_not_found", "远程表没有可导入的列")
     fingerprint = _fingerprint_payload(columns, rows)
+
+    if not rows:
+        existing_snapshot = await db.scalar(
+            select(DatabaseSnapshot).where(
+                DatabaseSnapshot.source_id == source.id,
+                DatabaseSnapshot.schema_name == schema_name,
+                DatabaseSnapshot.table_name == table_name,
+            )
+        )
+        removed_existing = existing_snapshot is not None
+        source.status = "idle"
+        source.last_error = None
+        source.last_sync_at = datetime.now(timezone.utc)
+        db.add(source)
+        if existing_snapshot is not None:
+            await _purge_database_snapshots(
+                db,
+                [existing_snapshot],
+                storage_root=storage_root,
+            )
+        else:
+            await db.commit()
+        return DatabaseImportResult(
+            document_id=None,
+            document_version_id=None,
+            dataset_id=None,
+            snapshot_id=None,
+            version_number=0,
+            row_count=0,
+            column_count=len(columns),
+            fingerprint=fingerprint,
+            reused_document=removed_existing,
+            status="skipped",
+            skip_reason="empty_table",
+            removed_existing=removed_existing,
+        )
 
     document = await db.scalar(
         select(Document).where(Document.external_identity == external_identity)
@@ -1007,6 +1187,7 @@ __all__ = [
     "STATEMENT_TIMEOUT_MS",
     "DatabaseColumn",
     "DatabaseImportResult",
+    "DatabaseSnapshotCleanupResult",
     "DatabaseSourceError",
     "DatabaseTable",
     "delete_database_source_documents",
@@ -1014,6 +1195,7 @@ __all__ = [
     "fetch_database_table",
     "import_database_table",
     "list_database_schemas",
+    "purge_empty_database_snapshots",
     "test_database_connection",
     "validate_database_host",
     "validate_identifier",

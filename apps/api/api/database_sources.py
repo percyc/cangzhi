@@ -29,6 +29,7 @@ from ..services.database_source import (
     fetch_database_catalog,
     import_database_table,
     list_database_schemas,
+    purge_empty_database_snapshots,
     test_database_connection,
     validate_database_host,
     validate_identifier,
@@ -180,17 +181,40 @@ def _enrich_dict(source: DatabaseSource) -> dict[str, Any]:
 
 
 async def _snapshot_counts(db: AsyncSession, source_id: int) -> dict[str, int]:
-    total = int(
-        (
-            await db.execute(
-                select(func.count(DatabaseSnapshot.id)).where(
-                    DatabaseSnapshot.source_id == source_id
-                )
-            )
-        ).scalar_one()
-        or 0
+    row = (
+        await db.execute(
+            select(
+                func.count(DatabaseSnapshot.id),
+                func.count(DatabaseSnapshot.id).filter(
+                    DatabaseSnapshot.row_count == 0
+                ),
+            ).where(DatabaseSnapshot.source_id == source_id)
+        )
+    ).one()
+    return {
+        "total": int(row[0] or 0),
+        "empty": int(row[1] or 0),
+    }
+
+
+@router.delete("/{source_id}/snapshots/empty", response_model=dict[str, Any])
+async def delete_empty_snapshots(
+    source_id: int,
+    db: DatabaseSession,
+    storage: StorageDependency,
+):
+    source = await _load_source_or_404(db, source_id)
+    result = await purge_empty_database_snapshots(
+        db,
+        source,
+        storage_root=_storage_root_for(storage),
     )
-    return {"total": total}
+    return {
+        "ok": True,
+        "affected": result.affected,
+        "deleted_artifacts": result.deleted_artifacts,
+        "cleanup_warnings": list(result.cleanup_warnings),
+    }
 
 
 async def _load_source_or_404(db: AsyncSession, source_id: int) -> DatabaseSource:
@@ -569,6 +593,9 @@ async def import_table(
 def _import_payload(result: DatabaseImportResult) -> dict[str, Any]:
     return {
         "ok": True,
+        "status": result.status,
+        "skip_reason": result.skip_reason,
+        "removed_existing": result.removed_existing,
         "document_id": result.document_id,
         "document_version_id": result.document_version_id,
         "dataset_id": result.dataset_id,

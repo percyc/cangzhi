@@ -272,7 +272,7 @@ export type DatabaseSource = {
   last_error: string | null;
   last_tested_at: string | null;
   last_sync_at: string | null;
-  snapshot_counts: { total: number };
+  snapshot_counts: { total: number; empty: number };
 };
 
 export type DatabaseSourcePayload = {
@@ -313,12 +313,22 @@ export type DatabaseDeleteImpact = {
 
 export type DatabaseImportResult = {
   ok: boolean;
-  document_id: number;
-  dataset_id: number;
-  snapshot_id: number;
+  status: 'imported' | 'skipped';
+  skip_reason: string | null;
+  removed_existing: boolean;
+  document_id: number | null;
+  dataset_id: number | null;
+  snapshot_id: number | null;
   row_count: number;
   column_count: number;
   reused_document: boolean;
+};
+
+export type DatabaseEmptyCleanupResult = {
+  ok: boolean;
+  affected: number;
+  deleted_artifacts: number;
+  cleanup_warnings: string[];
 };
 
 export type DatabaseTestResult = {
@@ -409,6 +419,16 @@ export async function importDatabaseTable(
     `${DB_BASE}/${id}/tables/import`,
     { method: 'POST', body: JSON.stringify({ schema_name, table }), signal },
     '导入快照失败',
+  );
+}
+
+export async function deleteEmptyDatabaseSnapshots(
+  id: number,
+): Promise<DatabaseEmptyCleanupResult> {
+  return apiRequest<DatabaseEmptyCleanupResult>(
+    `${DB_BASE}/${id}/snapshots/empty`,
+    { method: 'DELETE' },
+    '清理空快照失败',
   );
 }
 

@@ -299,6 +299,40 @@ def test_fetch_table_data_returns_rows_with_truncation(monkeypatch):
     assert rows[1]["name"] == "x" * db_source_module.MAX_CELL_SIZE
 
 
+def test_fetch_table_normalizes_bit_blob_and_nul_text(monkeypatch):
+    _install_fake_driver(
+        monkeypatch,
+        columns=(
+            ("locked", "bit", "NO"),
+            ("payload", "longblob", "YES"),
+            ("note", "varchar", "YES"),
+        ),
+        rows=[(b"\x00", b"\x89PNG\x00payload", "a\x00b")],
+    )
+    source = db_source_module.DatabaseSource(
+        id=1,
+        name="研发库",
+        engine="mysql",
+        host="db.example.com",
+        port=3306,
+        database_name="warehouse",
+        username="reader",
+        password_cipher=encrypt_secret("secret"),
+        has_password=True,
+        ssl_mode="required",
+        trusted_private_network=False,
+        is_enabled=True,
+        status="idle",
+    )
+    _, rows = asyncio.run(
+        db_source_module.fetch_database_table(source, "public", "orders")
+    )
+    assert rows[0]["locked"] == 0
+    assert rows[0]["payload"].startswith("[binary 12 bytes sha256:")
+    assert "\x00" not in rows[0]["payload"]
+    assert rows[0]["note"] == "a�b"
+
+
 def test_fetch_table_rejects_unknown_table(monkeypatch):
     _install_fake_driver(monkeypatch, tables=("orders",))
     source = db_source_module.DatabaseSource(
@@ -605,6 +639,42 @@ def test_reimport_creates_new_version_and_replaces_dataset(
     )
     assert new_path.is_file()
     assert not first_path.exists(), "re-import should remove the superseded parquet"
+
+
+def test_empty_table_is_skipped_and_removes_previous_snapshot(
+    client, monkeypatch, tmp_path
+):
+    test_client, _ = client
+    _install_fake_driver(monkeypatch, rows=[(1, "alpha")])
+    source_id = test_client.post(
+        "/api/database-sources", json=_create_source_payload()
+    ).json()["id"]
+    first = _import_via_api(test_client, source_id).json()
+    artifact_path = (
+        Path(tmp_path)
+        / "storage"
+        / "datasets"
+        / str(first["dataset_id"])
+        / "v1.parquet"
+    )
+    assert artifact_path.is_file()
+
+    _install_fake_driver(monkeypatch, rows=[])
+    response = _import_via_api(test_client, source_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "skipped"
+    assert body["skip_reason"] == "empty_table"
+    assert body["removed_existing"] is True
+    assert body["document_id"] is None
+    assert body["dataset_id"] is None
+    assert _query_counts() == {
+        "documents": 0,
+        "datasets": 0,
+        "versions": 0,
+        "snapshots": 0,
+    }
+    assert not artifact_path.exists()
 
 
 def test_failed_import_rolls_back_db_and_storage(client, monkeypatch, tmp_path):

@@ -7,6 +7,7 @@ import {
   DatabaseDeleteImpact,
   DatabaseSource,
   createDatabaseSource,
+  deleteEmptyDatabaseSnapshots,
   deleteDatabaseSource,
   fetchDatabaseCatalog,
   fetchDatabaseDeleteImpact,
@@ -100,6 +101,7 @@ type BulkRun = {
   total: number;
   done: number;
   success: number;
+  skipped: number;
   current: string | null;
   failed: BulkFailure[];
 };
@@ -368,6 +370,15 @@ export function DatabaseSourcePanel() {
     setError('');
     try {
       const result = await importDatabaseTable(source.id, table.schema_name, table.table_name);
+      if (result.status === 'skipped' && result.skip_reason === 'empty_table') {
+        setMessage(
+          result.removed_existing
+            ? `${table.schema_name}.${table.table_name} 当前为空，已跳过并清理旧快照。`
+            : `${table.schema_name}.${table.table_name} 当前为空，已跳过，未创建知识资料。`,
+        );
+        await load();
+        return;
+      }
       setMessage(
         `已导入 ${table.schema_name}.${table.table_name} 的快照：${result.row_count} 行 × ${result.column_count} 列${result.reused_document ? '（更新已有资料）' : '（新资料）'}，可在数据集、API 与 MCP 中查询。`,
       );
@@ -419,6 +430,7 @@ export function DatabaseSourcePanel() {
         total: tables.length,
         done: 0,
         success: 0,
+        skipped: 0,
         current: null,
         failed: [],
       },
@@ -426,6 +438,7 @@ export function DatabaseSourcePanel() {
 
     let done = 0;
     let success = 0;
+    let skipped = 0;
     const failures: BulkFailure[] = [];
     for (const item of tables) {
       if (controller.signal.aborted) break;
@@ -436,12 +449,22 @@ export function DatabaseSourcePanel() {
           current: item.key,
           done,
           success,
+          skipped,
           failed: [...failures],
         },
       }));
       try {
-        await importDatabaseTable(source.id, item.schema, item.table, controller.signal);
-        success += 1;
+        const result = await importDatabaseTable(
+          source.id,
+          item.schema,
+          item.table,
+          controller.signal,
+        );
+        if (result.status === 'skipped' && result.skip_reason === 'empty_table') {
+          skipped += 1;
+        } else {
+          success += 1;
+        }
       } catch (caught) {
         if (controller.signal.aborted) break;
         failures.push({
@@ -457,6 +480,7 @@ export function DatabaseSourcePanel() {
           current: null,
           done,
           success,
+          skipped,
           failed: [...failures],
         },
       }));
@@ -473,6 +497,7 @@ export function DatabaseSourcePanel() {
         current: null,
         done,
         success,
+        skipped,
         failed: failures,
       },
     }));
@@ -480,11 +505,35 @@ export function DatabaseSourcePanel() {
     await load();
     setMessage(
       cancelled
-        ? `批量导入已停止：完成 ${done}/${tables.length}，成功 ${success}，失败 ${failures.length}。`
+        ? `批量导入已停止：完成 ${done}/${tables.length}，成功 ${success}，跳过空表 ${skipped}，失败 ${failures.length}。`
         : failures.length
-          ? `批量导入完成：成功 ${success}，失败 ${failures.length}。`
-          : `全部 ${success} 张表/视图已导入。`,
+          ? `批量导入完成：成功 ${success}，跳过空表 ${skipped}，失败 ${failures.length}。`
+          : `批量处理完成：成功导入 ${success} 张，跳过空表 ${skipped} 张。`,
     );
+  };
+
+  const cleanupEmptySnapshots = async (source: DatabaseSource) => {
+    const count = source.snapshot_counts.empty;
+    if (!count) return;
+    if (!window.confirm(`确认永久清理“${source.name}”的 ${count} 个空快照？非空资料不会受影响。`)) {
+      return;
+    }
+    setBusy(`${source.id}:cleanup-empty`);
+    setError('');
+    try {
+      const result = await deleteEmptyDatabaseSnapshots(source.id);
+      setMessage(
+        `已清理 ${result.affected} 个空快照及 ${result.deleted_artifacts} 个列式产物。`,
+      );
+      if (result.cleanup_warnings.length) {
+        setError(`部分文件清理失败：${result.cleanup_warnings.join('；')}`);
+      }
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '清理空快照失败');
+    } finally {
+      setBusy('');
+    }
   };
 
   const startBulkImport = async () => {
@@ -600,6 +649,9 @@ export function DatabaseSourcePanel() {
                     </p>
                     <p className="mt-2 text-sm text-slate-600">
                       已导入快照 {source.snapshot_counts.total} 张
+                      {source.snapshot_counts.empty
+                        ? ` · 其中空快照 ${source.snapshot_counts.empty} 张`
+                        : ''}
                       {source.last_tested_at
                         ? ` · 最近测试 ${formatTime(source.last_tested_at)}`
                         : ''}
@@ -676,6 +728,18 @@ export function DatabaseSourcePanel() {
                   >
                     {busy === `${source.id}:impact` ? '正在核对影响…' : '删除连接器'}
                   </button>
+                  {source.snapshot_counts.empty > 0 && (
+                    <button
+                      type="button"
+                      disabled={Boolean(busy)}
+                      onClick={() => void cleanupEmptySnapshots(source)}
+                      className="rounded px-3 py-1.5 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-40"
+                    >
+                      {busy === `${source.id}:cleanup-empty`
+                        ? '正在清理…'
+                        : `清理空快照（${source.snapshot_counts.empty}）`}
+                    </button>
+                  )}
                 </div>
                 {source.last_error && <p className="mt-3 text-sm text-red-700">{source.last_error}</p>}
                 {browse[source.id] && (
@@ -850,7 +914,8 @@ function BulkImportProgress({
             {run.running ? '正在批量导入' : run.cancelled ? '批量导入已停止' : '批量导入结果'}
           </h3>
           <p className="mt-1 text-xs text-slate-600">
-            已完成 {run.done}/{run.total} · 成功 {run.success} · 失败 {run.failed.length}
+            已完成 {run.done}/{run.total} · 成功 {run.success} · 跳过空表 {run.skipped} · 失败{' '}
+            {run.failed.length}
           </p>
           {run.current && (
             <p className="mt-1 break-all text-xs text-indigo-700">当前：{run.current}</p>
