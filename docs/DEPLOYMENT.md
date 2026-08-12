@@ -26,6 +26,10 @@ git --version
 国内网络可以在 Docker Engine 层配置已有镜像加速，藏知无需额外代理。Web 镜像内
 的 npm 已使用 `npmmirror.com`；Python 和 Debian 软件仍由 Docker 构建阶段联网获取。
 
+如使用数据库知识源，API 容器还需要能直连目标 PostgreSQL/MySQL 主机和端口，不需要
+额外代理。私网目标必须在连接器中显式勾选“允许可信内网”。建议在来源库创建只具备
+目标 Schema `SELECT` 权限的专用账号，不要使用数据库管理员账号。
+
 ## 2. 五分钟部署
 
 ```bash

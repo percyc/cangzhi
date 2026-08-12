@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, with_loader_criteria
 
 from ..core.db import get_db
 from ..models.ask_history import AskConversation
+from ..models.database_source import DatabaseSnapshot, DatabaseSource
 from ..models.documents import Document
 from ..models.knowledge_scopes import KnowledgeScope
 from ..models.taxonomy import DEFAULT_CATEGORY_SLUGS, Category, Tag
@@ -39,6 +40,8 @@ _SCOPED_MODELS = (
     WebDAVSource,
     ExternalItemExclusion,
     AskConversation,
+    DatabaseSource,
+    DatabaseSnapshot,
 )
 
 

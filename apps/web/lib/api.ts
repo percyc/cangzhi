@@ -255,6 +255,178 @@ export async function runEmbeddingProfileAction(
   return parseJson<EmbeddingLifecycleResult>(response);
 }
 
+export type DatabaseSource = {
+  id: number;
+  workspace_id: number;
+  name: string;
+  engine: 'postgresql' | 'mysql';
+  host: string;
+  port: number;
+  database_name: string;
+  username: string;
+  has_password: boolean;
+  ssl_mode: string;
+  trusted_private_network: boolean;
+  is_enabled: boolean;
+  status: string;
+  last_error: string | null;
+  last_tested_at: string | null;
+  last_sync_at: string | null;
+  snapshot_counts: { total: number };
+};
+
+export type DatabaseSourcePayload = {
+  name: string;
+  engine: 'postgresql' | 'mysql';
+  host: string;
+  port: number;
+  database_name: string;
+  username: string;
+  password?: string;
+  password_action?: 'keep' | 'replace' | 'clear';
+  ssl_mode: string;
+  trusted_private_network: boolean;
+  is_enabled?: boolean;
+};
+
+export type DatabaseCatalogColumn = {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  is_primary_key: boolean;
+};
+
+export type DatabaseCatalogTable = {
+  schema_name: string;
+  table_name: string;
+  kind: string;
+  columns: DatabaseCatalogColumn[];
+};
+
+export type DatabaseDeleteImpact = {
+  source_id: number;
+  source_name: string;
+  snapshot_count: number;
+  active_document_count: number;
+  trashed_document_count: number;
+};
+
+export type DatabaseImportResult = {
+  ok: boolean;
+  document_id: number;
+  dataset_id: number;
+  snapshot_id: number;
+  row_count: number;
+  column_count: number;
+  reused_document: boolean;
+};
+
+export type DatabaseTestResult = {
+  ok: boolean;
+  message: string;
+  server_version?: string;
+  current_database?: string;
+};
+
+const DB_BASE = '/api/database-sources';
+
+export async function fetchDatabaseSources(): Promise<DatabaseSource[]> {
+  return apiRequest<DatabaseSource[]>(DB_BASE, undefined, '数据库来源读取失败');
+}
+
+export async function createDatabaseSource(
+  payload: DatabaseSourcePayload,
+): Promise<DatabaseSource> {
+  return apiRequest<DatabaseSource>(
+    DB_BASE,
+    { method: 'POST', body: JSON.stringify(payload) },
+    '添加数据库来源失败',
+  );
+}
+
+export async function updateDatabaseSource(
+  id: number,
+  payload: Partial<DatabaseSourcePayload>,
+): Promise<DatabaseSource> {
+  return apiRequest<DatabaseSource>(
+    `${DB_BASE}/${id}`,
+    { method: 'PATCH', body: JSON.stringify(payload) },
+    '保存数据库来源失败',
+  );
+}
+
+export async function deleteDatabaseSource(
+  id: number,
+  documentAction: 'keep' | 'trash',
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(
+    `${DB_BASE}/${id}?document_action=${documentAction}`,
+    { method: 'DELETE' },
+    '删除数据库来源失败',
+  );
+}
+
+export async function fetchDatabaseDeleteImpact(
+  id: number,
+): Promise<DatabaseDeleteImpact> {
+  return apiRequest<DatabaseDeleteImpact>(
+    `${DB_BASE}/${id}/delete-impact`,
+    undefined,
+    '删除影响核对失败',
+  );
+}
+
+export async function testDatabaseSource(id: number): Promise<DatabaseTestResult> {
+  return apiRequest<DatabaseTestResult>(
+    `${DB_BASE}/${id}/test`,
+    { method: 'POST' },
+    '测试连接失败',
+  );
+}
+
+export async function fetchDatabaseSchemas(id: number): Promise<string[]> {
+  return apiRequest<string[]>(`${DB_BASE}/${id}/schemas`, undefined, '读取 Schema 失败');
+}
+
+export async function fetchDatabaseCatalog(
+  id: number,
+  schema: string,
+): Promise<DatabaseCatalogTable[]> {
+  return apiRequest<DatabaseCatalogTable[]>(
+    `${DB_BASE}/${id}/catalog?schema=${encodeURIComponent(schema)}`,
+    undefined,
+    '读取表结构失败',
+  );
+}
+
+export async function importDatabaseTable(
+  id: number,
+  schema_name: string,
+  table: string,
+): Promise<DatabaseImportResult> {
+  return apiRequest<DatabaseImportResult>(
+    `${DB_BASE}/${id}/tables/import`,
+    { method: 'POST', body: JSON.stringify({ schema_name, table }) },
+    '导入快照失败',
+  );
+}
+
+async function apiRequest<T>(
+  url: string,
+  init?: RequestInit,
+  fallback?: string,
+): Promise<T> {
+  const response = await fetch(url, {
+    cache: 'no-store',
+    ...init,
+    headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, fallback ?? '操作失败'));
+  }
+  return parseJson<T>(response);
+}
+
 export async function askStatus(): Promise<{
   provider_configured: boolean;
   provider: string;

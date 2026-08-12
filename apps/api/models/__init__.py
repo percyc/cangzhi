@@ -2,6 +2,7 @@ from .ask_history import AskConversation, AskTurn
 from .auth import Admin, AIRuntimeConfig, AuthSession, PersonalAccessToken
 from .blobs import Blob
 from .chunks import DocumentChunk
+from .database_source import DatabaseSnapshot, DatabaseSource
 from .datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
@@ -33,6 +34,8 @@ __all__ = [
     "ChunkEmbedding",
     "DatasetArtifact",
     "DatasetField",
+    "DatabaseSnapshot",
+    "DatabaseSource",
     "Document",
     "DocumentCategory",
     "DocumentChunk",

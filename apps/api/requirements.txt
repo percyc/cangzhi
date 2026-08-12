@@ -3,6 +3,7 @@ uvicorn>=0.24.0
 sqlalchemy>=2.0
 alembic
 psycopg2-binary
+pymysql>=1.1.0
 asyncpg
 pgvector
 cryptography>=42.0
