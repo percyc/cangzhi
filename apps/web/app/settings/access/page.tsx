@@ -24,6 +24,7 @@ type IntegrationInfo = {
   base_url: string;
   mcp_url: string;
   authorization_header: string;
+  workspace_slug: string;
 };
 
 const scopeLabels: Record<string, string> = {
@@ -46,17 +47,27 @@ export default function AccessSettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [currentWorkspaceSlug, setCurrentWorkspaceSlug] = useState('default');
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/access-tokens', { cache: 'no-store' })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(await errorMessage(response));
-        return (await response.json()) as TokenList;
+    Promise.all([
+      fetch('/api/access-tokens', { cache: 'no-store' }),
+      fetch('/api/workspaces/current', { cache: 'no-store' }),
+    ])
+      .then(async ([tokenResponse, workspaceResponse]) => {
+        if (!tokenResponse.ok) throw new Error(await errorMessage(tokenResponse));
+        if (!workspaceResponse.ok)
+          throw new Error(await errorMessage(workspaceResponse));
+        return {
+          tokens: (await tokenResponse.json()) as TokenList,
+          workspace: (await workspaceResponse.json()) as { slug: string },
+        };
       })
       .then((body) => {
         if (cancelled) return;
-        setItems(body.items);
+        setItems(body.tokens.items);
+        setCurrentWorkspaceSlug(body.workspace.slug);
         setError(null);
       })
       .catch((reason: unknown) => {
@@ -98,6 +109,7 @@ export default function AccessSettingsPage() {
         base_url: publicBaseUrl,
         mcp_url: `${publicBaseUrl}${body.integration.mcp_path}`,
         authorization_header: body.integration.authorization_header,
+        workspace_slug: currentWorkspaceSlug,
       });
       setItems((current) => [body.item, ...current]);
       setName('');
@@ -402,12 +414,12 @@ export default function AccessSettingsPage() {
               <CopyBlock
                 className="mt-3"
                 label="工作空间请求头（按需替换 slug）"
-                value="X-Cangzhi-Workspace: default"
+                value={`X-Cangzhi-Workspace: ${integration.workspace_slug}`}
                 copied={copiedKey === 'workspace-header'}
                 onCopy={() =>
                   void copy(
                     'workspace-header',
-                    'X-Cangzhi-Workspace: default',
+                    `X-Cangzhi-Workspace: ${integration.workspace_slug}`,
                   )
                 }
               />
@@ -556,7 +568,7 @@ function mcpConfig(integration: IntegrationInfo) {
           url: integration.mcp_url,
           headers: {
             Authorization: integration.authorization_header,
-            'X-Cangzhi-Workspace': 'default',
+            'X-Cangzhi-Workspace': integration.workspace_slug,
           },
         },
       },
@@ -570,7 +582,7 @@ function shellConfig(integration: IntegrationInfo, token: string) {
   return [
     `export CANGZHI_URL='${integration.base_url}'`,
     `export CANGZHI_TOKEN='${token}'`,
-    "export CANGZHI_WORKSPACE='default'",
+    `export CANGZHI_WORKSPACE='${integration.workspace_slug}'`,
   ].join('\n');
 }
 

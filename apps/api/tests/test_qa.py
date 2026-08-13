@@ -1006,6 +1006,61 @@ def test_quick_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
     assert captured["force"] is False
 
 
+def test_quick_table_discovery_uses_ranked_catalog_documents(qa_db, monkeypatch):
+    import apps.api.services.qa as qa_service_module
+
+    captured: dict[str, list[int]] = {}
+    evidence = Evidence(
+        id=1,
+        document_id=176,
+        document_version_id=200,
+        chunk_id=300,
+        title="orders",
+        heading_path=[],
+        page=None,
+        paragraph_index=None,
+        source_start=None,
+        source_end=None,
+        snippet="订单数据集，字段包括 order_status",
+        score=1.0,
+    )
+
+    async def collect(_self, _db, **_kwargs):
+        return [evidence], {"mode": "hybrid"}
+
+    async def table_query(_db, *, provider, question, document_ids, force=False):
+        captured["document_ids"] = document_ids
+        return None
+
+    async def broad_candidates(*_args, **_kwargs):
+        raise AssertionError("不应在已有排序证据时退回宽泛数据集发现")
+
+    monkeypatch.setattr(QAService, "collect_evidence", collect)
+    monkeypatch.setattr(qa_service_module, "try_structured_table_query", table_query)
+    monkeypatch.setattr(
+        qa_service_module,
+        "candidate_dataset_document_ids",
+        broad_candidates,
+    )
+    provider = StubProvider()
+    provider.queue(
+        AnswerResult(
+            answer="证据不足。",
+            citation_ids=[],
+            insufficient_evidence=True,
+        )
+    )
+
+    async def _run():
+        async with qa_db() as session:
+            return await QAService(provider).ask(
+                session, AskRequest(question="订单状态有哪些")
+            )
+
+    asyncio.run(_run())
+    assert captured["document_ids"] == [176]
+
+
 def test_deep_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
     import apps.api.services.deep_analysis as deep_service_module
     import apps.api.services.knowledge_scopes as scope_service_module

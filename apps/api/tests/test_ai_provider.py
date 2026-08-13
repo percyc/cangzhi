@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import httpx
 import pytest
@@ -19,7 +18,6 @@ from apps.api.ai.provider import (
     _format_evidence,
     _parse_answer_and_validate,
 )
-
 
 # --- Schema / validate_against_evidence ----------------------------------
 
@@ -129,6 +127,19 @@ def test_parse_rejects_fabrication():
     )
     with pytest.raises(AIProviderError, match="不存在的证据"):
         _parse_answer_and_validate(text, allowed_ids={1})
+
+
+def test_parse_safely_drops_citations_from_insufficient_answer():
+    text = json.dumps(
+        {
+            "answer": "现有证据不足以确认。",
+            "citation_ids": [1],
+            "insufficient_evidence": True,
+        }
+    )
+    parsed = _parse_answer_and_validate(text, allowed_ids={1})
+    assert parsed.insufficient_evidence is True
+    assert parsed.citation_ids == []
 
 
 # --- Format evidence ------------------------------------------------------

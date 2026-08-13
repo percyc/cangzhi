@@ -347,6 +347,17 @@ class QAService:
         if (
             not candidate_table_document_ids
             and is_structured_table_question(question)
+        ):
+            # Database catalog chunks are document-level discovery evidence
+            # rather than row chunks, so they do not carry table_location.
+            # Their ranked document ids are nevertheless the best dataset
+            # candidates and must be tried before a broad catalog fallback.
+            candidate_table_document_ids = list(
+                dict.fromkeys(item.document_id for item in evidence)
+            )
+        if (
+            not candidate_table_document_ids
+            and is_structured_table_question(question)
             and not table_matches_none
         ):
             candidate_table_document_ids = await candidate_dataset_document_ids(

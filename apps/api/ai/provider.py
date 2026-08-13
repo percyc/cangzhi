@@ -547,6 +547,12 @@ def _parse_answer_and_validate(
         result = AnswerResult.model_validate(payload)
     except Exception as exc:  # noqa: BLE001 — Pydantic errors vary
         raise AIProviderError(f"模型输出不符合 Schema：{exc}") from None
+    # Some reasoning models occasionally mark an answer as insufficient while
+    # also returning citations. Keeping the citations would misrepresent the
+    # model's own confidence; dropping them is a conservative, deterministic
+    # repair that cannot turn an insufficient answer into a factual claim.
+    if result.insufficient_evidence and result.citation_ids:
+        result.citation_ids = []
     try:
         return validate_against_evidence(result, allowed_ids=allowed_ids)
     except ValueError as exc:
