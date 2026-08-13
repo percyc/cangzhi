@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,8 +41,11 @@ from ..services.search import search_documents
 from .schemas import DatasetFilterInput
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
+logger = logging.getLogger(__name__)
 _mcp_identity = require_api_identity()
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26")
+
+ProgressCallback = Callable[[int, int, str], Awaitable[None]]
 
 
 class MCPRequest(BaseModel):
@@ -365,6 +373,80 @@ def _tool_error(code: str, message: str) -> dict:
     }
 
 
+def _sse_event(message: dict) -> str:
+    return f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
+
+
+async def _stream_ask_result(
+    request_id: str | int | None,
+    name: str,
+    arguments: dict[str, Any],
+    identity: APIIdentity,
+    db: AsyncSession,
+    progress_token: str | int,
+):
+    """Stream ``tools/call`` progress notifications then the final result.
+
+    Mirrors the MCP 2025-06-18 Streamable HTTP shape: any number of
+    ``notifications/progress`` events are emitted first, and the response
+    closes with the JSON-RPC result carrying the original request id.
+    """
+    queue: asyncio.Queue[tuple[int, int, str] | None] = asyncio.Queue()
+    last_progress = -1
+
+    async def report(progress: int, total: int, message: str) -> None:
+        nonlocal last_progress
+        if progress <= last_progress:
+            return
+        last_progress = progress
+        await queue.put((progress, total, message))
+
+    async def run() -> dict:
+        try:
+            payload = await _call_tool(
+                name, arguments, identity, db, on_progress=report
+            )
+            if not payload.get("isError"):
+                await report(100, 100, "回答完成")
+            return payload
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(run())
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            progress, total, message = item
+            yield _sse_event(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": progress_token,
+                        "progress": progress,
+                        "total": total,
+                        "message": message,
+                    },
+                }
+            )
+        try:
+            payload = task.result()
+        except Exception:
+            logger.warning("knowledge_ask stream aborted", exc_info=True)
+            yield _sse_event(_error(request_id, -32603, "Internal error"))
+            return
+        yield _sse_event(_result(request_id, payload))
+    finally:
+        if not task.done():
+            task.cancel()
+        # Always consume the task result so a client disconnect cannot leave
+        # an unobserved exception behind in the event loop.
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
 def _require_scope(identity: APIIdentity, scope: str) -> dict | None:
     if identity.has_scope(scope):
         return None
@@ -437,6 +519,7 @@ async def _call_tool(
     arguments: dict[str, Any],
     identity: APIIdentity,
     db: AsyncSession,
+    on_progress: ProgressCallback | None = None,
 ) -> dict:
     if name == "knowledge_search":
         forbidden = _require_scope(identity, "knowledge:search")
@@ -507,6 +590,7 @@ async def _call_tool(
                     document_ids=scope.document_ids,
                     matches_none=scope.matches_none,
                 ),
+                on_progress=on_progress,
             )
         except ValidationError as exc:
             return _tool_error("invalid_arguments", str(exc))
@@ -641,6 +725,7 @@ async def _call_tool(
 @router.post("")
 async def mcp_post(
     payload: MCPRequest,
+    request: Request,
     identity: APIIdentity = Depends(_mcp_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ):
@@ -685,6 +770,34 @@ async def mcp_post(
         arguments = payload.params.get("arguments") or {}
         if not isinstance(name, str) or not isinstance(arguments, dict):
             return _error(payload.id, -32602, "Invalid params")
+        meta = payload.params.get("_meta") or {}
+        progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
+        accepts_sse = "text/event-stream" in (
+            request.headers.get("accept") or ""
+        ).lower()
+        valid_progress_token = isinstance(progress_token, (str, int)) and not isinstance(
+            progress_token, bool
+        )
+        if (
+            name == "knowledge_ask"
+            and valid_progress_token
+            and accepts_sse
+        ):
+            return StreamingResponse(
+                _stream_ask_result(
+                    payload.id,
+                    name,
+                    arguments,
+                    identity,
+                    db,
+                    progress_token,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         return _result(
             payload.id,
             await _call_tool(name, arguments, identity, db),

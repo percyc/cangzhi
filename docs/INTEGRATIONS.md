@@ -62,6 +62,12 @@ X-Cangzhi-Workspace: ${CANGZHI_WORKSPACE}
 MCP 的 `knowledge_ask` 固定为快速问答，不暴露 `deep`；Skill 和外部 Agent 应自行
 组合检索、读取和数据集工具，避免“外部 AI → 藏知 AI → 外部 AI”的重复推理。
 
+`knowledge_ask` 支持 MCP 进度通知。支持该能力的客户端会在 `tools/call.params._meta`
+中传入字符串或整数型 `progressToken`，并声明接受 `text/event-stream`；藏知随后通过
+`notifications/progress` 依次报告检索、分析和回答生成进度，最后在同一 SSE 响应中
+返回标准 JSON-RPC 工具结果。没有请求进度的旧客户端仍收到单个 JSON 响应。这里流式
+呈现的是可审计的执行阶段，不包含模型思维链，也不是逐字 token 输出。
+
 `knowledge_get_document` 是分页原文读取工具，默认最多返回 12000 字符，并在
 `content_window` 中给出总长度、截断状态和 `next_offset`。大型 Excel 或长文档不要
 一次读取全文：表格筛选与统计使用 `knowledge_ask`，证据定位使用

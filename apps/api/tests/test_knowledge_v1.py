@@ -304,7 +304,7 @@ def test_document_and_chunk_read_only_expose_current_active_knowledge(client):
     assert mcp_document["structure"]["document_type"] == "note"
 
 
-def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
+def _setup_mcp_ask_env(client, monkeypatch):
     test_client, _ = client
     _enable_real_login()
     _setup_owner(test_client)
@@ -380,20 +380,31 @@ def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
 
     monkeypatch.setattr(mcp_module, "build_provider_from_db", provider_from_db)
     test_client.cookies.clear()
-    response = test_client.post(
-        "/api/mcp",
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "tools/call",
-            "params": {
-                "name": "knowledge_ask",
-                "arguments": {"question": "藏知是什么？"},
-            },
-        },
-    )
+    return test_client, token
 
+
+def _mcp_ask_body(question="藏知是什么？", progress_token=None, extra=None):
+    params = {"name": "knowledge_ask", "arguments": {"question": question}}
+    if progress_token is not None:
+        params["_meta"] = {"progressToken": progress_token}
+    if extra:
+        params["arguments"].update(extra)
+    return {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": params}
+
+
+def _parse_sse(body):
+    events = []
+    for line in body.splitlines():
+        if line.startswith("data: "):
+            events.append(json.loads(line[len("data: ") :]))
+    return events
+
+
+def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
+    test_client, token = _setup_mcp_ask_env(client, monkeypatch)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = test_client.post("/api/mcp", headers=headers, json=_mcp_ask_body())
     tool_result = response.json()["result"]
     assert tool_result["isError"] is False
     assert tool_result["structuredContent"]["answer"] == "藏知是个人知识中枢。"
@@ -401,22 +412,111 @@ def test_mcp_knowledge_ask_uses_shared_cited_qa(client, monkeypatch):
 
     nested_deep = test_client.post(
         "/api/mcp",
-        headers={"Authorization": f"Bearer {token}"},
-        json={
-            "jsonrpc": "2.0",
-            "id": 9,
-            "method": "tools/call",
-            "params": {
-                "name": "knowledge_ask",
-                "arguments": {
-                    "question": "藏知是什么？",
-                    "mode": "deep",
-                },
-            },
-        },
+        headers=headers,
+        json=_mcp_ask_body(extra={"mode": "deep"}),
     ).json()["result"]
     assert nested_deep["isError"] is True
     assert nested_deep["structuredContent"]["error"]["code"] == "invalid_arguments"
+
+
+def test_mcp_knowledge_ask_sse_streams_progress_then_result(client, monkeypatch):
+    test_client, token = _setup_mcp_ask_env(client, monkeypatch)
+    with test_client.stream(
+        "POST",
+        "/api/mcp",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+        },
+        json=_mcp_ask_body(progress_token="pt-42"),
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        response.read()
+        events = _parse_sse(response.text)
+
+    progress = [e for e in events if e.get("method") == "notifications/progress"]
+    assert len(progress) == 5
+    for event in progress:
+        assert event["jsonrpc"] == "2.0"
+        assert event["params"]["progressToken"] == "pt-42"
+        assert event["params"]["total"] == 100
+        assert isinstance(event["params"]["message"], str) and event["params"]["message"]
+    values = [event["params"]["progress"] for event in progress]
+    assert values == [0, 40, 70, 90, 100]
+    assert events[-1]["id"] == 8
+    assert events[-1]["result"]["isError"] is False
+    assert events[-1]["result"]["structuredContent"]["answer"] == "藏知是个人知识中枢。"
+
+
+def test_mcp_knowledge_ask_sse_token_and_legacy_compatibility(client, monkeypatch):
+    test_client, token = _setup_mcp_ask_env(client, monkeypatch)
+    with test_client.stream(
+        "POST",
+        "/api/mcp",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "APPLICATION/JSON, TEXT/EVENT-STREAM",
+        },
+        json=_mcp_ask_body(progress_token=7),
+    ) as response:
+        response.read()
+        events = _parse_sse(response.text)
+    progress = [e for e in events if e.get("method") == "notifications/progress"]
+    assert progress
+    assert all(e["params"]["progressToken"] == 7 for e in progress)
+    assert events[-1]["id"] == 8
+    base = {"Authorization": f"Bearer {token}"}
+    plain = test_client.post(
+        "/api/mcp", headers=base, json=_mcp_ask_body(progress_token="pt-x")
+    )
+    assert plain.status_code == 200
+    assert plain.headers["content-type"].startswith("application/json")
+    assert plain.json()["id"] == 8
+    assert plain.json()["result"]["structuredContent"]["answer"] == "藏知是个人知识中枢。"
+
+    no_token = test_client.post(
+        "/api/mcp",
+        headers={"Authorization": f"Bearer {token}", "Accept": "text/event-stream"},
+        json=_mcp_ask_body(),
+    )
+    assert no_token.headers["content-type"].startswith("application/json")
+    assert no_token.json()["result"]["isError"] is False
+
+    no_accept = test_client.post(
+        "/api/mcp",
+        headers={"Authorization": f"Bearer {token}"},
+        json=_mcp_ask_body(progress_token="pt-y"),
+    )
+    assert no_accept.headers["content-type"].startswith("application/json")
+    assert no_accept.json()["id"] == 8
+
+    boolean_token = test_client.post(
+        "/api/mcp",
+        headers={**base, "Accept": "text/event-stream"},
+        json=_mcp_ask_body(progress_token=False),
+    )
+    assert boolean_token.headers["content-type"].startswith("application/json")
+
+
+def test_mcp_knowledge_ask_sse_preserves_tool_error(client, monkeypatch):
+    test_client, token = _setup_mcp_ask_env(client, monkeypatch)
+    with test_client.stream(
+        "POST",
+        "/api/mcp",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+        },
+        json=_mcp_ask_body(progress_token="pt-err", extra={"mode": "deep"}),
+    ) as response:
+        response.read()
+        events = _parse_sse(response.text)
+    assert len(events) == 1
+    final = events[0]
+    assert final["id"] == 8
+    assert final["result"]["isError"] is True
+    assert final["result"]["structuredContent"]["error"]["code"] == "invalid_arguments"
 
 
 def test_deep_ask_stream_emits_live_tool_progress_and_result(client, monkeypatch):

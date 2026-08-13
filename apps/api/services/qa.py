@@ -27,7 +27,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -53,6 +53,12 @@ from .structured_table import (
     is_structured_table_question,
     try_structured_table_query,
 )
+
+# Reported progress stages are deliberately coarse and never include
+# reasoning or evidence content, so callers can stream an "in progress"
+# indicator without leaking the model's chain of thought.
+ProgressCallback = Callable[[int, int, str], Awaitable[None]]
+PROGRESS_TOTAL = 100
 
 # ---- Limits ---------------------------------------------------------------
 # These constants cap what a single ask call can do. The point is to
@@ -287,7 +293,13 @@ class QAService:
     def is_provider_configured(self) -> bool:
         return self._provider is not None and self._provider.is_configured()
 
-    async def ask(self, db: AsyncSession, request: AskRequest) -> AskResult:
+    async def ask(
+        self,
+        db: AsyncSession,
+        request: AskRequest,
+        *,
+        on_progress: ProgressCallback | None = None,
+    ) -> AskResult:
         question = (request.question or "").strip()
         if not question:
             raise AskError("empty_question", "问题不能为空")
@@ -303,6 +315,9 @@ class QAService:
                 "尚未配置问答模型，请先完成模型设置",
             )
 
+        if on_progress is not None:
+            await on_progress(0, PROGRESS_TOTAL, "开始检索")
+
         evidence, retrieval = await self.collect_evidence(
             db,
             question=question,
@@ -315,6 +330,8 @@ class QAService:
             connector_ids=request.connector_ids,
             matches_none=request.matches_none,
         )
+        if on_progress is not None:
+            await on_progress(40, PROGRESS_TOTAL, "检索完成，正在分析")
         assert self._provider is not None  # checked above
         table_matches_none = request.matches_none
         candidate_table_document_ids = (
@@ -442,6 +459,8 @@ class QAService:
             )
 
         provider_payload = [ev.to_provider_dict() for ev in evidence]
+        if on_progress is not None:
+            await on_progress(70, PROGRESS_TOTAL, "正在生成回答")
         try:
             assert self._provider is not None  # checked above
             answer = await asyncio.to_thread(
@@ -451,6 +470,8 @@ class QAService:
             )
         except AIProviderError as exc:
             raise AskError("provider_failed", "模型暂时不可用，请稍后再试") from exc
+        if on_progress is not None:
+            await on_progress(90, PROGRESS_TOTAL, "即将完成")
 
         evidence_by_id = {ev.id: ev for ev in evidence}
         # The provider's own ``validate_against_evidence`` already

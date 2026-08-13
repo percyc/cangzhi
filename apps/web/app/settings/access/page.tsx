@@ -351,6 +351,8 @@ export default function AccessSettingsPage() {
           环境变量；通过 <code>CANGZHI_WORKSPACE</code> 选择工作空间，未设置时使用
           <code className="ml-1">default</code>。完整模板位于项目的
           <code className="ml-1">integrations/skills/cangzhi-knowledge</code>。
+          支持 MCP 进度通知的平台调用 <code>knowledge_ask</code> 时，会实时显示检索、
+          分析和回答生成阶段；其他平台仍使用普通 JSON 结果，不受影响。
         </p>
       </section>
 

@@ -77,6 +77,12 @@ structured result.
 `knowledge_ask` is quick-only over MCP. Complex work should be planned by the
 external agent with the retrieval and dataset tools; do not nest a second deep
 agent inside the MCP call.
+Clients can request coarse-grained progress for `knowledge_ask` by including a
+string or integer `params._meta.progressToken` and accepting `text/event-stream`.
+The server emits MCP `notifications/progress` messages and finishes the same SSE
+response with the normal JSON-RPC tool result. Without both signals, the endpoint
+keeps returning one JSON response for compatibility. Progress messages expose
+execution stages only, never chain-of-thought or token-by-token model output.
 `knowledge_get_document` returns a bounded content window (12000 characters by
 default). Follow `content_window.next_offset` only when more source text is
 actually required; never request an entire large spreadsheet merely to answer
