@@ -53,6 +53,11 @@ Authorization: Bearer ${CANGZHI_TOKEN}
 X-Cangzhi-Workspace: ${CANGZHI_WORKSPACE}
 ```
 
+藏知提供的是 MCP Streamable HTTP。若客户端配置中只有旧版 `SSE`，它会尝试
+`GET /api/mcp`，并收到 `405 Method Not Allowed`；这不是令牌或工作空间错误。
+此时请在 Dify 等平台改选 `Streamable HTTP`，或者直接调用 REST 深度问答接口
+`POST /api/v1/knowledge/ask`。
+
 局域网或 Docker 自托管时，Dify、Hermes 等机器对机器客户端优先直连 API，例如
 `http://192.168.50.136:8000/api/mcp`。`http://192.168.50.136:3000/api/mcp`
 会经过 Next.js 同源代理，适合浏览器或只开放单一入口的反向代理部署，但不应作为

@@ -98,6 +98,7 @@ OCR 深度增强、领域解析和受控写入 API 按[路线图](docs/ROADMAP.m
 - [当前任务清单](docs/BACKLOG.md)
 - [关键技术决策](docs/DECISIONS.md)
 - [外部 Agent、CLI 与 MCP 接入](docs/INTEGRATIONS.md)
+- [API / MCP / CLI 接口使用参考](docs/API_REFERENCE.md)
 - [备份与恢复](docs/BACKUP_AND_RESTORE.md)
 
 ## 技术栈

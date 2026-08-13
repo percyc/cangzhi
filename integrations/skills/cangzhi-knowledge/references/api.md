@@ -63,6 +63,11 @@ Handle these codes without parsing the message:
 
 Streamable HTTP endpoint: `POST /api/mcp`.
 
+This server does not expose the legacy `GET /sse` + message-POST transport.
+`GET /api/mcp` returns `405 Method Not Allowed`; clients must select
+`Streamable HTTP`. If a platform only supports legacy SSE, use the REST endpoint
+`POST /api/v1/knowledge/ask` for Cangzhi-generated answers instead.
+
 For self-hosted machine-to-machine clients, prefer the API listener directly
 (for example `http://host:8000/api/mcp`) instead of routing a long-lived MCP
 response through the Next.js port 3000. Keep the same-origin URL for deployments
