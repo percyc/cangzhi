@@ -63,6 +63,11 @@ Handle these codes without parsing the message:
 
 Streamable HTTP endpoint: `POST /api/mcp`.
 
+For self-hosted machine-to-machine clients, prefer the API listener directly
+(for example `http://host:8000/api/mcp`) instead of routing a long-lived MCP
+response through the Next.js port 3000. Keep the same-origin URL for deployments
+where a dedicated reverse proxy is the only public entry point.
+
 Supported tools:
 
 - `knowledge_list_scopes`

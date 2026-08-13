@@ -23,6 +23,7 @@ type TokenList = {
 type IntegrationInfo = {
   base_url: string;
   mcp_url: string;
+  proxy_mcp_url: string;
   authorization_header: string;
   workspace_slug: string;
 };
@@ -105,9 +106,11 @@ export default function AccessSettingsPage() {
       };
       setPlaintext(body.token);
       const publicBaseUrl = window.location.origin;
+      const machineApiBaseUrl = defaultMachineApiBaseUrl(publicBaseUrl);
       setIntegration({
-        base_url: publicBaseUrl,
-        mcp_url: `${publicBaseUrl}${body.integration.mcp_path}`,
+        base_url: machineApiBaseUrl,
+        mcp_url: `${machineApiBaseUrl}${body.integration.mcp_path}`,
+        proxy_mcp_url: `${publicBaseUrl}${body.integration.mcp_path}`,
         authorization_header: body.integration.authorization_header,
         workspace_slug: currentWorkspaceSlug,
       });
@@ -396,11 +399,22 @@ export default function AccessSettingsPage() {
               )}
               <CopyBlock
                 className="mt-4"
-                label="MCP URL"
+                label="MCP URL（API 直连，Dify 等外部平台推荐）"
                 value={integration.mcp_url}
                 copied={copiedKey === 'mcp-url'}
                 onCopy={() => void copy('mcp-url', integration.mcp_url)}
               />
+              {integration.proxy_mcp_url !== integration.mcp_url && (
+                <CopyBlock
+                  className="mt-3"
+                  label="MCP URL（同源代理，直连端口不可访问时使用）"
+                  value={integration.proxy_mcp_url}
+                  copied={copiedKey === 'proxy-mcp-url'}
+                  onCopy={() =>
+                    void copy('proxy-mcp-url', integration.proxy_mcp_url)
+                  }
+                />
+              )}
               <CopyBlock
                 className="mt-3"
                 label="认证请求头"
@@ -559,6 +573,17 @@ async function copyText(value: string) {
   const copied = document.execCommand('copy');
   document.body.removeChild(textarea);
   if (!copied) throw new Error('copy failed');
+}
+
+function defaultMachineApiBaseUrl(publicBaseUrl: string) {
+  const url = new URL(publicBaseUrl);
+  // The bundled self-hosted deployment exposes Next.js on 3000 and the API on
+  // 8000. Machine-to-machine streaming should bypass the generic Next rewrite.
+  // Reverse-proxy/HTTPS deployments keep their public same-origin endpoint.
+  if (url.protocol === 'http:' && url.port === '3000') {
+    url.port = '8000';
+  }
+  return url.origin;
 }
 
 function mcpConfig(integration: IntegrationInfo) {

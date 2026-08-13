@@ -53,6 +53,12 @@ Authorization: Bearer ${CANGZHI_TOKEN}
 X-Cangzhi-Workspace: ${CANGZHI_WORKSPACE}
 ```
 
+局域网或 Docker 自托管时，Dify、Hermes 等机器对机器客户端优先直连 API，例如
+`http://192.168.50.136:8000/api/mcp`。`http://192.168.50.136:3000/api/mcp`
+会经过 Next.js 同源代理，适合浏览器或只开放单一入口的反向代理部署，但不应作为
+可访问 8000 端口时的首选长连接路径。HTTPS 单域名部署仍使用反向代理暴露的同源
+`/api/mcp`，并关闭代理缓冲、放宽读取超时。
+
 默认工作流是“藏知提供证据、外部 Agent 负责回答”，从而避免重复调用两次
 大模型。需要藏知直接给出带引用回答，尤其是精确筛选或计算表格时，REST 调用
 `/api/v1/knowledge/ask`，MCP 调用 `knowledge_ask`；对应令牌必须包含
