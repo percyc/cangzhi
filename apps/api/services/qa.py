@@ -66,10 +66,11 @@ PROGRESS_TOTAL = 100
 # the corpus is large, and to keep latency predictable.
 
 MAX_QUESTION_LENGTH = 500
-MAX_EVIDENCE_ITEMS = 8
+DEFAULT_EVIDENCE_ITEMS = 8
+MAX_EVIDENCE_ITEMS = 16
 EVIDENCE_SNIPPET_CHARS = 600
 EVIDENCE_TOTAL_CHARS = 4_000
-NEIGHBOR_CONTEXT_CHARS = 180
+NEIGHBOR_CONTEXT_CHARS = 240
 CJK_RECALL_LIMIT = MAX_EVIDENCE_ITEMS * 4
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _QUESTION_GRAMS = {
@@ -120,6 +121,42 @@ class AskRequest:
     document_ids: list[int] = field(default_factory=list)
     connector_ids: list[int] = field(default_factory=list)
     matches_none: bool = False
+
+
+def _evidence_limit_for_question(question: str) -> int:
+    """Choose a bounded evidence window without requiring user tuning.
+
+    Enumerative and procedural questions commonly span several adjacent
+    chunks (for example, a legal provision listing multiple procedures).
+    Keep short factual questions compact, but give these questions a larger
+    window.  The hard cap remains deliberately small and independent of the
+    provider's advertised context window so one request cannot flood a model.
+    """
+
+    text = (question or "").strip()
+    procedural_markers = (
+        "程序",
+        "步骤",
+        "流程",
+        "条件",
+        "要求",
+        "分别",
+        "哪些",
+        "如何",
+        "包括",
+        "依据",
+    )
+    if len(text) >= 24 or any(marker in text for marker in procedural_markers):
+        return 12
+    return DEFAULT_EVIDENCE_ITEMS
+
+
+def _evidence_budget_for_question(question: str) -> tuple[int, int]:
+    """Return ``(total_chars, per_item_chars)`` for the evidence prompt."""
+
+    if _evidence_limit_for_question(question) > DEFAULT_EVIDENCE_ITEMS:
+        return 8_000, 800
+    return EVIDENCE_TOTAL_CHARS, EVIDENCE_SNIPPET_CHARS
 
 
 @dataclass
@@ -318,6 +355,8 @@ class QAService:
         if on_progress is not None:
             await on_progress(0, PROGRESS_TOTAL, "开始检索")
 
+        evidence_limit = _evidence_limit_for_question(question)
+        evidence_total_chars, evidence_item_chars = _evidence_budget_for_question(question)
         evidence, retrieval = await self.collect_evidence(
             db,
             question=question,
@@ -329,6 +368,9 @@ class QAService:
             document_ids=request.document_ids,
             connector_ids=request.connector_ids,
             matches_none=request.matches_none,
+            evidence_limit=evidence_limit,
+            evidence_total_chars=evidence_total_chars,
+            evidence_item_chars=evidence_item_chars,
         )
         if on_progress is not None:
             await on_progress(40, PROGRESS_TOTAL, "检索完成，正在分析")
@@ -411,7 +453,7 @@ class QAService:
                 db, structured_result
             )
             if structured_evidence is not None:
-                evidence = [structured_evidence, *evidence[: MAX_EVIDENCE_ITEMS - 1]]
+                evidence = [structured_evidence, *evidence[: evidence_limit - 1]]
                 for evidence_id, item in enumerate(evidence, start=1):
                     item.id = evidence_id
                 retrieval = {
@@ -535,7 +577,11 @@ class QAService:
         document_ids: Sequence[int] | None = None,
         connector_ids: Sequence[int] | None = None,
         matches_none: bool = False,
+        evidence_limit: int = DEFAULT_EVIDENCE_ITEMS,
+        evidence_total_chars: int = EVIDENCE_TOTAL_CHARS,
+        evidence_item_chars: int = EVIDENCE_SNIPPET_CHARS,
     ) -> tuple[list[Evidence], dict]:
+        evidence_limit = max(1, min(evidence_limit, MAX_EVIDENCE_ITEMS))
         effective_document_ids = list(document_ids or [])
         if connector_ids and not matches_none:
             from .knowledge_scopes import resolve_connector_document_ids
@@ -567,7 +613,7 @@ class QAService:
                 db,
                 question=question,
                 filters=filters,
-                limit=CJK_RECALL_LIMIT,
+                limit=evidence_limit * 4,
             )
             if not rows:
                 rows = (
@@ -575,7 +621,7 @@ class QAService:
                         db,
                         question=question,
                         filters=filters,
-                        limit=MAX_EVIDENCE_ITEMS,
+                        limit=evidence_limit,
                     )
                     if _detect_backend(db) == "postgresql"
                     else []
@@ -586,14 +632,14 @@ class QAService:
                     db,
                     question=question,
                     filters=filters,
-                    limit=MAX_EVIDENCE_ITEMS,
+                    limit=evidence_limit,
                 )
                 if _detect_backend(db) == "postgresql"
                 else await self._recall_like(
                     db,
                     question=question,
                     filters=filters,
-                    limit=MAX_EVIDENCE_ITEMS,
+                    limit=evidence_limit,
                 )
             )
         from .hybrid_retrieval import recall_vector_chunks, rrf_scores
@@ -602,7 +648,7 @@ class QAService:
             db,
             query=question,
             filters=filters,
-            limit=CJK_RECALL_LIMIT,
+            limit=evidence_limit * 4,
         )
         if vector.status.vector_used:
             lexical_ids = [row.chunk_id for row in rows]
@@ -623,8 +669,11 @@ class QAService:
             db,
             rows,
             question=question,
+            evidence_limit=evidence_limit,
+            evidence_total_chars=evidence_total_chars,
+            evidence_item_chars=evidence_item_chars,
         )
-        return evidence[:MAX_EVIDENCE_ITEMS], vector.status.to_dict()
+        return evidence[:evidence_limit], vector.status.to_dict()
 
     async def _recall_postgres(
         self,
@@ -857,6 +906,9 @@ class QAService:
         rows,
         *,
         question: str,
+        evidence_limit: int = DEFAULT_EVIDENCE_ITEMS,
+        evidence_total_chars: int = EVIDENCE_TOTAL_CHARS,
+        evidence_item_chars: int = EVIDENCE_SNIPPET_CHARS,
     ) -> list[Evidence]:
         if not rows:
             return []
@@ -879,9 +931,9 @@ class QAService:
         }
         terms = normalize_query(question)
 
-        selected_rows = list(rows[:MAX_EVIDENCE_ITEMS])
+        selected_rows = list(rows[: max(1, min(evidence_limit, MAX_EVIDENCE_ITEMS))])
         evidence: list[Evidence] = []
-        budget = EVIDENCE_TOTAL_CHARS
+        budget = max(1, evidence_total_chars)
         for index, row in enumerate(selected_rows, start=1):
             if budget <= 0:
                 break
@@ -894,7 +946,7 @@ class QAService:
             )
             snippet = _build_snippet(content, terms=terms)
             chunk = chunks.get(row.chunk_id)
-            item_limit = min(EVIDENCE_SNIPPET_CHARS, fair_share)
+            item_limit = min(max(1, evidence_item_chars), fair_share)
             if len(snippet) > item_limit:
                 if item_limit == 1:
                     snippet = "…"
