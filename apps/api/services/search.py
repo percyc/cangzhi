@@ -48,6 +48,9 @@ SNIPPET_MAX_LENGTH = 280
 # semantic recall for genuinely related documents while preventing unrelated
 # dataset catalogs from displacing a precise text hit.
 VECTOR_ONLY_MIN_SIMILARITY = 0.58
+CJK_STRONG_MATCH_SCORE = 10.0
+CJK_RELATIVE_SCORE_FLOOR = 0.35
+SEARCH_CONTEXT_MAX_CHARS = 1_800
 _TABLE_LOCATION_KEYS = {
     "sheet_name",
     "region_index",
@@ -57,6 +60,18 @@ _TABLE_LOCATION_KEYS = {
     "column_names",
     "row_fragmented",
     "table_ranges",
+}
+_CJK_QUESTION_GRAMS = {
+    "什么",
+    "怎么",
+    "如何",
+    "为何",
+    "是否",
+    "哪些",
+    "一下",
+    "这个",
+    "那个",
+    "可以",
 }
 
 
@@ -91,6 +106,7 @@ class SearchHit:
     highlights: list[dict]
     categories: list[dict]
     tags: list[dict]
+    context: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -117,6 +133,7 @@ class SearchHit:
                 "table_location": dict(self.table_location),
             },
             "snippet": self.snippet,
+            "context": self.context,
             "highlights": self.highlights,
             "categories": self.categories,
             "tags": self.tags,
@@ -235,6 +252,38 @@ def extract_cjk_ngrams(
     return grams
 
 
+def _cjk_weighted_patterns(query: str, terms: Sequence[str]) -> list[tuple[str, int]]:
+    """Build bounded CJK terms for PostgreSQL substring recall.
+
+    PostgreSQL's ``simple`` text-search dictionary does not segment Chinese.
+    Full-sentence substring matching is too strict, so combine meaningful
+    normalized terms with bounded 2/3-grams. Generic question words are
+    excluded to avoid recalling documents merely because they say “如何”.
+    """
+
+    weighted = (
+        [(term, 5) for term in terms]
+        + [
+            (term, 2)
+            for term in extract_cjk_ngrams(query, min_gram=3, max_gram=3, max_ngrams=12)
+        ]
+        + [
+            (term, 1)
+            for term in extract_cjk_ngrams(query, min_gram=2, max_gram=2, max_ngrams=12)
+        ]
+    )
+    patterns: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for term, weight in weighted:
+        if not term or term in seen or term in _CJK_QUESTION_GRAMS:
+            continue
+        seen.add(term)
+        patterns.append((term, weight))
+        if len(patterns) >= 16:
+            break
+    return patterns
+
+
 def _ngrams_from_run(
     run: list[str],
     *,
@@ -277,9 +326,7 @@ async def search_documents(
     if connector_ids and not matches_none:
         from .knowledge_scopes import resolve_connector_document_ids
 
-        connector_document_ids = await resolve_connector_document_ids(
-            db, connector_ids
-        )
+        connector_document_ids = await resolve_connector_document_ids(db, connector_ids)
         if not connector_document_ids:
             matches_none = True
         elif effective_document_ids:
@@ -310,6 +357,9 @@ async def search_documents(
         connector_ids=connector_ids,
         matches_none=matches_none,
     )
+    if _contains_cjk(query):
+        lexical.hits = _filter_weak_cjk_hits(lexical.hits)
+        lexical.total = min(lexical.total, len(lexical.hits))
     if not (query or "").strip():
         return lexical
 
@@ -328,6 +378,7 @@ async def search_documents(
         lexical.hits = lexical.hits[
             requested_offset : requested_offset + requested_limit
         ]
+        await _attach_neighbor_context(db, lexical.hits)
         return lexical
 
     lexical_ids = [hit.chunk_id for hit in lexical.hits]
@@ -355,7 +406,90 @@ async def search_documents(
     lexical.limit = requested_limit
     lexical.offset = requested_offset
     lexical.hits = best_documents[requested_offset : requested_offset + requested_limit]
+    await _attach_neighbor_context(db, lexical.hits)
     return lexical
+
+
+def _filter_weak_cjk_hits(hits: Sequence[SearchHit]) -> list[SearchHit]:
+    """Prune weak term-only documents when one strong CJK match exists."""
+
+    if not hits:
+        return []
+    top_score = max(float(hit.score or 0.0) for hit in hits)
+    if top_score < CJK_STRONG_MATCH_SCORE:
+        return list(hits)
+    floor = top_score * CJK_RELATIVE_SCORE_FLOOR
+    return [hit for hit in hits if float(hit.score or 0.0) >= floor]
+
+
+async def _attach_neighbor_context(
+    db: AsyncSession,
+    hits: Sequence[SearchHit],
+    *,
+    max_chars: int = SEARCH_CONTEXT_MAX_CHARS,
+) -> None:
+    """Attach one sibling on each side of prose hits in a bounded field."""
+
+    prose_hits = [hit for hit in hits if hit.parent_id and not hit.table_location]
+    if not prose_hits:
+        return
+    chunk_ids = [hit.chunk_id for hit in prose_hits]
+    centers = {
+        chunk.id: chunk
+        for chunk in (
+            await db.execute(
+                select(DocumentChunk).where(DocumentChunk.id.in_(chunk_ids))
+            )
+        )
+        .scalars()
+        .all()
+    }
+    parent_ids = {chunk.parent_id for chunk in centers.values() if chunk.parent_id}
+    siblings = (
+        (
+            await db.execute(
+                select(DocumentChunk)
+                .where(
+                    DocumentChunk.parent_id.in_(parent_ids),
+                    DocumentChunk.role == "child",
+                    DocumentChunk.is_current.is_(True),
+                )
+                .order_by(DocumentChunk.parent_id, DocumentChunk.order_index)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_parent: dict[int, list[DocumentChunk]] = {}
+    for chunk in siblings:
+        if chunk.parent_id is not None:
+            by_parent.setdefault(chunk.parent_id, []).append(chunk)
+    for hit in prose_hits:
+        center = centers.get(hit.chunk_id)
+        if center is None or center.parent_id is None:
+            continue
+        family = by_parent.get(center.parent_id, [])
+        index = next((i for i, item in enumerate(family) if item.id == center.id), None)
+        if index is None:
+            continue
+        selected = family[max(0, index - 1) : index + 2]
+        context = "\n\n".join((item.content or "").strip() for item in selected).strip()
+        if len(context) > max_chars:
+            center_text = (center.content or "").strip()
+            center_start = context.find(center_text)
+            if center_start < 0:
+                context = context[:max_chars]
+            else:
+                before = max(0, (max_chars - len(center_text)) // 2)
+                start = max(0, center_start - before)
+                context = context[start : start + max_chars]
+                if start > 0:
+                    context = "…" + context[1:]
+                if start + max_chars < len(
+                    "\n\n".join((item.content or "").strip() for item in selected)
+                ):
+                    context = context[:-1] + "…"
+        hit.context = context
 
 
 def _filter_vector_only_rows(rows, lexical_chunk_ids: Sequence[int]) -> list:
@@ -578,15 +712,26 @@ async def _search_postgres(
     )
     fts_match: ColumnElement[Any] = ts_vector.op("@@")(ts_query)
     exact_match = DocumentChunk.search_text.ilike(_like_pattern(query), escape="\\")
-    # PostgreSQL's built-in ``simple`` dictionary does not segment
-    # continuous Chinese text. Keep FTS for Latin terms and ranking,
-    # and add exact substring matching for CJK queries.
-    match_clause: ColumnElement[Any] = (
-        or_(fts_match, exact_match) if _contains_cjk(query) else fts_match
-    )
-    rank = (
-        func.ts_rank_cd(ts_vector, ts_query) + case((exact_match, 1.0), else_=0.0)
-    ).label("rank")
+    rank_expression: ColumnElement[Any] = func.ts_rank_cd(ts_vector, ts_query)
+    if _contains_cjk(query):
+        # ``simple`` does not segment Chinese and an exact full-sentence
+        # substring is rarely present in source material. Require a minimum
+        # weighted n-gram score so one generic word cannot match the corpus.
+        score_parts = []
+        for term, weight in _cjk_weighted_patterns(query, terms):
+            term_match = DocumentChunk.search_text.ilike(
+                _like_pattern(term), escape="\\"
+            )
+            score_parts.append(case((term_match, weight), else_=0))
+        cjk_score: ColumnElement[Any] = case((exact_match, 8), else_=0)
+        for part in score_parts:
+            cjk_score = cjk_score + part
+        cjk_match = cjk_score >= 2
+        match_clause: ColumnElement[Any] = or_(fts_match, exact_match, cjk_match)
+        rank_expression = rank_expression + cjk_score
+    else:
+        match_clause = fts_match
+    rank = rank_expression.label("rank")
 
     base = (
         select(

@@ -282,6 +282,8 @@ def test_search_returns_one_best_hit_per_document(search_db):
     result = asyncio.run(_run())
     assert result.total == 1
     assert len(result.hits) == 1
+    assert result.hits[0].context
+    assert "重复命中词" in result.hits[0].context
 
 
 def test_search_filters_by_category(search_db):
