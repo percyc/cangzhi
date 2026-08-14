@@ -42,6 +42,12 @@ MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
 SNIPPET_RADIUS = 80
 SNIPPET_MAX_LENGTH = 280
+# RRF ranks are useful for ordering, but they are not a relevance score.
+# When lexical evidence already exists, a vector-only hit must clear this
+# cosine-similarity floor before it can introduce a new document. This keeps
+# semantic recall for genuinely related documents while preventing unrelated
+# dataset catalogs from displacing a precise text hit.
+VECTOR_ONLY_MIN_SIMILARITY = 0.58
 _TABLE_LOCATION_KEYS = {
     "sheet_name",
     "region_index",
@@ -324,8 +330,9 @@ async def search_documents(
         ]
         return lexical
 
-    vector_hits = await _build_hits(db, vector.rows, normalize_query(query))
     lexical_ids = [hit.chunk_id for hit in lexical.hits]
+    vector_rows = _filter_vector_only_rows(vector.rows, lexical_ids)
+    vector_hits = await _build_hits(db, vector_rows, normalize_query(query))
     vector_ids = [hit.chunk_id for hit in vector_hits]
     scores = rrf_scores(lexical_ids, vector_ids)
     hit_by_chunk = {hit.chunk_id: hit for hit in [*lexical.hits, *vector_hits]}
@@ -349,6 +356,34 @@ async def search_documents(
     lexical.offset = requested_offset
     lexical.hits = best_documents[requested_offset : requested_offset + requested_limit]
     return lexical
+
+
+def _filter_vector_only_rows(rows, lexical_chunk_ids: Sequence[int]) -> list:
+    """Drop weak vector-only candidates when lexical evidence is present.
+
+    A lexical hit establishes that the query has an exact/term-level match.
+    In that situation, allowing every vector candidate into the fused list
+    makes generic documents (especially table catalogs) look authoritative.
+    We still retain vector-only candidates above the similarity floor, and
+    retain all rows that were also found lexically. If there are no lexical
+    hits, vector-only recall remains unrestricted for semantic search.
+    """
+
+    if not lexical_chunk_ids:
+        return list(rows)
+    lexical_ids = set(lexical_chunk_ids)
+    filtered: list = []
+    for row in rows:
+        if row.chunk_id in lexical_ids:
+            filtered.append(row)
+            continue
+        try:
+            similarity = float(getattr(row, "rank", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            similarity = 0.0
+        if similarity >= VECTOR_ONLY_MIN_SIMILARITY:
+            filtered.append(row)
+    return filtered
 
 
 async def _search_documents_lexical(

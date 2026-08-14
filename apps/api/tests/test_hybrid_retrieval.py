@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -14,7 +15,7 @@ from apps.api.models.chunks import DocumentChunk
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.services.hybrid_retrieval import rrf_scores
-from apps.api.services.search import search_documents
+from apps.api.services.search import _filter_vector_only_rows, search_documents
 
 
 def test_rrf_rewards_chunks_seen_by_both_retrievers():
@@ -22,6 +23,23 @@ def test_rrf_rewards_chunks_seen_by_both_retrievers():
     assert scores[1] > scores[2]
     assert scores[3] > scores[4]
     assert len(scores) == 4
+
+
+def test_weak_vector_only_rows_do_not_pollute_a_lexical_search():
+    rows = [
+        SimpleNamespace(chunk_id=1, rank=0.31),
+        SimpleNamespace(chunk_id=2, rank=0.81),
+        SimpleNamespace(chunk_id=3, rank=0.99),
+    ]
+
+    filtered = _filter_vector_only_rows(rows, lexical_chunk_ids=[3])
+
+    assert [row.chunk_id for row in filtered] == [2, 3]
+
+
+def test_vector_only_recall_is_preserved_when_lexical_search_is_empty():
+    rows = [SimpleNamespace(chunk_id=1, rank=0.12)]
+    assert _filter_vector_only_rows(rows, lexical_chunk_ids=[]) == rows
 
 
 def test_vector_only_document_is_returned_by_hybrid_search(monkeypatch):
