@@ -27,19 +27,19 @@ def test_rrf_rewards_chunks_seen_by_both_retrievers():
 
 def test_weak_vector_only_rows_do_not_pollute_a_lexical_search():
     rows = [
-        SimpleNamespace(chunk_id=1, rank=0.31),
-        SimpleNamespace(chunk_id=2, rank=0.81),
-        SimpleNamespace(chunk_id=3, rank=0.99),
+        SimpleNamespace(chunk_id=1, document_id=10, rank=0.31),
+        SimpleNamespace(chunk_id=2, document_id=20, rank=0.81),
+        SimpleNamespace(chunk_id=3, document_id=30, rank=0.99),
     ]
 
-    filtered = _filter_vector_only_rows(rows, lexical_chunk_ids=[3])
+    filtered = _filter_vector_only_rows(rows, lexical_document_ids=[10])
 
-    assert [row.chunk_id for row in filtered] == [2, 3]
+    assert [row.chunk_id for row in filtered] == [3]
 
 
 def test_vector_only_recall_is_preserved_when_lexical_search_is_empty():
-    rows = [SimpleNamespace(chunk_id=1, rank=0.12)]
-    assert _filter_vector_only_rows(rows, lexical_chunk_ids=[]) == rows
+    rows = [SimpleNamespace(chunk_id=1, document_id=10, rank=0.12)]
+    assert _filter_vector_only_rows(rows, lexical_document_ids=[]) == rows
 
 
 def test_vector_only_document_is_returned_by_hybrid_search(monkeypatch):
@@ -130,6 +130,7 @@ def test_vector_only_document_is_returned_by_hybrid_search(monkeypatch):
             assert result.backend == "hybrid"
             assert result.retrieval["vector_used"] is True
             assert [hit.document_id for hit in result.hits] == [document.id]
+            assert result.hits[0].retrieval_channels == ["vector"]
         await engine.dispose()
 
     asyncio.run(scenario())

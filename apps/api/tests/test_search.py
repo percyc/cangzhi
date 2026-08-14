@@ -244,6 +244,7 @@ def test_search_returns_matching_document(search_db):
     assert result.hits[0].title == "藏知检索"
     assert "搜索" in result.hits[0].snippet
     assert result.hits[0].highlights
+    assert result.hits[0].retrieval_channels == ["lexical"]
 
 
 def test_search_matches_title_only(search_db):

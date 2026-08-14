@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import Integer, and_, case, false, func, or_, select
@@ -42,14 +42,11 @@ MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
 SNIPPET_RADIUS = 80
 SNIPPET_MAX_LENGTH = 280
-# RRF ranks are useful for ordering, but they are not a relevance score.
-# When lexical evidence already exists, a vector-only hit must clear this
-# cosine-similarity floor before it can introduce a new document. This keeps
-# semantic recall for genuinely related documents while preventing unrelated
-# dataset catalogs from displacing a precise text hit.
-VECTOR_ONLY_MIN_SIMILARITY = 0.58
-CJK_STRONG_MATCH_SCORE = 10.0
-CJK_RELATIVE_SCORE_FLOOR = 0.35
+# Embedding score distributions vary by model. Filter vector-only documents
+# relative to the best hit in the current request instead of using a fixed
+# similarity threshold tied to one embedding space.
+VECTOR_ONLY_RELATIVE_RATIO = 0.80
+VECTOR_ONLY_MAX_GAP = 0.12
 SEARCH_CONTEXT_MAX_CHARS = 1_800
 _TABLE_LOCATION_KEYS = {
     "sheet_name",
@@ -107,6 +104,7 @@ class SearchHit:
     categories: list[dict]
     tags: list[dict]
     context: str | None = None
+    retrieval_channels: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -134,6 +132,7 @@ class SearchHit:
             },
             "snippet": self.snippet,
             "context": self.context,
+            "retrieval_channels": list(self.retrieval_channels),
             "highlights": self.highlights,
             "categories": self.categories,
             "tags": self.tags,
@@ -357,9 +356,6 @@ async def search_documents(
         connector_ids=connector_ids,
         matches_none=matches_none,
     )
-    if _contains_cjk(query):
-        lexical.hits = _filter_weak_cjk_hits(lexical.hits)
-        lexical.total = min(lexical.total, len(lexical.hits))
     if not (query or "").strip():
         return lexical
 
@@ -378,48 +374,47 @@ async def search_documents(
         lexical.hits = lexical.hits[
             requested_offset : requested_offset + requested_limit
         ]
+        for hit in lexical.hits:
+            hit.retrieval_channels = ["lexical"]
         await _attach_neighbor_context(db, lexical.hits)
         return lexical
 
-    lexical_ids = [hit.chunk_id for hit in lexical.hits]
-    vector_rows = _filter_vector_only_rows(vector.rows, lexical_ids)
+    lexical_document_ids = [hit.document_id for hit in lexical.hits]
+    vector_rows = _filter_vector_only_rows(vector.rows, lexical_document_ids)
     vector_hits = await _build_hits(db, vector_rows, normalize_query(query))
-    vector_ids = [hit.chunk_id for hit in vector_hits]
-    scores = rrf_scores(lexical_ids, vector_ids)
-    hit_by_chunk = {hit.chunk_id: hit for hit in [*lexical.hits, *vector_hits]}
-    ordered = sorted(
-        hit_by_chunk.values(),
-        key=lambda hit: (-scores.get(hit.chunk_id, 0.0), hit.chunk_id),
+    vector_document_ids = list(dict.fromkeys(hit.document_id for hit in vector_hits))
+    # Search returns documents, so fuse at document level. Lexical and vector
+    # retrieval frequently hit adjacent chunks in the same document; chunk-
+    # level RRF failed to reward that agreement and was sensitive to chunking.
+    scores = rrf_scores(lexical_document_ids, vector_document_ids)
+    lexical_by_document = {hit.document_id: hit for hit in lexical.hits}
+    vector_by_document: dict[int, SearchHit] = {}
+    for hit in vector_hits:
+        vector_by_document.setdefault(hit.document_id, hit)
+    ordered_document_ids = sorted(
+        scores,
+        key=lambda document_id: (-scores[document_id], document_id),
     )
-    # Search results are documents, not chunks. Keep the best fused
-    # chunk for each document before applying pagination.
     best_documents: list[SearchHit] = []
-    seen_documents: set[int] = set()
-    for hit in ordered:
-        if hit.document_id in seen_documents:
-            continue
-        seen_documents.add(hit.document_id)
-        hit.score = scores.get(hit.chunk_id, 0.0)
+    for document_id in ordered_document_ids:
+        hit = lexical_by_document.get(document_id) or vector_by_document[document_id]
+        hit.score = scores[document_id]
+        hit.retrieval_channels = [
+            channel
+            for channel, present in (
+                ("lexical", document_id in lexical_by_document),
+                ("vector", document_id in vector_by_document),
+            )
+            if present
+        ]
         best_documents.append(hit)
     lexical.backend = "hybrid"
-    lexical.total = max(lexical.total, len(best_documents))
+    lexical.total = len(best_documents)
     lexical.limit = requested_limit
     lexical.offset = requested_offset
     lexical.hits = best_documents[requested_offset : requested_offset + requested_limit]
     await _attach_neighbor_context(db, lexical.hits)
     return lexical
-
-
-def _filter_weak_cjk_hits(hits: Sequence[SearchHit]) -> list[SearchHit]:
-    """Prune weak term-only documents when one strong CJK match exists."""
-
-    if not hits:
-        return []
-    top_score = max(float(hit.score or 0.0) for hit in hits)
-    if top_score < CJK_STRONG_MATCH_SCORE:
-        return list(hits)
-    floor = top_score * CJK_RELATIVE_SCORE_FLOOR
-    return [hit for hit in hits if float(hit.score or 0.0) >= floor]
 
 
 async def _attach_neighbor_context(
@@ -492,30 +487,38 @@ async def _attach_neighbor_context(
         hit.context = context
 
 
-def _filter_vector_only_rows(rows, lexical_chunk_ids: Sequence[int]) -> list:
-    """Drop weak vector-only candidates when lexical evidence is present.
+def _filter_vector_only_rows(rows, lexical_document_ids: Sequence[int]) -> list:
+    """Drop weak vector-only documents using this request's score spread.
 
-    A lexical hit establishes that the query has an exact/term-level match.
-    In that situation, allowing every vector candidate into the fused list
-    makes generic documents (especially table catalogs) look authoritative.
-    We still retain vector-only candidates above the similarity floor, and
-    retain all rows that were also found lexically. If there are no lexical
-    hits, vector-only recall remains unrestricted for semantic search.
+    A document counts as vector-supported only when its vector hit is close to
+    the best score in this request. Merely belonging to a lexical document is
+    not enough, otherwise a weak semantic hit can incorrectly double an
+    unrelated document's RRF score. When lexical recall is empty, semantic
+    recall remains unrestricted.
     """
 
-    if not lexical_chunk_ids:
+    if not lexical_document_ids:
         return list(rows)
-    lexical_ids = set(lexical_chunk_ids)
+    similarities = []
+    for row in rows:
+        try:
+            similarities.append(float(getattr(row, "rank", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            continue
+    if not similarities:
+        return [row for row in rows if row.document_id in lexical_document_ids]
+    top_similarity = max(similarities)
+    floor = max(
+        top_similarity * VECTOR_ONLY_RELATIVE_RATIO,
+        top_similarity - VECTOR_ONLY_MAX_GAP,
+    )
     filtered: list = []
     for row in rows:
-        if row.chunk_id in lexical_ids:
-            filtered.append(row)
-            continue
         try:
             similarity = float(getattr(row, "rank", 0.0) or 0.0)
         except (TypeError, ValueError):
             similarity = 0.0
-        if similarity >= VECTOR_ONLY_MIN_SIMILARITY:
+        if similarity >= floor:
             filtered.append(row)
     return filtered
 

@@ -173,7 +173,11 @@ TOOLS = [
     {
         "name": "knowledge_search",
         "title": "检索藏知",
-        "description": "从藏知检索相关证据片段；适合由外部模型自行组织回答。",
+        "description": (
+            "从藏知检索相关证据片段；适合由外部模型自行组织回答。hits[].context "
+            "是包含相邻片段的完整证据窗口，snippet 仅用于命中预览；"
+            "retrieval_channels 同时包含 lexical 和 vector 时表示两个检索通道共同支持。"
+        ),
         "inputSchema": SearchArguments.model_json_schema(),
         "annotations": {
             "readOnlyHint": True,
