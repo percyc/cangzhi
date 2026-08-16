@@ -272,10 +272,25 @@ class PersonalAccessToken(BaseModel):
     expires_at = Column(DateTime(timezone=True), nullable=True)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+    # When set the token is bound to a single workspace and the holder cannot
+    # switch to a different workspace via headers / query / cookies. The
+    # column is nullable for legacy personal-use tokens that select a workspace
+    # through the request.
+    workspace_id = Column(
+        Integer,
+        ForeignKey(
+            "workspaces.id",
+            name="fk_personal_access_tokens_workspace_id_workspaces",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+        index=True,
+    )
 
     __table_args__ = (
         Index("ix_personal_access_tokens_admin_active", "admin_id", "revoked_at"),
         Index("ix_personal_access_tokens_expires_at", "expires_at"),
+        Index("ix_personal_access_tokens_workspace_active", "workspace_id", "revoked_at"),
     )
 
     def to_public_dict(self) -> dict:
@@ -286,6 +301,7 @@ class PersonalAccessToken(BaseModel):
             "name": self.name,
             "token_prefix": self.token_prefix,
             "scopes": self.scopes,
+            "workspace_id": self.workspace_id,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
             "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,

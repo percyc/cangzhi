@@ -13,7 +13,10 @@ type AccessToken = {
   last_used_at: string | null;
   revoked_at: string | null;
   created_at: string;
+  workspace_id: number | null;
 };
+
+type Workspace = { id: number; slug: string; name: string; status: string };
 
 type TokenList = {
   items: AccessToken[];
@@ -32,6 +35,7 @@ const scopeLabels: Record<string, string> = {
   'knowledge:read': '读取文档',
   'knowledge:search': '检索知识',
   'knowledge:ask': '问知识库与表格精确计算',
+  'documents:write': '上传文档与管理 Access Key',
 };
 
 export default function AccessSettingsPage() {
@@ -49,26 +53,34 @@ export default function AccessSettingsPage() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   const [currentWorkspaceSlug, setCurrentWorkspaceSlug] = useState('default');
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceId, setWorkspaceId] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([
       fetch('/api/access-tokens', { cache: 'no-store' }),
       fetch('/api/workspaces/current', { cache: 'no-store' }),
+      fetch('/api/workspaces', { cache: 'no-store' }),
     ])
-      .then(async ([tokenResponse, workspaceResponse]) => {
+      .then(async ([tokenResponse, workspaceResponse, workspacesResponse]) => {
         if (!tokenResponse.ok) throw new Error(await errorMessage(tokenResponse));
         if (!workspaceResponse.ok)
           throw new Error(await errorMessage(workspaceResponse));
+        if (!workspacesResponse.ok)
+          throw new Error(await errorMessage(workspacesResponse));
         return {
           tokens: (await tokenResponse.json()) as TokenList,
-          workspace: (await workspaceResponse.json()) as { slug: string },
+          workspace: (await workspaceResponse.json()) as Workspace,
+          workspaces: (await workspacesResponse.json()) as Workspace[],
         };
       })
       .then((body) => {
         if (cancelled) return;
         setItems(body.tokens.items);
         setCurrentWorkspaceSlug(body.workspace.slug);
+        setWorkspaces(body.workspaces.filter((item) => item.status === 'active'));
+        setWorkspaceId(body.workspace.id);
         setError(null);
       })
       .catch((reason: unknown) => {
@@ -92,7 +104,7 @@ export default function AccessSettingsPage() {
       const response = await fetch('/api/access-tokens', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), scopes }),
+        body: JSON.stringify({ name: name.trim(), scopes, workspace_id: workspaceId }),
       });
       if (!response.ok) throw new Error(await errorMessage(response));
       const body = (await response.json()) as {
@@ -112,7 +124,9 @@ export default function AccessSettingsPage() {
         mcp_url: `${machineApiBaseUrl}${body.integration.mcp_path}`,
         proxy_mcp_url: `${publicBaseUrl}${body.integration.mcp_path}`,
         authorization_header: body.integration.authorization_header,
-        workspace_slug: currentWorkspaceSlug,
+        workspace_slug:
+          workspaces.find((item) => item.id === workspaceId)?.slug ??
+          currentWorkspaceSlug,
       });
       setItems((current) => [body.item, ...current]);
       setName('');
@@ -217,6 +231,26 @@ export default function AccessSettingsPage() {
                 maxLength={255}
                 className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-slate-400"
               />
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-slate-700">绑定工作空间</span>
+              <select
+                value={workspaceId ?? ''}
+                onChange={(event) =>
+                  setWorkspaceId(event.target.value ? Number(event.target.value) : null)
+                }
+                className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-slate-400"
+              >
+                <option value="">不绑定（兼容旧客户端，可通过请求头切换）</option>
+                {workspaces.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>
+                    {workspace.name}（{workspace.slug}）
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-xs leading-5 text-slate-500">
+                外部系统建议绑定；绑定后令牌不能切换到其他空间。
+              </span>
             </label>
             <fieldset>
               <legend className="text-sm font-medium text-slate-700">权限</legend>
@@ -327,6 +361,11 @@ export default function AccessSettingsPage() {
                     {item.last_used_at
                       ? ` · 最近使用 ${formatTime(item.last_used_at)}`
                       : ' · 尚未使用'}
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    {item.workspace_id
+                      ? `绑定空间：${workspaces.find((workspace) => workspace.id === item.workspace_id)?.name ?? `#${item.workspace_id}`}`
+                      : '未绑定空间（兼容模式）'}
                   </p>
                   {!item.revoked_at &&
                     !item.scopes.includes('knowledge:ask') && (

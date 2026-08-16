@@ -23,19 +23,25 @@ PAT_SCOPES = frozenset(
         "knowledge:read",
         "knowledge:search",
         "knowledge:ask",
+        "documents:write",
     }
 )
 
 
 @dataclass(frozen=True)
 class APIIdentity:
-    """Authenticated caller with unambiguous audit identifiers."""
+    """Authenticated caller with unambiguous audit identifiers.
+
+    ``bound_workspace_id`` is the workspace a PAT was created with; routes
+    must reject any request that names a different workspace.
+    """
 
     admin: Admin
     auth_method: Literal["cookie", "pat"]
     scopes: frozenset[str]
     pat_id: int | None = None
     session_id: int | None = None
+    bound_workspace_id: int | None = None
 
     @property
     def admin_id(self) -> int:
@@ -71,6 +77,10 @@ async def resolve_identity(
     appearing to work merely because the browser also happens to be logged in.
     """
 
+    cached = getattr(request.state, "cangzhi_api_identity", None)
+    if isinstance(cached, APIIdentity):
+        return cached
+
     bearer_token = extract_bearer_token(request.headers)
     if bearer_token:
         if not bearer_token.startswith(PAT_PREFIX):
@@ -92,22 +102,27 @@ async def resolve_identity(
         db.add(pat)
         # Read-only requests would otherwise never commit this audit timestamp.
         await db.commit()
-        return APIIdentity(
+        identity = APIIdentity(
             admin=admin,
             auth_method="pat",
             scopes=frozenset(pat.scopes or []),
             pat_id=pat.id,
+            bound_workspace_id=pat.workspace_id,
         )
+        request.state.cangzhi_api_identity = identity
+        return identity
 
     session, admin = await _resolve_session(db, request)
     if session is None or admin is None:
         return None
-    return APIIdentity(
+    identity = APIIdentity(
         admin=admin,
         auth_method="cookie",
         scopes=PAT_SCOPES,
         session_id=session.id,
     )
+    request.state.cangzhi_api_identity = identity
+    return identity
 
 
 def require_api_identity(*required_scopes: str):

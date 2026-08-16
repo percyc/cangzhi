@@ -114,6 +114,8 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "knowledge_get_evidence_by_dataset",
         "knowledge_preview_evidence_rows",
     }
+
+
     query_tool = next(
         item
         for item in tools.json()["result"]["tools"]
@@ -218,6 +220,87 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     assert test_client.get("/api/access-tokens").json()["items"] == []
     test_client.cookies.clear()
     assert test_client.get("/api/v1/capabilities", headers=headers).status_code == 401
+
+
+def test_bound_token_uploads_and_manages_access_keys(client):
+    test_client, _ = client
+    _enable_real_login()
+    _setup_owner(test_client)
+    current = test_client.get("/api/workspaces/current").json()
+    created = test_client.post(
+        "/api/access-tokens",
+        json={
+            "name": "External uploader",
+            "scopes": ["knowledge:read", "knowledge:search", "documents:write"],
+            "workspace_id": current["id"],
+        },
+    )
+    assert created.status_code == 201
+    token = created.json()["token"]
+    assert created.json()["item"]["workspace_id"] == current["id"]
+    test_client.cookies.clear()
+    headers = {"Authorization": f"Bearer {token}"}
+    uploaded = test_client.post(
+        "/api/v1/documents",
+        headers=headers,
+        files={"file": ("guide.txt", b"access key integration", "text/plain")},
+        data={"external_id": "ext-guide", "access_keys": '["id-a", "id-b"]'},
+    )
+    assert uploaded.status_code == 202
+    body = uploaded.json()
+    assert body["status"] == "queued"
+    assert body["access_keys"] == ["id-a", "id-b"]
+    document_id = body["document_id"]
+    assert body["status_url"] == f"/api/v1/documents/{document_id}/processing-status"
+    processing = test_client.get(body["status_url"], headers=headers)
+    assert processing.status_code == 200
+    assert processing.json()["document_id"] == document_id
+    assert processing.json()["overall_status"] == "processing"
+    replaced = test_client.put(
+        f"/api/v1/documents/{document_id}/access-keys",
+        headers=headers,
+        json={"access_keys": ["id-c"]},
+    )
+    assert replaced.status_code == 200
+    assert replaced.json()["access_keys"] == ["id-c"]
+    unchanged = test_client.post(
+        "/api/v1/documents",
+        headers=headers,
+        files={"file": ("guide.txt", b"access key integration", "text/plain")},
+        data={"external_id": "ext-guide"},
+    )
+    assert unchanged.status_code == 202
+    assert unchanged.json()["status"] == "unchanged"
+    assert unchanged.json()["document_id"] == document_id
+    assert unchanged.json()["access_keys"] == ["id-c"]
+    conflict = test_client.post(
+        "/api/v1/knowledge/search",
+        headers={**headers, "X-Cangzhi-Access-Key": "id-a"},
+        json={"query": "integration", "access_key": "id-b"},
+    )
+    assert conflict.status_code == 400
+
+
+def test_bound_token_cannot_switch_workspace(client):
+    test_client, _ = client
+    _enable_real_login()
+    _setup_owner(test_client)
+    current = test_client.get("/api/workspaces/current").json()
+    assert test_client.post(
+        "/api/workspaces", json={"slug": "other", "name": "其他空间"}
+    ).status_code == 201
+    created = test_client.post(
+        "/api/access-tokens",
+        json={"name": "Bound", "scopes": ["knowledge:read"], "workspace_id": current["id"]},
+    )
+    token = created.json()["token"]
+    test_client.cookies.clear()
+    response = test_client.get(
+        "/api/v1/capabilities",
+        headers={"Authorization": f"Bearer {token}", "X-Cangzhi-Workspace": "other"},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "workspace_token_mismatch"
 
 
 def test_document_and_chunk_read_only_expose_current_active_knowledge(client):

@@ -13,6 +13,7 @@ import apps.api.models  # noqa: F401 - ensure all tables register
 from apps.api.core.db import Base, get_db
 from apps.api.main import app
 from apps.api.models.chunks import DocumentChunk
+from apps.api.models.document_access_keys import DocumentAccessKey
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.taxonomy import (
     Category,
@@ -525,3 +526,47 @@ def test_search_treats_like_wildcards_as_literal(search_db):
 
     result = asyncio.run(_run())
     assert result.total == 0
+
+
+def test_access_key_narrows_without_changing_global_search(search_db):
+    from apps.api.services.search import search_documents
+
+    async def _run():
+        first = await _seed_document(
+            search_db,
+            title="甲方资料",
+            source_type=DocumentSourceType.note,
+            body="共同检索词与甲方内容。",
+            category_slug="scope-a",
+        )
+        second = await _seed_document(
+            search_db,
+            title="乙方资料",
+            source_type=DocumentSourceType.note,
+            body="共同检索词与乙方内容。",
+            category_slug="scope-b",
+        )
+        async with search_db() as session:
+            for document_id in (first, second):
+                document = await session.get(Document, document_id)
+                document.current_version_id = await session.scalar(
+                    select(DocumentVersion.id).where(
+                        DocumentVersion.document_id == document_id
+                    )
+                )
+            session.add(DocumentAccessKey(workspace_id=1, document_id=first, access_key="id-a"))
+            session.add(DocumentAccessKey(workspace_id=1, document_id=second, access_key="id-b"))
+            await session.commit()
+            global_result = await search_documents(session, query="共同检索词")
+            scoped_result = await search_documents(session, query="共同检索词", access_key="id-a")
+            missing_result = await search_documents(session, query="共同检索词", access_key="missing")
+            from apps.api.services.knowledge_scopes import list_facet_catalog
+
+            facets = await list_facet_catalog(session, access_key="id-a")
+            return global_result, scoped_result, missing_result, facets
+
+    global_result, scoped_result, missing_result, facets = asyncio.run(_run())
+    assert {hit.title for hit in global_result.hits} == {"甲方资料", "乙方资料"}
+    assert [hit.title for hit in scoped_result.hits] == ["甲方资料"]
+    assert missing_result.hits == []
+    assert {item["slug"] for item in facets["categories"]} == {"scope-a"}

@@ -3,7 +3,7 @@
 藏知不仅提供自己的搜索与问答页面，也可以作为外部 AI 平台的个人证据中枢。
 外部 Agent 默认负责理解用户意图和组织回答，藏知负责返回可追溯的知识片段。
 
-藏知提供三层稳定只读入口，均使用同一套知识范围、混合检索与引用逻辑：
+藏知提供三层稳定入口，均使用同一套知识范围、混合检索与引用逻辑：
 
 1. REST API：`/api/v1`
 2. CLI：`python -m apps.cli`
@@ -25,8 +25,8 @@ X-Cangzhi-Workspace: research
 ```
 
 CLI 可用 `--workspace research`，或设置 `CANGZHI_WORKSPACE=research`。远程 MCP 在
-连接配置的 `headers` 中同时放入 `Authorization` 和 `X-Cangzhi-Workspace`。令牌当前
-不绑定某一个空间；空间决定知识边界，令牌 scopes 决定允许执行的动作。
+连接配置的 `headers` 中同时放入 `Authorization` 和 `X-Cangzhi-Workspace`。令牌可在
+创建时绑定一个空间；绑定后该请求头只能省略或填写相同空间，不能切换。
 
 ## 创建凭证
 
@@ -34,6 +34,14 @@ CLI 可用 `--workspace research`，或设置 `CANGZHI_WORKSPACE=research`。远
 令牌明文只返回一次，数据库仅保存 SHA-256。建议外部平台只授予
 `knowledge:read` 和 `knowledge:search`；只有确实需要调用藏知问答模型时，
 才授予 `knowledge:ask`。
+需要 API 上传和维护文档 Access Key 时额外授予 `documents:write`。
+
+## 外部系统文档范围
+
+外部系统可在上传时为文档写入多个 `access_keys`，并在查询时通过
+`X-Cangzhi-Access-Key` 或请求字段选择一个范围。不传表示空间全局查询。该 Key 由外部
+系统维护，不是藏知用户身份；共享 MCP 时应由可信服务固定请求头，不让模型自由选择。
+上传和管理契约见[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
 
 ## Hermes / OpenClaw
 
@@ -106,6 +114,7 @@ DuckDB 在 Parquet 上下推执行，最多返回 200 行。不要循环调用�
 - `knowledge:read`：读取知识范围、文档和切片。
 - `knowledge:search`：执行知识检索。
 - `knowledge:ask`：调用藏知配置的对话模型生成带引用回答。
+- `documents:write`：通过 REST 上传文档并管理 Access Key。
 
-读取和检索是推荐的默认权限。首版外部接口不开放采集、修改、删除或令牌管理；
-未来写入能力将使用独立的 `knowledge:write` 权限和幂等任务接口。
+读取和检索是推荐的默认权限。MCP 仍保持只读；受控文件上传和 Access Key 管理使用
+REST 与独立 `documents:write`，不开放删除、令牌管理或任意 SQL。

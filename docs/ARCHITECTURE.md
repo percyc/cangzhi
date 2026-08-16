@@ -208,7 +208,7 @@ MCP / Skill ─────┘
 ```
 
 - 浏览器 API：Cookie 鉴权，服务产品管理页面，可随 UI 演进。
-- REST v1：Cookie 或 Bearer PAT，提供稳定只读知识契约。
+- REST v1：Cookie 或 Bearer PAT，提供稳定知识读取、受控文件上传与 Access Key 管理契约。
 - CLI：REST v1 的 JSON 客户端，不直连数据库。
 - MCP：Streamable HTTP，只读取证工具优先；`knowledge_ask` 是可选快速回答。
 - Skill：指导外部 Agent 自主组合搜索、读取和数据集查询，不复制业务逻辑。
@@ -233,12 +233,14 @@ MCP / Skill ─────┘
 | 数据集 | `knowledge_datasets`、`dataset_fields`、`structured_table_rows`、`dataset_artifacts` |
 | 外部来源 | `webdav_sources`、`webdav_entries`、`external_item_exclusions` |
 | 范围与问答 | `knowledge_scopes`、`ask_conversations`、`ask_turns` |
+| 外部系统接入 | `document_access_keys`、`personal_access_tokens.workspace_id`（见 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)） |
 
-`documents`、`categories`、`tags`、`knowledge_scopes`、`webdav_sources`、
+`documents`、`document_access_keys`、`categories`、`tags`、`knowledge_scopes`、`webdav_sources`、
 `external_item_exclusions` 和 `ask_conversations` 直接携带 `workspace_id`；其版本、切片、
 数据集和证据通过父对象继承空间边界。模型配置、向量 Profile、备份和管理员仍是全局资源。
 
-这张表只列已实现模型。知识图谱、团队空间、多用户权限和通用写入 API 仍属于路线图，
+Access Key 是受信任调用方选择的检索范围，不是用户/角色系统；过滤以 SQL `EXISTS`
+与 KnowledgeScope 求交。知识图谱、团队空间和多用户权限仍属于路线图，
 不作为当前部署依赖。
 
 ## 9. 安全边界
@@ -246,7 +248,8 @@ MCP / Skill ─────┘
 - 当前为数据库约束的单管理员系统；密码使用 scrypt，服务端会话只存 token SHA-256。
 - AI Key、Embedding Key 和 WebDAV 密码使用 Fernet 加密；主密钥来自
   `CANGZHI_SECRET_KEY`，未设置时生成到 `storage/.secret_key`。
-- PAT 明文只显示一次，按 `read/search/ask` 最小权限授权，可撤销后删除。
+- PAT 明文只显示一次，按 `read/search/ask/documents:write` 最小权限授权，可选绑定单一
+  工作空间，可撤销后删除。
 - URL 抓取限制协议、地址、重定向、响应大小和超时；访问可信内网 WebDAV 需要显式
   启用对应选项。
 - WebDAV 始终只读；远端删除经过连续成功扫描和保护期确认，默认只移入本地回收站。

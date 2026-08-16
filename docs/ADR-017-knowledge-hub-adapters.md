@@ -2,6 +2,9 @@
 
 状态：已接受（2026-07-31）
 
+> 演进说明：本 ADR 的只读底座仍有效；文件上传与文档 Access Key 已由
+> [ADR-021](ADR-021-external-client-access.md) 以独立 `documents:write` 能力补充。
+
 ## 背景
 
 藏知目前由 FastAPI、Next.js、Worker、PostgreSQL 与对象存储组成。网页已能采集、

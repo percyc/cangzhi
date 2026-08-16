@@ -317,6 +317,7 @@ async def search_documents(
     source_types: Sequence[str] | None = None,
     document_ids: Sequence[int] | None = None,
     connector_ids: Sequence[int] | None = None,
+    access_key: str | None = None,
     matches_none: bool = False,
 ) -> SearchResult:
     """Run hybrid retrieval, transparently degrading to lexical search."""
@@ -354,6 +355,7 @@ async def search_documents(
         source_types=source_types,
         document_ids=effective_document_ids,
         connector_ids=connector_ids,
+        access_key=access_key,
         matches_none=matches_none,
     )
     if not (query or "").strip():
@@ -536,6 +538,7 @@ async def _search_documents_lexical(
     source_types: Sequence[str] | None = None,
     document_ids: Sequence[int] | None = None,
     connector_ids: Sequence[int] | None = None,
+    access_key: str | None = None,
     matches_none: bool = False,
 ) -> SearchResult:
     """Run a search and return a :class:`SearchResult`.
@@ -561,6 +564,7 @@ async def _search_documents_lexical(
         "source_types": list(source_types or []),
         "document_ids": list(document_ids or []),
         "connector_ids": list(connector_ids or []),
+        "access_key": access_key,
         "matches_none": matches_none,
     }
 
@@ -877,6 +881,8 @@ async def _search_like(
 
 
 def _apply_filters(stmt, filters: dict):
+    from .access_keys import document_has_access_key
+
     conditions = []
     if filters.get("matches_none"):
         conditions.append(false())
@@ -908,6 +914,9 @@ def _apply_filters(stmt, filters: dict):
     document_ids = filters.get("document_ids") or []
     if document_ids:
         conditions.append(Document.id.in_(document_ids))
+    access_key = filters.get("access_key")
+    if access_key:
+        conditions.append(document_has_access_key(access_key))
     if conditions:
         stmt = stmt.where(and_(*conditions))
     return stmt

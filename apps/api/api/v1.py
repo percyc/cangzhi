@@ -7,19 +7,42 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Any, Literal
+from pathlib import Path
+from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..ai import build_provider_from_db
+from ..core.config import settings
 from ..core.db import get_db
+from ..models.blobs import Blob
+from ..models.chunks import DocumentChunk
 from ..models.datasets import KnowledgeDataset
-from ..models.documents import Document
+from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from ..models.processing import ProcessingJob
 from ..security.api_auth import APIIdentity, require_api_identity
+from ..services.access_keys import (
+    document_has_access_key,
+    ensure_document_visible,
+    list_document_access_keys,
+    normalize_access_keys,
+    replace_document_access_keys,
+    resolve_access_key,
+)
 from ..services.ask_history import (
     AskHistoryError,
     get_owned_conversation,
@@ -44,8 +67,15 @@ from ..services.knowledge_scopes import (
     list_facet_catalog,
     list_scope_catalog,
 )
+from ..services.processing_status import (
+    ProcessingStatusError,
+    compute_processing_status,
+)
 from ..services.qa import AskError, AskRequest, QAService
 from ..services.search import DEFAULT_LIMIT, MAX_LIMIT, search_documents
+from ..storage import get_storage
+from ..storage.base import BlobStorage, BlobTooLargeError
+from .files import normalized_filename, validate_file_type
 from .schemas import DatasetFilterInput
 
 router = APIRouter(prefix="/v1", tags=["knowledge-v1"])
@@ -54,6 +84,20 @@ logger = logging.getLogger(__name__)
 _read_identity = require_api_identity("knowledge:read")
 _search_identity = require_api_identity("knowledge:search")
 _ask_identity = require_api_identity("knowledge:ask")
+_write_identity = require_api_identity("documents:write")
+
+
+class AccessKeysPayload(BaseModel):
+    access_keys: list[str] = Field(default_factory=list, max_length=100)
+
+
+class AccessKeysBatchItem(AccessKeysPayload):
+    document_id: int | None = Field(default=None, ge=1)
+    external_id: str | None = Field(default=None, max_length=64)
+
+
+class AccessKeysBatchPayload(BaseModel):
+    items: list[AccessKeysBatchItem] = Field(min_length=1, max_length=200)
 
 
 class ScopeSelector(BaseModel):
@@ -64,6 +108,7 @@ class ScopeSelector(BaseModel):
     source_types: list[str] = Field(default_factory=list)
     connector_ids: list[int] = Field(default_factory=list)
     document_ids: list[int] = Field(default_factory=list)
+    access_key: str | None = Field(default=None, max_length=128)
 
 
 class KnowledgeSearchPayload(ScopeSelector):
@@ -80,6 +125,7 @@ class KnowledgeAskPayload(ScopeSelector):
 
 
 class DatasetQueryPayload(BaseModel):
+    access_key: str | None = Field(default=None, max_length=128)
     filters: list[DatasetFilterInput] = Field(default_factory=list, max_length=8)
     columns: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, max_length=3)
@@ -114,6 +160,221 @@ async def _resolve_scope(db: AsyncSession, payload: ScopeSelector):
         raise _scope_error(exc) from None
 
 
+def _parse_form_access_keys(values: list[str] | None) -> list[str] | None:
+    if values is None:
+        return None
+    if len(values) == 1 and values[0].lstrip().startswith("["):
+        try:
+            decoded = json.loads(values[0])
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="access_keys JSON 格式无效") from exc
+        if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
+            raise HTTPException(status_code=400, detail="access_keys 必须是字符串数组")
+        values = decoded
+    try:
+        return normalize_access_keys(values)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@router.post("/documents", status_code=202, response_model=dict[str, Any])
+async def upload_document_v1(
+    file: Annotated[UploadFile, File()],
+    title: Annotated[str, Form()] = "",
+    external_id: Annotated[str | None, Form(max_length=64)] = None,
+    access_keys: Annotated[list[str] | None, Form()] = None,
+    identity: APIIdentity = Depends(_write_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+    storage: BlobStorage = Depends(get_storage),  # noqa: B008
+) -> dict[str, Any]:
+    """Upload or version a document through a workspace-bound API."""
+
+    del identity
+    filename = normalized_filename(file.filename)
+    content_type = validate_file_type(filename, file.content_type)
+    keys = _parse_form_access_keys(access_keys)
+    cleaned_external_id = (external_id or "").strip() or None
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    try:
+        stored = storage.save(file.file, max_bytes=max_bytes)
+    except BlobTooLargeError:
+        raise HTTPException(status_code=413, detail=f"文件不能超过 {settings.max_upload_size_mb} MB") from None
+    finally:
+        await file.close()
+    if stored.size == 0:
+        storage.delete(stored.storage_key)
+        raise HTTPException(status_code=400, detail="不能上传空文件")
+
+    cleanup_storage_key: str | None = stored.storage_key
+    try:
+        document = None
+        if cleaned_external_id:
+            document = await db.scalar(
+                select(Document).where(Document.external_identity == cleaned_external_id)
+            )
+        current_version = None
+        if document is not None and document.current_version_id:
+            current_version = await db.get(DocumentVersion, document.current_version_id)
+        if document is not None and document.is_deleted:
+            raise HTTPException(status_code=409, detail="相同 external_id 的文档已在回收站")
+
+        # Blobs are intentionally global and reference-counted across
+        # workspaces; only Documents and their access ranges are isolated.
+        existing_blob = await db.scalar(select(Blob).where(Blob.sha256 == stored.sha256))
+        if existing_blob is not None:
+            storage.delete(stored.storage_key)
+            cleanup_storage_key = None
+            blob = existing_blob
+        else:
+            blob = Blob(
+                sha256=stored.sha256,
+                storage_key=stored.storage_key,
+                content_type=content_type,
+                file_size=stored.size,
+                original_filename=filename,
+            )
+            db.add(blob)
+            await db.flush()
+
+        display_title = (title or "").strip() or Path(filename).stem or filename
+        if document is None:
+            document = Document(
+                title=display_title[:1024],
+                source_type=DocumentSourceType.file,
+                external_identity=cleaned_external_id,
+            )
+            db.add(document)
+            await db.flush()
+            version_number = 1
+        elif current_version is not None and current_version.content_hash == stored.sha256:
+            if title.strip():
+                document.title = display_title[:1024]
+            if keys is not None:
+                await replace_document_access_keys(db, document, keys)
+            await db.commit()
+            return {
+                "document_id": document.id,
+                "version_id": current_version.id,
+                "status": "unchanged",
+                "access_keys": await list_document_access_keys(db, document.id),
+            }
+        else:
+            if title.strip():
+                document.title = display_title[:1024]
+            version_number = int(
+                await db.scalar(
+                    select(func.max(DocumentVersion.version_number)).where(
+                        DocumentVersion.document_id == document.id
+                    )
+                )
+                or 0
+            ) + 1
+
+        version = DocumentVersion(
+            document_id=document.id,
+            blob_id=blob.id,
+            version_number=version_number,
+            content_hash=stored.sha256,
+            processing_status="created",
+        )
+        db.add(version)
+        await db.flush()
+        document.current_version_id = version.id
+        if keys is not None:
+            await replace_document_access_keys(db, document, keys)
+        db.add(
+            ProcessingJob(
+                document_id=document.id,
+                document_version_id=version.id,
+                stage="stored",
+                status="created",
+                idempotency_key=f"{version.id}:stored:v1",
+                config_version="m1-v1",
+            )
+        )
+        await db.commit()
+        cleanup_storage_key = None
+        return {
+            "document_id": document.id,
+            "version_id": version.id,
+            "version_number": version.version_number,
+            "status": "queued",
+            "access_keys": await list_document_access_keys(db, document.id),
+            "status_url": f"/api/v1/documents/{document.id}/processing-status",
+        }
+    except Exception:
+        await db.rollback()
+        if cleanup_storage_key is not None:
+            storage.delete(cleanup_storage_key)
+        raise
+
+
+@router.get("/documents/{document_id}/processing-status", response_model=dict[str, Any])
+async def get_document_processing_status_v1(
+    document_id: int,
+    _identity: APIIdentity = Depends(_write_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    """Return ingestion progress to the same external uploader."""
+
+    try:
+        return await compute_processing_status(db, document_id)
+    except ProcessingStatusError as exc:
+        message = str(exc)
+        status_code = 404 if "不存在" in message else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@router.get("/documents/{document_id}/access-keys", response_model=dict[str, Any])
+async def get_document_access_keys_v1(
+    document_id: int,
+    _identity: APIIdentity = Depends(_write_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    document = await db.scalar(select(Document).where(Document.id == document_id, Document.is_deleted.is_(False)))
+    if document is None:
+        raise HTTPException(status_code=404, detail="知识文档不存在")
+    return {"document_id": document.id, "external_id": document.external_identity, "access_keys": await list_document_access_keys(db, document.id)}
+
+
+@router.put("/documents/{document_id}/access-keys", response_model=dict[str, Any])
+async def put_document_access_keys_v1(
+    document_id: int,
+    payload: AccessKeysPayload,
+    _identity: APIIdentity = Depends(_write_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    document = await db.scalar(select(Document).where(Document.id == document_id, Document.is_deleted.is_(False)))
+    if document is None:
+        raise HTTPException(status_code=404, detail="知识文档不存在")
+    try:
+        keys = await replace_document_access_keys(db, document, payload.access_keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    await db.commit()
+    return {"document_id": document.id, "external_id": document.external_identity, "access_keys": keys}
+
+
+@router.put("/document-access-keys/batch", response_model=dict[str, Any])
+async def put_document_access_keys_batch_v1(
+    payload: AccessKeysBatchPayload,
+    _identity: APIIdentity = Depends(_write_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    for item in payload.items:
+        if (item.document_id is None) == (item.external_id is None):
+            raise HTTPException(status_code=400, detail="每项必须且只能提供 document_id 或 external_id")
+        condition = Document.id == item.document_id if item.document_id is not None else Document.external_identity == item.external_id
+        document = await db.scalar(select(Document).where(condition, Document.is_deleted.is_(False)))
+        if document is None:
+            raise HTTPException(status_code=404, detail="批量项目中的知识文档不存在")
+        keys = await replace_document_access_keys(db, document, item.access_keys)
+        results.append({"document_id": document.id, "external_id": document.external_identity, "access_keys": keys})
+    await db.commit()
+    return {"items": results}
+
+
 @router.get("/capabilities", response_model=dict[str, Any])
 async def capabilities(
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
@@ -122,7 +383,12 @@ async def capabilities(
         "api_version": "v1",
         "service": "cangzhi",
         "authentication": ["bearer_pat", "session_cookie"],
-        "scopes": ["knowledge:read", "knowledge:search", "knowledge:ask"],
+        "scopes": [
+            "knowledge:read",
+            "knowledge:search",
+            "knowledge:ask",
+            "documents:write",
+        ],
         "features": {
             "saved_scopes": True,
             "facets": True,
@@ -139,6 +405,8 @@ async def capabilities(
             "chunk_read": True,
             "evidence_viewer": True,
             "version_bound_evidence": True,
+            "document_upload": True,
+            "document_access_keys": True,
         },
     }
 
@@ -159,6 +427,7 @@ def _dataset_http_error(exc: DatasetExecutionError) -> HTTPException:
 async def list_datasets_v1(
     document_id: int | None = Query(default=None, ge=1),
     limit: int = Query(default=100, ge=1, le=200),
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
@@ -174,6 +443,8 @@ async def list_datasets_v1(
     )
     if document_id is not None:
         statement = statement.where(KnowledgeDataset.document_id == document_id)
+    if access_key:
+        statement = statement.where(document_has_access_key(resolve_access_key(access_key, None)))
     datasets = list((await db.scalars(statement)).all())
     return {
         "items": [
@@ -196,9 +467,13 @@ async def list_datasets_v1(
 @router.get("/knowledge/datasets/{dataset_id}/schema", response_model=dict[str, Any])
 async def get_dataset_schema_v1(
     dataset_id: int,
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
+    if document_id is not None:
+        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         return await get_dataset_schema(db, dataset_id)
     except DatasetExecutionError as exc:
@@ -210,9 +485,13 @@ async def preview_dataset_v1(
     dataset_id: int,
     offset: int = Query(default=0, ge=0, le=1_000_000),
     limit: int = Query(default=50, ge=1, le=200),
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
+    if document_id is not None:
+        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         return await preview_dataset(db, dataset_id, offset=offset, limit=limit)
     except DatasetExecutionError as exc:
@@ -223,11 +502,18 @@ async def preview_dataset_v1(
 async def query_dataset_v1(
     dataset_id: int,
     payload: DatasetQueryPayload,
+    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_search_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    access_key = resolve_access_key(access_key_header, payload.access_key)
+    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
+    if document_id is not None:
+        await ensure_document_visible(db, document_id, access_key)
     try:
-        return await execute_dataset_query(db, dataset_id, payload.model_dump())
+        return await execute_dataset_query(
+            db, dataset_id, payload.model_dump(exclude={"access_key"})
+        )
     except DatasetExecutionError as exc:
         raise _dataset_http_error(exc) from None
 
@@ -242,18 +528,23 @@ async def list_knowledge_scopes(
 
 @router.get("/knowledge/facets", response_model=dict[str, Any])
 async def list_knowledge_facets(
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    return await list_facet_catalog(db)
+    return await list_facet_catalog(
+        db, access_key=resolve_access_key(access_key, None)
+    )
 
 
 @router.post("/knowledge/search", response_model=dict[str, Any])
 async def knowledge_search(
     payload: KnowledgeSearchPayload,
+    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_search_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    access_key = resolve_access_key(access_key_header, payload.access_key)
     scope = await _resolve_scope(db, payload)
     result = await search_documents(
         db,
@@ -265,6 +556,7 @@ async def knowledge_search(
         source_types=scope.source_types,
         document_ids=scope.document_ids,
         connector_ids=scope.connector_ids,
+        access_key=access_key,
         matches_none=scope.matches_none,
     )
     return {
@@ -272,6 +564,7 @@ async def knowledge_search(
         "scope": {
             "id": scope.scope_id,
             "slug": scope.scope_slug,
+            "access_key": access_key,
             **scope.to_filters_dict(),
         },
     }
@@ -280,9 +573,11 @@ async def knowledge_search(
 @router.post("/knowledge/ask", response_model=dict[str, Any])
 async def knowledge_ask(
     payload: KnowledgeAskPayload,
+    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    access_key = resolve_access_key(access_key_header, payload.access_key)
     scope = await _resolve_scope(db, payload)
     if payload.conversation_id is not None:
         try:
@@ -303,6 +598,7 @@ async def knowledge_ask(
                 source_types=scope.source_types,
                 document_ids=scope.document_ids,
                 connector_ids=scope.connector_ids,
+                access_key=access_key,
                 matches_none=scope.matches_none,
             ),
         )
@@ -322,6 +618,7 @@ async def knowledge_ask(
         "scope": {
             "id": scope.scope_id,
             "slug": scope.scope_slug,
+            "access_key": access_key,
             **scope.to_filters_dict(),
         },
     }
@@ -346,11 +643,13 @@ async def knowledge_ask(
 @router.post("/knowledge/ask/stream")
 async def knowledge_ask_stream(
     payload: KnowledgeAskPayload,
+    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> StreamingResponse:
     """Stream auditable tool progress and finish with the normal answer DTO."""
 
+    access_key = resolve_access_key(access_key_header, payload.access_key)
     scope = await _resolve_scope(db, payload)
     if payload.conversation_id is not None:
         try:
@@ -365,11 +664,13 @@ async def knowledge_ask_stream(
         source_types=scope.source_types,
         document_ids=scope.document_ids,
         connector_ids=scope.connector_ids,
+        access_key=access_key,
         matches_none=scope.matches_none,
     )
     scope_payload = {
         "id": scope.scope_id,
         "slug": scope.scope_slug,
+        "access_key": access_key,
         **scope.to_filters_dict(),
     }
     if db.bind is None:
@@ -386,6 +687,11 @@ async def knowledge_ask_stream(
         async def run() -> None:
             try:
                 async with stream_session_factory() as stream_db:
+                    from ..services.workspaces import bind_workspace_context
+
+                    workspace_id = db.sync_session.info.get("cangzhi_workspace_id")
+                    if workspace_id is not None:
+                        bind_workspace_context(stream_db.sync_session, workspace_id)
                     service = (
                         DeepAnalysisService(provider)
                         if payload.mode == "deep"
@@ -488,9 +794,13 @@ async def get_knowledge_chunk(
     chunk_id: int,
     version_id: int | None = Query(default=None, ge=1),
     include_context: bool = Query(default=False),
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    document_id = await db.scalar(select(DocumentChunk.document_id).where(DocumentChunk.id == chunk_id))
+    if document_id is not None:
+        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         chunk = await read_current_chunk(db, chunk_id)
     except KnowledgeReadError as exc:
@@ -533,9 +843,11 @@ async def get_knowledge_chunk(
 async def get_knowledge_document(
     document_id: int,
     version_id: int | None = Query(default=None, ge=1),
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         document = await read_current_document(db, document_id)
     except KnowledgeReadError as exc:
@@ -554,13 +866,80 @@ async def get_knowledge_document(
     return document
 
 
+async def _document_blob_response(
+    db: AsyncSession,
+    storage: BlobStorage,
+    document_id: int,
+    access_key: str | None,
+    *,
+    preview: bool,
+) -> StreamingResponse:
+    await ensure_document_visible(db, document_id, access_key)
+    row = (
+        await db.execute(
+            select(Document, DocumentVersion)
+            .join(DocumentVersion, DocumentVersion.id == Document.current_version_id)
+            .where(Document.id == document_id, Document.is_deleted.is_(False))
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="知识文档不存在")
+    document, version = row
+    blob_id = version.preview_blob_id if preview else version.blob_id
+    if blob_id is None:
+        raise HTTPException(status_code=404, detail="该版本没有可用的预览文件" if preview else "该版本没有已保存的原文件")
+    blob = await db.get(Blob, blob_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="文件记录不存在")
+    try:
+        stream = storage.open(blob.storage_key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="文件内容已丢失") from None
+    filename = quote(blob.original_filename or (f"{document.title}.pdf" if preview else "download"))
+    disposition = "inline" if preview else "attachment"
+    return StreamingResponse(
+        stream,
+        media_type=blob.content_type,
+        headers={
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''{filename}",
+            "Content-Length": str(blob.file_size),
+        },
+    )
+
+
+@router.get("/knowledge/documents/{document_id}/original")
+async def download_knowledge_document_original(
+    document_id: int,
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+    storage: BlobStorage = Depends(get_storage),  # noqa: B008
+) -> StreamingResponse:
+    return await _document_blob_response(db, storage, document_id, resolve_access_key(access_key, None), preview=False)
+
+
+@router.get("/knowledge/documents/{document_id}/preview")
+async def preview_knowledge_document_original(
+    document_id: int,
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
+    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+    storage: BlobStorage = Depends(get_storage),  # noqa: B008
+) -> StreamingResponse:
+    return await _document_blob_response(db, storage, document_id, resolve_access_key(access_key, None), preview=True)
+
+
 @router.get("/knowledge/evidence/by-chunk/{chunk_id}", response_model=dict[str, Any])
 async def get_evidence_by_chunk(
     chunk_id: int,
     document_version_id: int = Query(..., ge=1),
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    document_id = await db.scalar(select(DocumentChunk.document_id).where(DocumentChunk.id == chunk_id))
+    if document_id is not None:
+        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         evidence = await EvidenceService().resolve_chunk(
             db,
@@ -589,9 +968,13 @@ async def get_evidence_by_dataset(
     dataset_id: int,
     document_version_id: int = Query(..., ge=1),
     artifact_version: int | None = Query(default=None, ge=1),
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
+    if document_id is not None:
+        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         evidence = await EvidenceService().resolve_dataset(
             db,
@@ -628,9 +1011,13 @@ async def preview_evidence_rows(
     payload: EvidenceRowPreviewPayload,
     document_version_id: int = Query(..., ge=1),
     artifact_version: int | None = Query(default=None, ge=1),
+    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
+    if document_id is not None:
+        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         return await EvidenceService().preview_dataset_rows(
             db,

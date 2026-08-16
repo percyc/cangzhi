@@ -87,7 +87,8 @@ AI 是增强能力，不是可靠保存的前置条件；原文和结构化元�
 
 当前版本服务单个用户和个人服务器，目标是成为个人知识与 AI 工具之间的中枢，而
 不是通用网盘、双向文件同步工具或团队协作平台。多用户权限、邮件采集、浏览器扩展、
-OCR 深度增强、领域解析和受控写入 API 按[路线图](docs/ROADMAP.md)逐步推进。
+OCR 深度增强和领域解析按[路线图](docs/ROADMAP.md)逐步推进。文件上传与 Access Key
+范围管理已提供受控 API，但不扩展为通用文档管理或多用户权限平台。
 
 ## 文档导航
 
@@ -100,6 +101,7 @@ OCR 深度增强、领域解析和受控写入 API 按[路线图](docs/ROADMAP.m
 - [外部 Agent、CLI 与 MCP 接入](docs/INTEGRATIONS.md)
 - [API / MCP / CLI 接口使用参考](docs/API_REFERENCE.md)
 - [备份与恢复](docs/BACKUP_AND_RESTORE.md)
+- [外部系统对接：API 上传与文档 Access Key](docs/EXTERNAL_CLIENT_ACCESS.md)
 
 ## 技术栈
 

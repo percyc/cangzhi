@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..api.auth import require_admin
 from ..core.db import get_db
 from ..models.auth import Admin, PersonalAccessToken
+from ..models.workspaces import Workspace
 from ..security.api_auth import (
     PAT_SCOPES,
     extract_token_prefix,
@@ -29,6 +30,7 @@ class CreateAccessTokenPayload(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     scopes: list[str] = Field(default_factory=lambda: sorted(PAT_SCOPES))
     expires_at: datetime | None = None
+    workspace_id: int | None = Field(default=None, ge=1)
 
     @field_validator("name")
     @classmethod
@@ -86,6 +88,10 @@ async def create_access_token(
     admin: Admin = Depends(require_admin),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
+    if payload.workspace_id is not None:
+        workspace = await db.get(Workspace, payload.workspace_id)
+        if workspace is None or workspace.status != "active":
+            raise HTTPException(status_code=400, detail="绑定的工作空间不存在或不可用")
     active_count = (
         await db.execute(
             select(func.count(PersonalAccessToken.id)).where(
@@ -111,6 +117,7 @@ async def create_access_token(
         token_prefix=extract_token_prefix(plaintext),
         scopes=payload.scopes,
         expires_at=payload.expires_at,
+        workspace_id=payload.workspace_id,
     )
     db.add(row)
     await db.commit()

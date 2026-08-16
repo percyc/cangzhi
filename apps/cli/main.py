@@ -33,6 +33,7 @@ class CangzhiClient:
     token: str
     workspace: str = "default"
     timeout: float = 30.0
+    access_key: str | None = None
 
     def request(
         self,
@@ -42,15 +43,18 @@ class CangzhiClient:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/json",
+                "User-Agent": "cangzhi-cli/0.1",
+                "X-Cangzhi-Workspace": self.workspace,
+            }
+            if self.access_key:
+                headers["X-Cangzhi-Access-Key"] = self.access_key
             response = httpx.request(
                 method,
                 f"{self.base_url.rstrip('/')}{path}",
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Accept": "application/json",
-                    "User-Agent": "cangzhi-cli/0.1",
-                    "X-Cangzhi-Workspace": self.workspace,
-                },
+                headers=headers,
                 json=payload,
                 timeout=self.timeout,
             )
@@ -152,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument(
+        "--access-key",
+        default=os.getenv("CANGZHI_ACCESS_KEY"),
+        help="可选文档检索范围（环境变量 CANGZHI_ACCESS_KEY）",
+    )
+    parser.add_argument(
         "--compact",
         action="store_true",
         help="输出单行 JSON",
@@ -243,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
                 token=args.token,
                 workspace=args.workspace,
                 timeout=args.timeout,
+                access_key=args.access_key,
             ),
         )
     except CLIError as exc:

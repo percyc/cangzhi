@@ -2,7 +2,10 @@
 
 Send `Authorization: Bearer <PAT>`, `Accept: application/json`, and
 `X-Cangzhi-Workspace: <workspace-slug>`. If the workspace header is omitted,
-Cangzhi uses `default`.
+Cangzhi uses `default`; a workspace-bound PAT always uses its bound workspace.
+Trusted hosts may add `X-Cangzhi-Access-Key: <opaque-key>` to restrict every
+read to documents associated with that key. Do not expose key selection to an
+untrusted user or model.
 
 ## Read endpoints
 
@@ -25,7 +28,8 @@ Search body:
   "tag_ids": [],
   "source_types": [],
   "connector_ids": [],
-  "document_ids": []
+  "document_ids": [],
+  "access_key": "id-a"
 }
 ```
 
@@ -35,6 +39,11 @@ saved scope by intersection; they never broaden it.
 Direct REST clients may send `mode: "quick"` (default) or `mode: "deep"`.
 This skill must use quick mode only: its host AI is already the analysis
 orchestrator and should combine search/read/dataset endpoints itself.
+
+`access_key` can be supplied as a tool/request argument or as the connection
+header. If both are present they must match. Omit both to use the full token
+workspace; never silently fall back to the full workspace after a key-scoped
+request fails.
 
 Use `facets` to discover valid category, tag, source-type, and connector IDs
 before adding request-time filters. Options in the same dimension use OR

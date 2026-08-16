@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, with_loader_criteria
 from ..core.db import get_db
 from ..models.ask_history import AskConversation
 from ..models.database_source import DatabaseSnapshot, DatabaseSource
+from ..models.document_access_keys import DocumentAccessKey
 from ..models.documents import Document
 from ..models.knowledge_scopes import KnowledgeScope
 from ..models.taxonomy import DEFAULT_CATEGORY_SLUGS, Category, Tag
@@ -42,6 +43,7 @@ _SCOPED_MODELS = (
     AskConversation,
     DatabaseSource,
     DatabaseSnapshot,
+    DocumentAccessKey,
 )
 
 
@@ -237,7 +239,8 @@ async def get_current_workspace(
 
 
 async def require_workspace_context(
-    db: AsyncSession = Depends(get_db),
+    request: Request,
+    db: AsyncSession = Depends(get_db),  # noqa: B008
     workspace_header: Annotated[
         str | None,
         Header(
@@ -256,13 +259,32 @@ async def require_workspace_context(
 ) -> Workspace:
     """Resolve the workspace and bind it to the request's shared DB session."""
 
-    slug = (
+    requested_slug = (
         (workspace_header or "").strip()
         or (workspace_query or "").strip()
         or (workspace_cookie or "").strip()
         or DEFAULT_WORKSPACE_SLUG
     )
-    workspace = await get_workspace(db, slug)
+    # A PAT may be pinned to one workspace. Resolve it here because router-level
+    # workspace dependencies run before endpoint identity dependencies.
+    from ..security.api_auth import resolve_identity
+
+    identity = await resolve_identity(request, db)
+    if identity is not None and identity.bound_workspace_id is not None:
+        workspace = await db.get(Workspace, identity.bound_workspace_id)
+        explicit_slug = (workspace_header or "").strip() or (
+            workspace_query or ""
+        ).strip()
+        if workspace is not None and explicit_slug and explicit_slug != workspace.slug:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "workspace_token_mismatch",
+                    "message": "该令牌已绑定其他工作空间",
+                },
+            )
+    else:
+        workspace = await get_workspace(db, requested_slug)
     if workspace is None:
         raise HTTPException(
             status_code=404,

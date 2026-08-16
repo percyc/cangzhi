@@ -363,8 +363,14 @@ async def list_scope_catalog(db: AsyncSession) -> list[dict[str, Any]]:
     ]
 
 
-async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]]:
+async def list_facet_catalog(
+    db: AsyncSession, *, access_key: str | None = None
+) -> dict[str, list[dict[str, Any]]]:
     """Return filter choices and active-document counts for every adapter."""
+
+    from .access_keys import document_has_access_key
+
+    access_condition = document_has_access_key(access_key) if access_key else None
 
     category_rows = (
         await db.execute(
@@ -383,6 +389,7 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
                     Document.is_deleted.is_(False),
                     Document.current_version_id
                     == DocumentCategory.document_version_id,
+                    access_condition if access_condition is not None else True,
                 ),
             )
             .group_by(Category.id)
@@ -402,6 +409,7 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
                     Document.id == DocumentTag.document_id,
                     Document.is_deleted.is_(False),
                     Document.current_version_id == DocumentTag.document_version_id,
+                    access_condition if access_condition is not None else True,
                 ),
             )
             .group_by(Tag.id)
@@ -419,7 +427,10 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
         for source_type, count in (
             await db.execute(
                 select(Document.source_type, func.count(Document.id))
-                .where(Document.is_deleted.is_(False))
+                .where(
+                    Document.is_deleted.is_(False),
+                    access_condition if access_condition is not None else True,
+                )
                 .group_by(Document.source_type)
             )
         ).all()
@@ -436,6 +447,7 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
                 and_(
                     Document.id == WebDAVEntry.document_id,
                     Document.is_deleted.is_(False),
+                    access_condition if access_condition is not None else True,
                 ),
             )
             .group_by(WebDAVSource.id)
@@ -452,6 +464,7 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
                 "document_count": int(document_count),
             }
             for category, document_count in category_rows
+            if access_key is None or int(document_count) > 0
         ],
         "tags": [
             {
@@ -461,6 +474,7 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
                 "document_count": int(document_count),
             }
             for tag, document_count in tag_rows
+            if access_key is None or int(document_count) > 0
         ],
         "source_types": [
             {
@@ -469,6 +483,7 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
                 "document_count": source_counts.get(source_type.value, 0),
             }
             for source_type in DocumentSourceType
+            if access_key is None or source_counts.get(source_type.value, 0) > 0
         ],
         "connectors": [
             {
@@ -478,5 +493,6 @@ async def list_facet_catalog(db: AsyncSession) -> dict[str, list[dict[str, Any]]
                 "document_count": int(document_count),
             }
             for source, document_count in connector_rows
+            if access_key is None or int(document_count) > 0
         ],
     }
