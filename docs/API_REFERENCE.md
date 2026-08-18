@@ -75,6 +75,12 @@ Ask 和 MCP 可通过 `document_selection` 同时指定多个 `scope_keys` 与�
 越界。服务端只保存令牌哈希，创建 PAT 失效时派生凭证同时失效。完整流程见
 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
 
+在浏览器打开 `/docs` 可以直接模拟请求：点击右上角 **Authorize**，只填写完整的
+`cz_pat_...`（不需要手写 `Bearer`），然后展开 `POST /api/v1/exploration-grants`，点击
+**Try it out**。非默认空间同时填写该接口显示的 `X-Cangzhi-Workspace` 参数。创建响应中
+复制 `cz_eg_...` 后，可以再次在 Authorize 中替换令牌并调试 `/api/mcp`；探索凭证不能
+用于其他 REST v1 接口。
+
 ---
 
 ## 2. 知识范围（KnowledgeScope）

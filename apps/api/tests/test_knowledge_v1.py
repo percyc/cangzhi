@@ -258,6 +258,20 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     assert test_client.get("/api/v1/capabilities", headers=headers).status_code == 401
 
 
+def test_openapi_exposes_bearer_authorization_for_external_api_debugging(client):
+    test_client, _ = client
+    schema = test_client.get("/openapi.json").json()
+    bearer = schema["components"]["securitySchemes"]["CangzhiBearer"]
+    assert bearer["type"] == "http"
+    assert bearer["scheme"] == "bearer"
+    assert schema["paths"]["/api/v1/exploration-grants"]["post"]["security"] == [
+        {"CangzhiBearer": []}
+    ]
+    assert schema["paths"]["/api/mcp"]["post"]["security"] == [
+        {"CangzhiBearer": []}
+    ]
+
+
 def test_bound_token_uploads_and_manages_scope_keys(client):
     test_client, _ = client
     _enable_real_login()

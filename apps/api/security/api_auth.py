@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,13 @@ from .auth import extract_bearer_token, now_utc
 PAT_PREFIX = "cz_pat_"
 EXPLORATION_GRANT_PREFIX = "cz_eg_"
 PAT_TOKEN_BYTES = 32
+_bearer_scheme = HTTPBearer(
+    auto_error=False,
+    scheme_name="CangzhiBearer",
+    description=(
+        "输入普通 PAT（cz_pat_...）；/api/mcp 也接受短期探索凭证（cz_eg_...）。"
+    ),
+)
 PAT_SCOPES = frozenset(
     {
         "knowledge:read",
@@ -192,6 +200,9 @@ def require_api_identity(
     async def dependency(
         request: Request,
         db: AsyncSession = Depends(get_db),  # noqa: B008
+        _credentials: HTTPAuthorizationCredentials | None = Depends(  # noqa: B008
+            _bearer_scheme
+        ),
     ) -> APIIdentity:
         identity = await resolve_identity(request, db)
         if identity is None:
