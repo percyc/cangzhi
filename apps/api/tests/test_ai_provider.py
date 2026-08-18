@@ -209,6 +209,31 @@ def _ollama_provider(handler) -> tuple[OllamaProvider, _StubTransport]:
     return provider, transport
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        '分析完成。\n{"action":"search","query":"菜谱"}\n以上。',
+        [
+            {"type": "text", "text": "```json\n"},
+            {"type": "text", "text": '{"action":"search","query":"菜谱"}\n```'},
+        ],
+    ],
+)
+def test_openai_generate_json_accepts_common_content_variants(monkeypatch, content):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+        )
+
+    provider, transport = _openai_provider(handler)
+    monkeypatch.setattr("apps.api.ai.provider.httpx.post", transport)
+    assert provider.generate_json(system="JSON", prompt="search") == {
+        "action": "search",
+        "query": "菜谱",
+    }
+
+
 def test_openai_answer_question_parses_structured_response(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/chat/completions")

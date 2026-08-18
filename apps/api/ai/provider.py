@@ -68,6 +68,49 @@ def _strip_code_fence(text: str) -> str:
     return cleaned.strip()
 
 
+def _parse_json_object(text: str) -> dict:
+    """Parse a JSON object from common OpenAI-compatible text variants."""
+
+    cleaned = _strip_code_fence(text)
+    try:
+        payload = json.loads(cleaned)
+    except (TypeError, ValueError):
+        decoder = json.JSONDecoder()
+        payload = None
+        for index, character in enumerate(cleaned):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(cleaned[index:])
+            except ValueError:
+                continue
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
+    if not isinstance(payload, dict):
+        raise AIProviderError("模型没有返回有效 JSON")
+    return payload
+
+
+def _message_content_text(message: Any) -> str:
+    """Normalize string and content-part responses without reading reasoning."""
+
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+        elif isinstance(part, dict) and isinstance(part.get("text"), str):
+            parts.append(part["text"])
+    return "\n".join(parts)
+
+
 class AIProvider(ABC):
     name: str = ""
     prompt_version: str = "v1"
@@ -251,12 +294,10 @@ class OpenAICompatibleProvider(AIProvider):
         if response.status_code >= 400:
             raise AIProviderError(f"模型服务返回 HTTP {response.status_code}")
         try:
-            content = response.json()["choices"][0]["message"]["content"]
-            payload = json.loads(_strip_code_fence(content))
+            message = response.json()["choices"][0]["message"]
+            payload = _parse_json_object(_message_content_text(message))
         except (ValueError, KeyError, IndexError, TypeError):
             raise AIProviderError("模型没有返回有效 JSON") from None
-        if not isinstance(payload, dict):
-            raise AIProviderError("模型 JSON 顶层必须是对象")
         return payload
 
     def generate_understanding(

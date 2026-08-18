@@ -156,6 +156,24 @@ def test_agent_decision_accepts_null_unused_query_plan():
     assert decision.query_plan == {}
 
 
+def test_agent_decision_flattens_common_argument_envelopes():
+    decision = AgentDecision.model_validate(
+        {
+            "action": "query_dataset",
+            "fields": {
+                "dataset_id": 356,
+                "query_plan": {
+                    "filters": [
+                        {"column": "date", "operator": "eq", "value": "2026-01-19"}
+                    ]
+                },
+            },
+        }
+    )
+    assert decision.dataset_id == 356
+    assert decision.query_plan["filters"][0]["column"] == "date"
+
+
 def test_adaptive_budget_stops_after_two_calls_without_new_information():
     budget = _AdaptiveToolBudget()
     budget.record(tool_calls=1, made_progress=False, earned_evidence=False)
@@ -900,7 +918,8 @@ def test_deep_analysis_degrades_to_original_query_when_planner_fails(qa_db):
     result = asyncio.run(_run())
 
     assert result.retrieval["mode"] == "deep_analysis"
-    assert result.retrieval["analysis"]["tool_calls"] == 1
+    assert result.retrieval["analysis"]["tool_calls"] >= 1
+    assert result.retrieval["analysis"]["steps"][0]["tool"] == "knowledge_search"
     assert "规划不可用" in result.retrieval["degraded_reason"]
 
 

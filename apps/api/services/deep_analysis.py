@@ -36,7 +36,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,7 +91,7 @@ MAX_DEEP_EVIDENCE = 12
 MAX_DEEP_EVIDENCE_CHARS = 8_000
 MAX_OBSERVATION_CHARS = 18_000
 MAX_DATASET_ROWS_IN_CONTEXT = 20
-MAX_DECISION_ATTEMPTS = 2
+MAX_DECISION_ATTEMPTS = 3
 MAX_SEARCH_HITS_IN_OBSERVATION = 10
 AUTO_READ_DISCOVERY_HITS = 2
 MAX_AUTO_READS_TOTAL = 4
@@ -111,6 +117,22 @@ class AgentDecision(BaseModel):
     chunk_id: int | None = Field(default=None, ge=1)
     query_plan: dict[str, Any] = Field(default_factory=dict)
     summary: str = Field(default="", max_length=120)
+
+    @model_validator(mode="before")
+    @classmethod
+    def flatten_common_argument_envelopes(cls, value: Any) -> Any:
+        """Accept action arguments nested by OpenAI-compatible models."""
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        for key in ("fields", "字段", "arguments", "parameters", "params"):
+            nested = normalized.get(key)
+            if not isinstance(nested, dict):
+                continue
+            normalized = {**nested, **normalized}
+            normalized.pop(key, None)
+        return normalized
 
     @field_validator("query_plan", mode="before")
     @classmethod
@@ -249,7 +271,26 @@ class DeepAnalysisService:
                         str(exc),
                     )
                     planning_degraded = True
-                    break
+                    if not any(
+                        observation.get("tool") == "search"
+                        for observation in observations
+                    ):
+                        decision = AgentDecision(
+                            action="search",
+                            query=question,
+                            summary="规划输出异常，先执行安全检索",
+                        )
+                        await _emit_progress(
+                            on_progress,
+                            {
+                                "phase": "retry",
+                                "message": "规划格式异常，正在先检索相关知识后继续分析",
+                                "tool_calls": len(steps),
+                                "max_tool_calls": budget.tool_limit,
+                            },
+                        )
+                    else:
+                        break
             if decision.action == "finish":
                 break
 
