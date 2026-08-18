@@ -122,6 +122,7 @@ class AskRequest:
     document_ids: list[int] = field(default_factory=list)
     connector_ids: list[int] = field(default_factory=list)
     document_selection: DocumentSelection | None = None
+    document_boundary: DocumentSelection | None = None
     matches_none: bool = False
 
 
@@ -370,6 +371,7 @@ class QAService:
             document_ids=request.document_ids,
             connector_ids=request.connector_ids,
             document_selection=request.document_selection,
+            document_boundary=request.document_boundary,
             matches_none=request.matches_none,
             evidence_limit=evidence_limit,
             evidence_total_chars=evidence_total_chars,
@@ -432,6 +434,7 @@ class QAService:
                     "source_types": list(request.source_types),
                     "document_ids": list(request.document_ids),
                     "document_selection": request.document_selection,
+                    "document_boundary": request.document_boundary,
                     "matches_none": request.matches_none,
                 },
             )
@@ -581,6 +584,7 @@ class QAService:
         document_ids: Sequence[int] | None = None,
         connector_ids: Sequence[int] | None = None,
         document_selection: DocumentSelection | None = None,
+        document_boundary: DocumentSelection | None = None,
         matches_none: bool = False,
         evidence_limit: int = DEFAULT_EVIDENCE_ITEMS,
         evidence_total_chars: int = EVIDENCE_TOTAL_CHARS,
@@ -612,6 +616,7 @@ class QAService:
             "document_ids": effective_document_ids,
             "connector_ids": list(connector_ids or []),
             "document_selection": document_selection,
+            "document_boundary": document_boundary,
             "matches_none": matches_none,
         }
         if _contains_cjk(question):
@@ -1527,6 +1532,11 @@ def _apply_filters(stmt, filters: dict):
     selection = filters.get("document_selection")
     if selection is not None:
         candidate = candidate_condition(selection)
+        if candidate is not None:
+            conditions.append(candidate)
+    boundary = filters.get("document_boundary")
+    if boundary is not None:
+        candidate = candidate_condition(boundary)
         if candidate is not None:
             conditions.append(candidate)
     if conditions:

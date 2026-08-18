@@ -34,6 +34,7 @@ from ..models.chunks import DocumentChunk
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from ..models.table_rows import StructuredTableRow
+from .scope_keys import DocumentSelection, candidate_condition
 
 
 class EvidenceError(LookupError):
@@ -102,9 +103,13 @@ class EvidenceService:
         *,
         chunk_id: int,
         document_version_id: int,
+        document_boundary: DocumentSelection | None = None,
     ) -> EvidenceContext:
         chunk, document, version = await self._load_chunk(
-            db, chunk_id=chunk_id, document_version_id=document_version_id
+            db,
+            chunk_id=chunk_id,
+            document_version_id=document_version_id,
+            document_boundary=document_boundary,
         )
         snippet = (chunk.content or "").strip()
         table_location = _table_location(chunk.extra)
@@ -163,8 +168,9 @@ class EvidenceService:
         dataset_id: int,
         document_version_id: int,
         artifact_version: int | None = None,
+        document_boundary: DocumentSelection | None = None,
     ) -> EvidenceContext:
-        dataset = await db.scalar(
+        statement = (
             select(KnowledgeDataset)
             .join(Document, Document.id == KnowledgeDataset.document_id)
             .where(
@@ -172,6 +178,10 @@ class EvidenceService:
                 Document.is_deleted.is_(False),
             )
         )
+        boundary_condition = candidate_condition(document_boundary)
+        if boundary_condition is not None:
+            statement = statement.where(boundary_condition)
+        dataset = await db.scalar(statement)
         if dataset is None:
             raise EvidenceError("dataset_not_found", "数据集不存在")
         if dataset.document_version_id != document_version_id:
@@ -266,8 +276,9 @@ class EvidenceService:
         source_rows: list[int],
         columns: list[str] | None,
         limit: int = 20,
+        document_boundary: DocumentSelection | None = None,
     ) -> dict[str, Any]:
-        dataset = await db.scalar(
+        statement = (
             select(KnowledgeDataset)
             .join(Document, Document.id == KnowledgeDataset.document_id)
             .where(
@@ -275,6 +286,10 @@ class EvidenceService:
                 Document.is_deleted.is_(False),
             )
         )
+        boundary_condition = candidate_condition(document_boundary)
+        if boundary_condition is not None:
+            statement = statement.where(boundary_condition)
+        dataset = await db.scalar(statement)
         if dataset is None:
             raise EvidenceError("dataset_not_found", "数据集不存在")
         if dataset.document_version_id != document_version_id:
@@ -437,10 +452,17 @@ class EvidenceService:
         *,
         chunk_id: int,
         document_version_id: int,
+        document_boundary: DocumentSelection | None = None,
     ) -> tuple[DocumentChunk, Document, DocumentVersion]:
-        chunk = await db.scalar(
-            select(DocumentChunk).where(DocumentChunk.id == chunk_id)
+        statement = (
+            select(DocumentChunk)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(DocumentChunk.id == chunk_id, Document.is_deleted.is_(False))
         )
+        boundary_condition = candidate_condition(document_boundary)
+        if boundary_condition is not None:
+            statement = statement.where(boundary_condition)
+        chunk = await db.scalar(statement)
         if chunk is None:
             raise EvidenceError("chunk_not_found", "知识片段不存在")
         if chunk.document_version_id != document_version_id:

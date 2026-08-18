@@ -152,13 +152,23 @@ class SearchResult:
     retrieval: dict | None = None
 
     def to_dict(self) -> dict:
+        public_filters = dict(self.filters)
+        selection = public_filters.get("document_selection")
+        if isinstance(selection, DocumentSelection):
+            public_filters["document_selection"] = {
+                "scope_keys": list(selection.scope_keys),
+                "document_ids": list(selection.document_ids),
+            }
+        # An exploration boundary is an authorization constraint, not
+        # response metadata. Never reveal its opaque keys to an MCP client.
+        public_filters.pop("document_boundary", None)
         payload = {
             "query": self.query,
             "backend": self.backend,
             "total": self.total,
             "limit": self.limit,
             "offset": self.offset,
-            "filters": self.filters,
+            "filters": public_filters,
             "hits": [hit.to_dict() for hit in self.hits],
         }
         if self.retrieval is not None:
@@ -319,6 +329,7 @@ async def search_documents(
     document_ids: Sequence[int] | None = None,
     connector_ids: Sequence[int] | None = None,
     document_selection: DocumentSelection | None = None,
+    document_boundary: DocumentSelection | None = None,
     matches_none: bool = False,
 ) -> SearchResult:
     """Run hybrid retrieval, transparently degrading to lexical search.
@@ -365,6 +376,7 @@ async def search_documents(
         document_ids=effective_document_ids,
         connector_ids=connector_ids,
         document_selection=document_selection,
+        document_boundary=document_boundary,
         matches_none=matches_none,
     )
     if not (query or "").strip():
@@ -548,6 +560,7 @@ async def _search_documents_lexical(
     document_ids: Sequence[int] | None = None,
     connector_ids: Sequence[int] | None = None,
     document_selection: DocumentSelection | None = None,
+    document_boundary: DocumentSelection | None = None,
     matches_none: bool = False,
 ) -> SearchResult:
     """Run a search and return a :class:`SearchResult`.
@@ -574,6 +587,7 @@ async def _search_documents_lexical(
         "document_ids": list(document_ids or []),
         "connector_ids": list(connector_ids or []),
         "document_selection": document_selection,
+        "document_boundary": document_boundary,
         "matches_none": matches_none,
     }
 
@@ -926,6 +940,11 @@ def _apply_filters(stmt, filters: dict):
     selection = filters.get("document_selection")
     if selection is not None:
         candidate = candidate_condition(selection)
+        if candidate is not None:
+            conditions.append(candidate)
+    boundary = filters.get("document_boundary")
+    if boundary is not None:
+        candidate = candidate_condition(boundary)
         if candidate is not None:
             conditions.append(candidate)
     if conditions:

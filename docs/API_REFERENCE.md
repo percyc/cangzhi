@@ -61,6 +61,20 @@ Ask 和 MCP 可通过 `document_selection` 同时指定多个 `scope_keys` 与�
 - 响应均为 JSON（流式接口除外）
 - `/api/v1/capabilities` 会返回当前服务能力，接入前可先探测
 
+### 1.5 MCP 短期探索凭证
+
+现有 `cz_pat_...` 仍可直接调用 `/api/mcp`，并保持工作空间级访问。若第三方系统需要
+把一次用户选择固化为外部 AI 不可越过的边界，可由绑定工作空间的 PAT 调用：
+
+- `POST /api/v1/exploration-grants`：请求体包含非空 `document_selection` 和
+  `ttl_seconds`（60–86400，默认 3600），返回仅显示一次的 `cz_eg_...`。
+- `POST /api/v1/exploration-grants/{grant_id}/revoke`：必须使用创建它的 PAT。
+
+`cz_eg_...` 只能作为 `/api/mcp` 的 Bearer 凭证，不能调用其他 REST v1 接口。它固定
+工作空间与文档边界；每个 MCP 工具的筛选只能和该边界取交集，按 ID 直接读取也不能
+越界。服务端只保存令牌哈希，创建 PAT 失效时派生凭证同时失效。完整流程见
+[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
+
 ---
 
 ## 2. 知识范围（KnowledgeScope）

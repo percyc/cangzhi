@@ -368,6 +368,7 @@ async def list_facet_catalog(
     db: AsyncSession,
     *,
     document_selection: DocumentSelection | None = None,
+    document_boundary: DocumentSelection | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return filter choices and active-document counts for every adapter.
 
@@ -377,7 +378,8 @@ async def list_facet_catalog(
     Search/Ask/Deep contract.
     """
 
-    selection_condition = candidate_condition(document_selection) if document_selection else None
+    selection_condition = candidate_condition(document_selection)
+    boundary_condition = candidate_condition(document_boundary)
 
     category_rows = (
         await db.execute(
@@ -397,6 +399,7 @@ async def list_facet_catalog(
                     Document.current_version_id
                     == DocumentCategory.document_version_id,
                     selection_condition if selection_condition is not None else True,
+                    boundary_condition if boundary_condition is not None else True,
                 ),
             )
             .group_by(Category.id)
@@ -417,6 +420,7 @@ async def list_facet_catalog(
                     Document.is_deleted.is_(False),
                     Document.current_version_id == DocumentTag.document_version_id,
                     selection_condition if selection_condition is not None else True,
+                    boundary_condition if boundary_condition is not None else True,
                 ),
             )
             .group_by(Tag.id)
@@ -437,6 +441,7 @@ async def list_facet_catalog(
                 .where(
                     Document.is_deleted.is_(False),
                     selection_condition if selection_condition is not None else True,
+                    boundary_condition if boundary_condition is not None else True,
                 )
                 .group_by(Document.source_type)
             )
@@ -455,13 +460,14 @@ async def list_facet_catalog(
                     Document.id == WebDAVEntry.document_id,
                     Document.is_deleted.is_(False),
                     selection_condition if selection_condition is not None else True,
+                    boundary_condition if boundary_condition is not None else True,
                 ),
             )
             .group_by(WebDAVSource.id)
             .order_by(WebDAVSource.name, WebDAVSource.id)
         )
     ).all()
-    has_selection = document_selection is not None
+    has_selection = document_selection is not None or document_boundary is not None
     return {
         "categories": [
             {

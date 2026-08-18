@@ -19,6 +19,7 @@ from ..models.ask_history import AskConversation
 from ..models.database_source import DatabaseSnapshot, DatabaseSource
 from ..models.document_scope_keys import DocumentScopeKey
 from ..models.documents import Document
+from ..models.exploration_grants import ExplorationGrant
 from ..models.knowledge_scopes import KnowledgeScope
 from ..models.taxonomy import DEFAULT_CATEGORY_SLUGS, Category, Tag
 from ..models.webdav import ExternalItemExclusion, WebDAVSource
@@ -44,6 +45,7 @@ _SCOPED_MODELS = (
     DatabaseSource,
     DatabaseSnapshot,
     DocumentScopeKey,
+    ExplorationGrant,
 )
 
 

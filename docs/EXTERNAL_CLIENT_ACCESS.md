@@ -18,8 +18,9 @@ Document <──多对多──> opaque scope_key（id-a / id-b / ...）
 - 空 `scope_keys`：文档没有特定范围，但全空间查询仍可见。
 - 修改 Key 只改关联关系，不重新解析、切片或向量化。
 
-Scope Key 不承担安全隔离。工作空间授权只由 PAT 决定，`document_selection` 只是每次
-调用选择哪些文档集合。
+普通 PAT 模式下，Scope Key 不承担安全隔离，`document_selection` 只是每次调用选择
+哪些文档集合。第三方系统需要把自己选定的文档范围交给外部 AI 自主探索时，应创建
+短期探索凭证，由服务端把该选择固化为不可扩大的 MCP 边界。
 
 ## 2. 创建令牌
 
@@ -33,6 +34,7 @@ Scope Key 不承担安全隔离。工作空间授权只由 PAT 决定，`documen
 | `documents:write` | 上传文档、修改 Scope Key |
 
 绑定空间的令牌不接受切换空间。旧的未绑定令牌仍可用 `X-Cangzhi-Workspace` 选择空间。
+现有 PAT 可以继续直接连接 `/api/mcp`，行为不变，并可探索其整个工作空间。
 
 ## 3. 上传
 
@@ -113,8 +115,40 @@ documents(scope_key in [id-a, id-b]) UNION documents(id in [42, 73])
 
 MCP 的 `knowledge_search`、`knowledge_ask`、`knowledge_list_facets` 和
 `knowledge_list_datasets` 均接受 `document_selection`。MCP 只提供读取、检索和问答；
-上传与 Scope Key 管理走 REST。文档、片段和证据按明确 ID 读取，仅受 PAT 工作空间隔离，
-不再把 Scope Key 当成第二层权限。
+上传与 Scope Key 管理走 REST。
+
+MCP 有两种凭证模式：
+
+1. **普通 PAT**：保持原有方式，工作空间是硬边界；工具参数中的
+   `document_selection` 是可选查询条件。
+2. **短期探索凭证**：第三方后端使用绑定空间的 PAT 调用下列接口创建。凭证只能访问
+   创建时选中的文档，MCP 工具参数只能继续收窄，不能扩大；按 ID 读取文档、片段、
+   数据集和证据同样受此边界约束。
+
+```bash
+curl -X POST 'http://localhost:8000/api/v1/exploration-grants' \
+  -H 'Authorization: Bearer cz_pat_xxx' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "document_selection": {
+      "scope_keys": ["id-a", "id-b"],
+      "document_ids": [42, 73]
+    },
+    "ttl_seconds": 3600
+  }'
+```
+
+响应中的 `cz_eg_...` 明文只返回一次。第三方后端保管 PAT，仅把短期凭证作为
+`Authorization: Bearer cz_eg_...` 交给 MCP 客户端，连接地址仍为 `/api/mcp`，不需要
+在工具参数里重复传边界。探索凭证不能调用普通 REST v1 端点，最长有效 24 小时；撤销：
+
+```http
+POST /api/v1/exploration-grants/{grant_id}/revoke
+Authorization: Bearer cz_pat_xxx
+```
+
+藏知数据库只保存凭证哈希，不保存可再次展示的明文；响应和日志只呈现安全前缀及范围
+数量，不呈现 Scope Key 值。创建它的 PAT 被撤销或删除后，派生凭证也立即失效。
 
 CLI 可使用：
 
@@ -129,3 +163,4 @@ cangzhi search '报销流程' --scope-keys id-a,id-b --document-ids 42,73
 - 文档永久删除：Key 关联级联删除。
 - 修改 Key：不触发 AI 整理、切片或向量重建。
 - Key 不包含密钥语义，不应使用手机号、身份证号等直接个人信息。
+- 探索凭证到期或被撤销后立即失效；Scope Key 关联变化在下一次 MCP 调用即时生效。

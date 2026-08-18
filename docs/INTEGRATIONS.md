@@ -42,6 +42,9 @@ CLI 可用 `--workspace research`，或设置 `CANGZHI_WORKSPACE=research`。远
 `document_selection` 中同时传入多个 Scope Key 和多个 Document ID。它们组成候选并集，
 再与分类、标签、来源和保存范围取交集。不传表示空间全局查询。Scope Key 是文档分组，
 不是用户身份或访问凭证；PAT 才决定工作空间访问。
+若外部 AI 必须被限制在第三方系统本次选定的文档集合内，第三方后端应使用普通 PAT
+创建短期 `cz_eg_...` 探索凭证，再把该凭证交给 MCP 客户端。普通 PAT 直连 MCP 的方式
+继续保留；探索凭证则由服务端对全部 MCP 工具强制执行固定边界。
 上传和管理契约见[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
 
 ## Hermes / OpenClaw

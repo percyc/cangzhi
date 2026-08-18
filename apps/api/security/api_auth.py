@@ -14,9 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..api.auth import _resolve_session
 from ..core.db import get_db
 from ..models.auth import Admin, PersonalAccessToken
+from ..models.exploration_grants import ExplorationGrant
+from ..services.scope_keys import DocumentSelection
 from .auth import extract_bearer_token, now_utc
 
 PAT_PREFIX = "cz_pat_"
+EXPLORATION_GRANT_PREFIX = "cz_eg_"
 PAT_TOKEN_BYTES = 32
 PAT_SCOPES = frozenset(
     {
@@ -37,11 +40,13 @@ class APIIdentity:
     """
 
     admin: Admin
-    auth_method: Literal["cookie", "pat"]
+    auth_method: Literal["cookie", "pat", "exploration"]
     scopes: frozenset[str]
     pat_id: int | None = None
     session_id: int | None = None
     bound_workspace_id: int | None = None
+    exploration_grant_id: int | None = None
+    exploration_boundary: DocumentSelection | None = None
 
     @property
     def admin_id(self) -> int:
@@ -55,6 +60,10 @@ def generate_pat_token() -> str:
     return f"{PAT_PREFIX}{secrets.token_urlsafe(PAT_TOKEN_BYTES)}"
 
 
+def generate_exploration_grant_token() -> str:
+    return f"{EXPLORATION_GRANT_PREFIX}{secrets.token_urlsafe(PAT_TOKEN_BYTES)}"
+
+
 def hash_pat_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -62,8 +71,13 @@ def hash_pat_token(token: str) -> str:
 def extract_token_prefix(token: str) -> str:
     """Return the safe display prefix, including the PAT namespace."""
 
-    random_part = token.removeprefix(PAT_PREFIX)
-    return f"{PAT_PREFIX}{random_part[:8]}"
+    prefix = (
+        EXPLORATION_GRANT_PREFIX
+        if token.startswith(EXPLORATION_GRANT_PREFIX)
+        else PAT_PREFIX
+    )
+    random_part = token.removeprefix(prefix)
+    return f"{prefix}{random_part[:8]}"
 
 
 async def resolve_identity(
@@ -82,9 +96,7 @@ async def resolve_identity(
         return cached
 
     bearer_token = extract_bearer_token(request.headers)
-    if bearer_token:
-        if not bearer_token.startswith(PAT_PREFIX):
-            return None
+    if bearer_token and bearer_token.startswith(PAT_PREFIX):
         pat = (
             await db.execute(
                 select(PersonalAccessToken).where(
@@ -112,6 +124,48 @@ async def resolve_identity(
         request.state.cangzhi_api_identity = identity
         return identity
 
+    if bearer_token and bearer_token.startswith(EXPLORATION_GRANT_PREFIX):
+        grant = (
+            await db.execute(
+                select(ExplorationGrant).where(
+                    ExplorationGrant.token_hash == hash_pat_token(bearer_token)
+                )
+            )
+        ).scalar_one_or_none()
+        if grant is None or not grant.is_valid:
+            return None
+        creator_pat = (
+            await db.get(PersonalAccessToken, grant.created_by_pat_id)
+            if grant.created_by_pat_id is not None
+            else None
+        )
+        if creator_pat is None or not creator_pat.is_valid:
+            return None
+        admin = await db.get(Admin, grant.admin_id)
+        if admin is None or not admin.is_active:
+            return None
+        boundary = DocumentSelection.coerce(
+            grant.scope_keys or [], grant.document_ids or []
+        )
+        if boundary.is_empty:
+            return None
+        grant.last_used_at = now_utc()
+        db.add(grant)
+        await db.commit()
+        identity = APIIdentity(
+            admin=admin,
+            auth_method="exploration",
+            scopes=frozenset(grant.scopes or []),
+            bound_workspace_id=grant.workspace_id,
+            exploration_grant_id=grant.id,
+            exploration_boundary=boundary,
+        )
+        request.state.cangzhi_api_identity = identity
+        return identity
+
+    if bearer_token:
+        return None
+
     session, admin = await _resolve_session(db, request)
     if session is None or admin is None:
         return None
@@ -125,7 +179,10 @@ async def resolve_identity(
     return identity
 
 
-def require_api_identity(*required_scopes: str):
+def require_api_identity(
+    *required_scopes: str,
+    allow_exploration: bool = False,
+):
     """Build a FastAPI dependency requiring every named PAT scope."""
 
     unknown = set(required_scopes) - PAT_SCOPES
@@ -143,6 +200,14 @@ def require_api_identity(*required_scopes: str):
                 detail={
                     "code": "unauthenticated",
                     "message": "缺少有效身份凭证",
+                },
+            )
+        if identity.auth_method == "exploration" and not allow_exploration:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "credential_not_allowed",
+                    "message": "探索凭证仅可用于 MCP",
                 },
             )
         missing = [

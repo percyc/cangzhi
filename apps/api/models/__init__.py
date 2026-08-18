@@ -7,6 +7,7 @@ from .datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from .document_scope_keys import DocumentScopeKey
 from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
+from .exploration_grants import ExplorationGrant
 from .knowledge_scopes import KnowledgeScope
 from .processing import ProcessingJob
 from .table_rows import StructuredTableRow
@@ -47,6 +48,7 @@ __all__ = [
     "DocumentVersion",
     "EmbeddingProfile",
     "ExternalItemExclusion",
+    "ExplorationGrant",
     "KnowledgeDataset",
     "KnowledgeScope",
     "PersonalAccessToken",

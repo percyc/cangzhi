@@ -19,8 +19,9 @@
    明确 Document ID 取并集并去重；不传表示全工作空间，显式空选择是错误。
 5. `document_selection` 通过 SQL `EXISTS(scope_key IN ...) OR Document.id IN (...)`
    下推；KnowledgeScope、分类、标签、来源和连接器继续与候选集合取交集。
-6. 搜索、快速/深度/流式问答、MCP 和数据集发现共享该选择语义。正文、片段和证据的
-   明确 ID 读取只受 PAT 工作空间隔离，不重复检查 Scope Key。
+6. 搜索、快速/深度/流式问答、MCP 和数据集发现共享该选择语义。普通 PAT 下，正文、
+   片段和证据的明确 ID 读取只受工作空间隔离；需要把一次选择固化为外部 AI 不可越过的
+   MCP 边界时，使用 [ADR-022](ADR-022-mcp-exploration-grants.md) 的短期探索凭证。
 7. `documents:write` 仅允许上传文档和管理 Scope Key；MCP 保持只读取证，不开放写操作。
 
 ## 数据模型

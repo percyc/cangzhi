@@ -10,11 +10,13 @@ from apps.api.api.auth import require_admin, reset_auth_limiters_for_tests
 from apps.api.core.db import get_db
 from apps.api.main import app
 from apps.api.models.chunks import DocumentChunk
+from apps.api.models.document_scope_keys import DocumentScopeKey
 from apps.api.models.documents import (
     Document,
     DocumentSourceType,
     DocumentVersion,
 )
+from apps.api.models.exploration_grants import ExplorationGrant
 
 
 def _enable_real_login():
@@ -353,6 +355,164 @@ def test_bound_token_cannot_switch_workspace(client):
     )
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "workspace_token_mismatch"
+
+
+def test_exploration_grant_is_mcp_only_and_cannot_escape_boundary(client):
+    test_client, _ = client
+    _enable_real_login()
+    _setup_owner(test_client)
+    workspace = test_client.get("/api/workspaces/current").json()
+    created = test_client.post(
+        "/api/access-tokens",
+        json={
+            "name": "Third-party backend",
+            "scopes": ["knowledge:read", "knowledge:search", "knowledge:ask"],
+            "workspace_id": workspace["id"],
+        },
+    )
+    pat = created.json()["token"]
+
+    async def seed():
+        async for db in app.dependency_overrides[get_db]():
+            documents = []
+            chunks = []
+            for index, title in enumerate(("允许文档", "边界外文档"), start=1):
+                document = Document(
+                    title=title,
+                    source_type=DocumentSourceType.note,
+                    is_deleted=False,
+                )
+                db.add(document)
+                await db.flush()
+                version = DocumentVersion(
+                    document_id=document.id,
+                    version_number=1,
+                    content_hash=str(index) * 64,
+                    raw_content=f"共同检索词 {title}",
+                    processing_status="ready",
+                )
+                db.add(version)
+                await db.flush()
+                document.current_version_id = version.id
+                chunk = DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id=f"grant-chunk-{index}",
+                    role="child",
+                    chunk_type="paragraph",
+                    order_index=0,
+                    content=f"共同检索词 {title}",
+                    search_text=f"共同检索词 {title}",
+                    content_hash=f"{index + 2}" * 64,
+                    heading_path=[],
+                    char_count=10,
+                    token_estimate=5,
+                    is_current=True,
+                )
+                db.add(chunk)
+                await db.flush()
+                documents.append(document.id)
+                chunks.append(chunk.id)
+            db.add(
+                DocumentScopeKey(
+                    workspace_id=workspace["id"],
+                    document_id=documents[0],
+                    scope_key="external-user-a",
+                )
+            )
+            await db.commit()
+            return documents, chunks
+        raise AssertionError("database override missing")
+
+    document_ids, chunk_ids = asyncio.run(seed())
+    test_client.cookies.clear()
+    pat_headers = {"Authorization": f"Bearer {pat}"}
+    grant_response = test_client.post(
+        "/api/v1/exploration-grants",
+        headers=pat_headers,
+        json={
+            "document_selection": {"scope_keys": ["external-user-a"]},
+            "ttl_seconds": 600,
+        },
+    )
+    assert grant_response.status_code == 201
+    grant_token = grant_response.json()["token"]
+    grant_item = grant_response.json()["grant"]
+    assert grant_token.startswith("cz_eg_")
+    assert grant_token not in str(grant_item)
+    assert grant_item["scope_key_count"] == 1
+    assert "scope_keys" not in grant_item
+
+    async def assert_stored_as_hash():
+        async for db in app.dependency_overrides[get_db]():
+            stored = await db.get(ExplorationGrant, grant_item["id"])
+            assert stored is not None
+            assert stored.token_hash != grant_token
+            assert grant_token.startswith(stored.token_prefix)
+            return
+        raise AssertionError("database override missing")
+
+    asyncio.run(assert_stored_as_hash())
+    grant_headers = {"Authorization": f"Bearer {grant_token}"}
+    # Exploration credentials are intentionally MCP-only.
+    denied = test_client.get("/api/v1/capabilities", headers=grant_headers)
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "credential_not_allowed"
+
+    def call_tool(name, arguments, headers):
+        return test_client.post(
+            "/api/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+        ).json()["result"]
+
+    allowed = call_tool(
+        "knowledge_get_document", {"document_id": document_ids[0]}, grant_headers
+    )
+    assert allowed["isError"] is False
+    escaped_document = call_tool(
+        "knowledge_get_document", {"document_id": document_ids[1]}, grant_headers
+    )
+    assert escaped_document["isError"] is True
+    assert escaped_document["structuredContent"]["error"]["code"] == "document_not_found"
+    escaped_chunk = call_tool(
+        "knowledge_get_chunk", {"chunk_id": chunk_ids[1]}, grant_headers
+    )
+    assert escaped_chunk["isError"] is True
+    # A per-call selector can only narrow the immutable grant boundary.
+    narrowed = call_tool(
+        "knowledge_search",
+        {
+            "query": "共同检索词",
+            "document_selection": {"document_ids": [document_ids[1]]},
+        },
+        grant_headers,
+    )
+    assert narrowed["structuredContent"]["hits"] == []
+    # The original PAT keeps full-workspace MCP behavior.
+    pat_read = call_tool(
+        "knowledge_get_document", {"document_id": document_ids[1]}, pat_headers
+    )
+    assert pat_read["isError"] is False
+
+    revoked = test_client.post(
+        f"/api/v1/exploration-grants/{grant_item['id']}/revoke",
+        headers=pat_headers,
+    )
+    assert revoked.status_code == 200
+    assert (
+        test_client.post(
+            "/api/mcp",
+            headers=grant_headers,
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ).status_code
+        == 401
+    )
 
 
 def test_document_and_chunk_read_only_expose_current_active_knowledge(client):

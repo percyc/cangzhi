@@ -233,7 +233,7 @@ MCP / Skill ─────┘
 | 数据集 | `knowledge_datasets`、`dataset_fields`、`structured_table_rows`、`dataset_artifacts` |
 | 外部来源 | `webdav_sources`、`webdav_entries`、`external_item_exclusions` |
 | 范围与问答 | `knowledge_scopes`、`ask_conversations`、`ask_turns` |
-| 外部系统接入 | `document_scope_keys`、`personal_access_tokens.workspace_id`（见 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)） |
+| 外部系统接入 | `document_scope_keys`、`personal_access_tokens.workspace_id`、`exploration_grants`（见 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)） |
 
 `documents`、`document_scope_keys`、`categories`、`tags`、`knowledge_scopes`、`webdav_sources`、
 `external_item_exclusions` 和 `ask_conversations` 直接携带 `workspace_id`；其版本、切片、
@@ -241,7 +241,9 @@ MCP / Skill ─────┘
 
 Scope Key 是文档分组而不是用户/角色系统；`document_selection` 以 SQL
 `EXISTS(scope_key IN ...) OR Document.id IN (...)` 形成候选并集，再与 KnowledgeScope
-及其他元数据筛选求交。知识图谱、团队空间和多用户权限仍属于路线图，
+及其他元数据筛选求交。普通 PAT 下它是查询条件；短期 MCP 探索凭证把同一选择固化为
+服务端授权边界，所有搜索、问答、数据集、文档、切片和证据读取均额外与边界取交集。
+探索凭证只存 SHA-256 哈希，绑定工作空间和创建 PAT，最长 24 小时。知识图谱、团队空间和多用户权限仍属于路线图，
 不作为当前部署依赖。
 
 ## 9. 安全边界
@@ -251,6 +253,8 @@ Scope Key 是文档分组而不是用户/角色系统；`document_selection` 以
   `CANGZHI_SECRET_KEY`，未设置时生成到 `storage/.secret_key`。
 - PAT 明文只显示一次，按 `read/search/ask/documents:write` 最小权限授权，可选绑定单一
   工作空间，可撤销后删除。
+- MCP 短期探索凭证明文只返回一次，只能访问创建时固化的文档范围；到期、主动撤销或
+  创建 PAT 失效都会使其失效。普通 PAT 直接调用 MCP 的原有方式继续保留。
 - URL 抓取限制协议、地址、重定向、响应大小和超时；访问可信内网 WebDAV 需要显式
   启用对应选项。
 - WebDAV 始终只读；远端删除经过连续成功扫描和保护期确认，默认只移入本地回收站。

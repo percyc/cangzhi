@@ -43,7 +43,7 @@ from .schemas import DatasetFilterInput
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 logger = logging.getLogger(__name__)
-_mcp_identity = require_api_identity()
+_mcp_identity = require_api_identity(allow_exploration=True)
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26")
 
 ProgressCallback = Callable[[int, int, str], Awaitable[None]]
@@ -590,6 +590,7 @@ async def _call_tool(
                 connector_ids=scope.connector_ids,
                 document_ids=scope.document_ids,
                 document_selection=selection,
+                document_boundary=identity.exploration_boundary,
                 matches_none=scope.matches_none,
             )
         except (TypeError, ValueError, ValidationError) as exc:
@@ -640,6 +641,7 @@ async def _call_tool(
                     connector_ids=scope.connector_ids,
                     document_ids=scope.document_ids,
                     document_selection=selection,
+                    document_boundary=identity.exploration_boundary,
                     matches_none=scope.matches_none,
                 ),
                 on_progress=on_progress,
@@ -672,7 +674,12 @@ async def _call_tool(
             args = DatasetQueryArguments.model_validate(arguments)
             payload = args.model_dump(exclude={"dataset_id"})
             return _tool_result(
-                await execute_dataset_query(db, args.dataset_id, payload)
+                await execute_dataset_query(
+                    db,
+                    args.dataset_id,
+                    payload,
+                    document_boundary=identity.exploration_boundary,
+                )
             )
         except ValidationError as exc:
             return _tool_error("invalid_arguments", str(exc))
@@ -697,6 +704,7 @@ async def _call_tool(
                             db,
                             chunk_id=args.chunk_id,
                             document_version_id=args.document_version_id,
+                            document_boundary=identity.exploration_boundary,
                         )
                     ).to_dict()
                 )
@@ -709,6 +717,7 @@ async def _call_tool(
                             dataset_id=args.dataset_id,
                             document_version_id=args.document_version_id,
                             artifact_version=args.artifact_version,
+                            document_boundary=identity.exploration_boundary,
                         )
                     ).to_dict()
                 )
@@ -722,6 +731,7 @@ async def _call_tool(
                     source_rows=args.source_rows,
                     columns=args.columns,
                     limit=args.limit,
+                    document_boundary=identity.exploration_boundary,
                 )
             )
         except ValidationError as exc:
@@ -743,15 +753,29 @@ async def _call_tool(
                 else None
             )
             return _tool_result(
-                await list_facet_catalog(db, document_selection=selection)
+                await list_facet_catalog(
+                    db,
+                    document_selection=selection,
+                    document_boundary=identity.exploration_boundary,
+                )
             )
         if name == "knowledge_get_document":
             args = DocumentReadArguments.model_validate(arguments)
-            document = await read_current_document(db, args.document_id)
+            document = await read_current_document(
+                db,
+                args.document_id,
+                document_boundary=identity.exploration_boundary,
+            )
             return _tool_result(_window_document(document, args))
         if name == "knowledge_get_chunk":
             args = ChunkReadArguments.model_validate(arguments)
-            return _tool_result(await read_current_chunk(db, args.chunk_id))
+            return _tool_result(
+                await read_current_chunk(
+                    db,
+                    args.chunk_id,
+                    document_boundary=identity.exploration_boundary,
+                )
+            )
         if name == "knowledge_list_datasets":
             args = DatasetListArguments.model_validate(arguments)
             return _tool_result(
@@ -765,17 +789,28 @@ async def _call_tool(
                             if args.document_selection is not None
                             else None
                         ),
+                        document_boundary=identity.exploration_boundary,
                     )
                 }
             )
         if name == "knowledge_get_dataset_schema":
             args = DatasetIdArguments.model_validate(arguments)
-            return _tool_result(await get_dataset_schema(db, args.dataset_id))
+            return _tool_result(
+                await get_dataset_schema(
+                    db,
+                    args.dataset_id,
+                    document_boundary=identity.exploration_boundary,
+                )
+            )
         if name == "knowledge_preview_dataset_rows":
             args = DatasetPreviewArguments.model_validate(arguments)
             return _tool_result(
                 await preview_dataset(
-                    db, args.dataset_id, offset=args.offset, limit=args.limit
+                    db,
+                    args.dataset_id,
+                    offset=args.offset,
+                    limit=args.limit,
+                    document_boundary=identity.exploration_boundary,
                 )
             )
     except (TypeError, ValueError, ValidationError):

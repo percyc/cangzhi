@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
@@ -30,8 +31,16 @@ from ..core.config import settings
 from ..core.db import get_db
 from ..models.blobs import Blob
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from ..models.exploration_grants import ExplorationGrant
 from ..models.processing import ProcessingJob
-from ..security.api_auth import APIIdentity, require_api_identity
+from ..security.api_auth import (
+    APIIdentity,
+    extract_token_prefix,
+    generate_exploration_grant_token,
+    hash_pat_token,
+    require_api_identity,
+)
+from ..security.auth import now_utc
 from ..services.ask_history import (
     AskHistoryError,
     get_owned_conversation,
@@ -81,6 +90,7 @@ _read_identity = require_api_identity("knowledge:read")
 _search_identity = require_api_identity("knowledge:search")
 _ask_identity = require_api_identity("knowledge:ask")
 _write_identity = require_api_identity("documents:write")
+MAX_ACTIVE_EXPLORATION_GRANTS = 500
 
 
 class ScopeKeysPayload(BaseModel):
@@ -146,6 +156,13 @@ class DatasetQueryPayload(BaseModel):
     offset: int = Field(default=0, ge=0, le=1_000_000)
 
 
+class ExplorationGrantCreatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_selection: DocumentSelectionPayload
+    ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
+
+
 def _scope_error(exc: KnowledgeScopeError) -> HTTPException:
     status = 404 if exc.code == "scope_not_found" else 400
     return HTTPException(
@@ -204,6 +221,107 @@ def _selection(value: DocumentSelectionPayload | None) -> DocumentSelection | No
             },
         )
     return selection
+
+
+@router.post("/exploration-grants", status_code=201, response_model=dict[str, Any])
+async def create_exploration_grant(
+    payload: ExplorationGrantCreatePayload,
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    """Mint a short-lived MCP-only credential with an immutable boundary."""
+
+    if identity.auth_method != "pat" or identity.pat_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "pat_required",
+                "message": "探索凭证必须由工作空间 PAT 创建",
+            },
+        )
+    boundary = _selection(payload.document_selection)
+    if boundary is None:
+        raise HTTPException(status_code=400, detail="探索范围不能为空")
+    workspace_id = db.sync_session.info.get("cangzhi_workspace_id")
+    if not isinstance(workspace_id, int):
+        raise HTTPException(status_code=400, detail="工作空间上下文不可用")
+    now = now_utc()
+    active_count = int(
+        await db.scalar(
+            select(func.count(ExplorationGrant.id)).where(
+                ExplorationGrant.created_by_pat_id == identity.pat_id,
+                ExplorationGrant.revoked_at.is_(None),
+                ExplorationGrant.expires_at > now,
+            )
+        )
+        or 0
+    )
+    if active_count >= MAX_ACTIVE_EXPLORATION_GRANTS:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "exploration_grant_limit_reached",
+                "message": f"单个 PAT 最多保留 {MAX_ACTIVE_EXPLORATION_GRANTS} 个有效探索凭证",
+            },
+        )
+    plaintext = generate_exploration_grant_token()
+    grant_scopes = sorted(
+        scope
+        for scope in identity.scopes
+        if scope in {"knowledge:read", "knowledge:search", "knowledge:ask"}
+    )
+    grant = ExplorationGrant(
+        workspace_id=workspace_id,
+        admin_id=identity.admin_id,
+        created_by_pat_id=identity.pat_id,
+        token_hash=hash_pat_token(plaintext),
+        token_prefix=extract_token_prefix(plaintext),
+        scope_keys=list(boundary.scope_keys),
+        document_ids=list(boundary.document_ids),
+        scopes=grant_scopes,
+        expires_at=now + timedelta(seconds=payload.ttl_seconds),
+    )
+    db.add(grant)
+    await db.commit()
+    await db.refresh(grant)
+    return {
+        "token": plaintext,
+        "grant": grant.to_audit_dict(),
+        "mcp_path": "/api/mcp",
+        "notice": "探索凭证明文只显示这一次，请仅交给 MCP 客户端。",
+    }
+
+
+@router.post(
+    "/exploration-grants/{grant_id}/revoke",
+    response_model=dict[str, Any],
+)
+async def revoke_exploration_grant(
+    grant_id: int,
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    if identity.auth_method != "pat" or identity.pat_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "pat_required", "message": "必须使用创建凭证的 PAT"},
+        )
+    grant = await db.scalar(
+        select(ExplorationGrant).where(
+            ExplorationGrant.id == grant_id,
+            ExplorationGrant.created_by_pat_id == identity.pat_id,
+        )
+    )
+    if grant is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "exploration_grant_not_found", "message": "探索凭证不存在"},
+        )
+    if grant.revoked_at is None:
+        grant.revoked_at = now_utc()
+        await db.commit()
+        await db.refresh(grant)
+    return {"grant": grant.to_audit_dict()}
 
 
 @router.post("/documents", status_code=202, response_model=dict[str, Any])
@@ -440,6 +558,7 @@ async def capabilities(
             "document_upload": True,
             "document_scope_keys": True,
             "document_selection_union": True,
+            "mcp_exploration_grants": True,
         },
     }
 

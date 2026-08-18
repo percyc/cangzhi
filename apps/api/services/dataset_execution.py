@@ -269,8 +269,13 @@ def build_dataset_parquet(
     return artifact
 
 
-async def get_visible_dataset(db: AsyncSession, dataset_id: int) -> KnowledgeDataset:
-    dataset = await db.scalar(
+async def get_visible_dataset(
+    db: AsyncSession,
+    dataset_id: int,
+    *,
+    document_boundary: DocumentSelection | None = None,
+) -> KnowledgeDataset:
+    statement = (
         select(KnowledgeDataset)
         .join(Document, Document.id == KnowledgeDataset.document_id)
         .where(
@@ -278,6 +283,12 @@ async def get_visible_dataset(db: AsyncSession, dataset_id: int) -> KnowledgeDat
             Document.is_deleted.is_(False),
             Document.current_version_id == KnowledgeDataset.document_version_id,
         )
+    )
+    boundary_condition = candidate_condition(document_boundary)
+    if boundary_condition is not None:
+        statement = statement.where(boundary_condition)
+    dataset = await db.scalar(
+        statement
     )
     if dataset is None:
         raise DatasetExecutionError("dataset_not_found", "数据集不存在")
@@ -290,6 +301,7 @@ async def list_visible_datasets(
     document_id: int | None = None,
     limit: int = 100,
     document_selection: DocumentSelection | None = None,
+    document_boundary: DocumentSelection | None = None,
 ) -> list[dict[str, Any]]:
     statement = (
         select(KnowledgeDataset)
@@ -307,6 +319,9 @@ async def list_visible_datasets(
         condition = candidate_condition(document_selection)
         if condition is not None:
             statement = statement.where(condition)
+    boundary_condition = candidate_condition(document_boundary)
+    if boundary_condition is not None:
+        statement = statement.where(boundary_condition)
     items = list((await db.scalars(statement)).all())
     return [
         {
@@ -323,8 +338,15 @@ async def list_visible_datasets(
     ]
 
 
-async def get_dataset_schema(db: AsyncSession, dataset_id: int) -> dict[str, Any]:
-    dataset = await get_visible_dataset(db, dataset_id)
+async def get_dataset_schema(
+    db: AsyncSession,
+    dataset_id: int,
+    *,
+    document_boundary: DocumentSelection | None = None,
+) -> dict[str, Any]:
+    dataset = await get_visible_dataset(
+        db, dataset_id, document_boundary=document_boundary
+    )
     fields = list(
         (
             await db.scalars(
@@ -751,8 +773,11 @@ async def execute_dataset_query(
     raw_query: dict[str, Any],
     *,
     storage_root: str | Path | None = None,
+    document_boundary: DocumentSelection | None = None,
 ) -> dict[str, Any]:
-    dataset = await get_visible_dataset(db, dataset_id)
+    dataset = await get_visible_dataset(
+        db, dataset_id, document_boundary=document_boundary
+    )
     fields = list(
         (
             await db.scalars(
@@ -938,10 +963,12 @@ async def preview_dataset(
     offset: int = 0,
     limit: int = 50,
     storage_root: str | Path | None = None,
+    document_boundary: DocumentSelection | None = None,
 ) -> dict[str, Any]:
     return await execute_dataset_query(
         db,
         dataset_id,
         {"metric": "rows", "limit": min(limit, MAX_PREVIEW_ROWS), "offset": offset},
         storage_root=storage_root,
+        document_boundary=document_boundary,
     )
