@@ -7,18 +7,19 @@
 
 ```text
 PAT ──绑定──> Workspace
-Document <──多对多──> opaque access_key（id-a / id-b / ...）
+Document <──多对多──> opaque scope_key（id-a / id-b / ...）
 ```
 
-- Access Key 由外部系统生成和维护，藏知不登记用户、角色或 Key 名录。
+- PAT 是工作空间访问凭证；Scope Key 只是外部系统生成和维护的文档分组标识。
+- 藏知不登记 Scope Key 用户、角色、授权或 Key 名录。
 - 一篇文档可以属于多个 Key。
-- 不传 Key：查询工作空间全部文档。
-- 传 `id-a`：只查询关联 `id-a` 的文档。
-- 空 `access_keys`：文档没有特定范围，但全空间查询仍可见。
+- 不传 `document_selection`：查询工作空间全部文档。
+- 查询时，多个 Scope Key 与多个明确 Document ID 共同组成文档候选并集。
+- 空 `scope_keys`：文档没有特定范围，但全空间查询仍可见。
 - 修改 Key 只改关联关系，不重新解析、切片或向量化。
 
-这是一种检索范围，不是完整权限系统。外部系统必须在自己的服务端完成用户鉴权，并把
-经过判断的 Key 注入藏知请求。不要让浏览器用户或大模型任意填写其他 Key。
+Scope Key 不承担安全隔离。工作空间授权只由 PAT 决定，`document_selection` 只是每次
+调用选择哪些文档集合。
 
 ## 2. 创建令牌
 
@@ -29,7 +30,7 @@ Document <──多对多──> opaque access_key（id-a / id-b / ...）
 | `knowledge:read` | 正文、片段、证据、原文、预览、数据集结构 |
 | `knowledge:search` | 检索和数据集精确查询 |
 | `knowledge:ask` | 快速/深度问答 |
-| `documents:write` | 上传文档、修改 Access Key |
+| `documents:write` | 上传文档、修改 Scope Key |
 
 绑定空间的令牌不接受切换空间。旧的未绑定令牌仍可用 `X-Cangzhi-Workspace` 选择空间。
 
@@ -41,42 +42,42 @@ curl -X POST 'http://localhost:8000/api/v1/documents' \
   -F 'file=@manual.pdf' \
   -F 'title=操作手册' \
   -F 'external_id=manual-2026' \
-  -F 'access_keys=["id-a","id-b"]'
+  -F 'scope_keys=["id-a","id-b"]'
 ```
 
 响应为 `202 Accepted`，包含 `document_id`、`version_id`、`status=queued` 和状态地址。
 同一工作空间内 `external_id` 唯一：相同内容返回 `unchanged`；内容变化沿用文档并新增版本，
-Access Key 默认保持，只有本次明确传入时才整体替换。
+Scope Key 默认保持，只有本次明确传入时才整体替换。
 
 上传令牌可直接轮询响应中的 `status_url`（`GET
 /api/v1/documents/{document_id}/processing-status`），查看解析、AI 整理、切片和向量化各
 阶段进度；不需要管理后台的登录 Cookie。
 
-`access_keys` 可使用 JSON 字符串数组，也可使用重复的 multipart 字段。每个 Key 最长
+`scope_keys` 可使用 JSON 字符串数组，也可使用重复的 multipart 字段。每个 Key 最长
 128 字符，每篇文档最多 100 个。
 
-## 4. 管理 Access Key
+## 4. 管理 Scope Key
 
 ```http
-GET /api/v1/documents/{document_id}/access-keys
-PUT /api/v1/documents/{document_id}/access-keys
+GET /api/v1/documents/{document_id}/scope-keys
+PUT /api/v1/documents/{document_id}/scope-keys
 ```
 
 ```json
-{"access_keys":["id-a","id-c"]}
+{"scope_keys":["id-a","id-c"]}
 ```
 
 `PUT` 是整体替换；传空数组清除全部关联。批量同步：
 
 ```http
-PUT /api/v1/document-access-keys/batch
+PUT /api/v1/document-scope-keys/batch
 ```
 
 ```json
 {
   "items": [
-    {"external_id":"manual-2026","access_keys":["id-a"]},
-    {"document_id":42,"access_keys":[]}
+    {"external_id":"manual-2026","scope_keys":["id-a"]},
+    {"document_id":42,"scope_keys":[]}
   ]
 }
 ```
@@ -85,32 +86,40 @@ PUT /api/v1/document-access-keys/batch
 
 ## 5. 查询
 
-请求体方式：
+Search、Ask、Deep 和对应 MCP 工具使用同一结构：
 
 ```json
-{"query":"报销流程","access_key":"id-a"}
+{
+  "query": "报销流程",
+  "document_selection": {
+    "scope_keys": ["id-a", "id-b"],
+    "document_ids": [42, 73]
+  }
+}
 ```
 
-固定连接范围更适合用请求头：
+候选集合固定为：
 
-```http
-X-Cangzhi-Access-Key: id-a
+```text
+documents(scope_key in [id-a, id-b]) UNION documents(id in [42, 73])
 ```
 
-若请求头和请求体同时提供且不一致，返回 `400 access_key_conflict`。该范围覆盖 REST 的
-search、quick/deep/stream ask、数据集查询、正文与证据读取，也覆盖 MCP 对应工具。
+分类、标签、来源、连接器和保存的 KnowledgeScope 再与候选集合取交集。省略
+`document_selection` 表示整个工作空间；显式传入空对象返回
+`400 invalid_document_selection`，绝不回退全空间。Scope Key 和 ID 不存在时只产生空
+候选，不扩大范围。
 
 ## 6. MCP 与 CLI
 
-MCP 连接可以固定请求头；工具参数也支持可选 `access_key`。共享给最终用户时推荐由外部
-系统固定请求头，因为工具参数可能由模型生成。MCP 只提供读取、检索和问答；上传与范围
-管理走 REST。
+MCP 的 `knowledge_search`、`knowledge_ask`、`knowledge_list_facets` 和
+`knowledge_list_datasets` 均接受 `document_selection`。MCP 只提供读取、检索和问答；
+上传与 Scope Key 管理走 REST。文档、片段和证据按明确 ID 读取，仅受 PAT 工作空间隔离，
+不再把 Scope Key 当成第二层权限。
 
 CLI 可使用：
 
 ```bash
-export CANGZHI_ACCESS_KEY='id-a'
-cangzhi search '报销流程'
+cangzhi search '报销流程' --scope-keys id-a,id-b --document-ids 42,73
 ```
 
 ## 7. 生命周期与审计

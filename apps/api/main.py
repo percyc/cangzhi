@@ -80,7 +80,6 @@ app.add_middleware(
         "Content-Type",
         "X-Requested-With",
         "X-Cangzhi-Workspace",
-        "X-Cangzhi-Access-Key",
     ],
     max_age=600,
 )

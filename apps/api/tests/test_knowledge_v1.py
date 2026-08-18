@@ -143,6 +143,20 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     )
     assert "mode" not in ask_tool["inputSchema"]["properties"]
     assert ask_tool["inputSchema"]["additionalProperties"] is False
+    search_tool = next(
+        item
+        for item in tools.json()["result"]["tools"]
+        if item["name"] == "knowledge_search"
+    )
+    search_properties = search_tool["inputSchema"]["properties"]
+    assert "document_selection" in search_properties
+    assert "access_key" not in search_properties
+    assert "document_ids" not in search_properties
+    selection_schema = search_tool["inputSchema"]["$defs"][
+        "DocumentSelectionArguments"
+    ]
+    assert selection_schema["additionalProperties"] is False
+    assert set(selection_schema["properties"]) == {"scope_keys", "document_ids"}
     mcp_search = test_client.post(
         "/api/mcp",
         headers=headers,
@@ -159,6 +173,26 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     tool_result = mcp_search.json()["result"]
     assert tool_result["isError"] is False
     assert tool_result["structuredContent"]["hits"] == []
+    legacy_selection = test_client.post(
+        "/api/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/call",
+            "params": {
+                "name": "knowledge_search",
+                "arguments": {
+                    "query": "不存在的资料",
+                    "access_key": "legacy",
+                },
+            },
+        },
+    ).json()["result"]
+    assert legacy_selection["isError"] is True
+    assert legacy_selection["structuredContent"]["error"]["code"] == (
+        "invalid_arguments"
+    )
     mcp_ask = test_client.post(
         "/api/mcp",
         headers=headers,
@@ -222,7 +256,7 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     assert test_client.get("/api/v1/capabilities", headers=headers).status_code == 401
 
 
-def test_bound_token_uploads_and_manages_access_keys(client):
+def test_bound_token_uploads_and_manages_scope_keys(client):
     test_client, _ = client
     _enable_real_login()
     _setup_owner(test_client)
@@ -243,13 +277,13 @@ def test_bound_token_uploads_and_manages_access_keys(client):
     uploaded = test_client.post(
         "/api/v1/documents",
         headers=headers,
-        files={"file": ("guide.txt", b"access key integration", "text/plain")},
-        data={"external_id": "ext-guide", "access_keys": '["id-a", "id-b"]'},
+        files={"file": ("guide.txt", b"scope key integration", "text/plain")},
+        data={"external_id": "ext-guide", "scope_keys": '["id-a", "id-b"]'},
     )
     assert uploaded.status_code == 202
     body = uploaded.json()
     assert body["status"] == "queued"
-    assert body["access_keys"] == ["id-a", "id-b"]
+    assert body["scope_keys"] == ["id-a", "id-b"]
     document_id = body["document_id"]
     assert body["status_url"] == f"/api/v1/documents/{document_id}/processing-status"
     processing = test_client.get(body["status_url"], headers=headers)
@@ -257,28 +291,46 @@ def test_bound_token_uploads_and_manages_access_keys(client):
     assert processing.json()["document_id"] == document_id
     assert processing.json()["overall_status"] == "processing"
     replaced = test_client.put(
-        f"/api/v1/documents/{document_id}/access-keys",
+        f"/api/v1/documents/{document_id}/scope-keys",
         headers=headers,
-        json={"access_keys": ["id-c"]},
+        json={"scope_keys": ["id-c"]},
     )
     assert replaced.status_code == 200
-    assert replaced.json()["access_keys"] == ["id-c"]
+    assert replaced.json()["scope_keys"] == ["id-c"]
     unchanged = test_client.post(
         "/api/v1/documents",
         headers=headers,
-        files={"file": ("guide.txt", b"access key integration", "text/plain")},
+        files={"file": ("guide.txt", b"scope key integration", "text/plain")},
         data={"external_id": "ext-guide"},
     )
     assert unchanged.status_code == 202
     assert unchanged.json()["status"] == "unchanged"
     assert unchanged.json()["document_id"] == document_id
-    assert unchanged.json()["access_keys"] == ["id-c"]
-    conflict = test_client.post(
+    assert unchanged.json()["scope_keys"] == ["id-c"]
+    selected = test_client.post(
         "/api/v1/knowledge/search",
-        headers={**headers, "X-Cangzhi-Access-Key": "id-a"},
-        json={"query": "integration", "access_key": "id-b"},
+        headers=headers,
+        json={
+            "query": "integration",
+            "document_selection": {
+                "scope_keys": ["id-c"],
+                "document_ids": [],
+            },
+        },
     )
-    assert conflict.status_code == 400
+    assert selected.status_code == 200
+    empty_selection = test_client.post(
+        "/api/v1/knowledge/search",
+        headers=headers,
+        json={"query": "integration", "document_selection": {}},
+    )
+    assert empty_selection.status_code == 400
+    invalid_batch = test_client.put(
+        "/api/v1/document-scope-keys/batch",
+        headers=headers,
+        json={"items": [{"document_id": document_id, "scope_keys": [""]}]},
+    )
+    assert invalid_batch.status_code == 400
 
 
 def test_bound_token_cannot_switch_workspace(client):

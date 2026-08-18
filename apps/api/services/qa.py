@@ -42,6 +42,7 @@ from sqlalchemy.sql import ColumnElement
 from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from .scope_keys import DocumentSelection
 from .search import (
     extract_cjk_ngrams,
     normalize_query,
@@ -120,7 +121,7 @@ class AskRequest:
     source_types: list[str] = field(default_factory=list)
     document_ids: list[int] = field(default_factory=list)
     connector_ids: list[int] = field(default_factory=list)
-    access_key: str | None = None
+    document_selection: DocumentSelection | None = None
     matches_none: bool = False
 
 
@@ -368,7 +369,7 @@ class QAService:
             source_types=request.source_types,
             document_ids=request.document_ids,
             connector_ids=request.connector_ids,
-            access_key=request.access_key,
+            document_selection=request.document_selection,
             matches_none=request.matches_none,
             evidence_limit=evidence_limit,
             evidence_total_chars=evidence_total_chars,
@@ -381,12 +382,6 @@ class QAService:
         candidate_table_document_ids = (
             [] if table_matches_none else list(request.document_ids)
         )
-        if candidate_table_document_ids and request.access_key:
-            from .access_keys import filter_document_ids
-
-            candidate_table_document_ids = await filter_document_ids(
-                db, candidate_table_document_ids, request.access_key
-            )
         if request.connector_ids and not table_matches_none:
             from .knowledge_scopes import resolve_connector_document_ids
 
@@ -436,7 +431,7 @@ class QAService:
                     "tag_slugs": list(request.tag_slugs),
                     "source_types": list(request.source_types),
                     "document_ids": list(request.document_ids),
-                    "access_key": request.access_key,
+                    "document_selection": request.document_selection,
                     "matches_none": request.matches_none,
                 },
             )
@@ -585,7 +580,7 @@ class QAService:
         source_types: Sequence[str],
         document_ids: Sequence[int] | None = None,
         connector_ids: Sequence[int] | None = None,
-        access_key: str | None = None,
+        document_selection: DocumentSelection | None = None,
         matches_none: bool = False,
         evidence_limit: int = DEFAULT_EVIDENCE_ITEMS,
         evidence_total_chars: int = EVIDENCE_TOTAL_CHARS,
@@ -616,7 +611,7 @@ class QAService:
             "source_types": list(source_types),
             "document_ids": effective_document_ids,
             "connector_ids": list(connector_ids or []),
-            "access_key": access_key,
+            "document_selection": document_selection,
             "matches_none": matches_none,
         }
         if _contains_cjk(question):
@@ -1496,7 +1491,7 @@ def _apply_filters(stmt, filters: dict):
         DocumentTag,
         Tag,
     )
-    from .access_keys import document_has_access_key
+    from .scope_keys import candidate_condition
 
     conditions = []
     if filters.get("matches_none"):
@@ -1529,9 +1524,11 @@ def _apply_filters(stmt, filters: dict):
     document_ids = filters.get("document_ids") or []
     if document_ids:
         conditions.append(Document.id.in_(document_ids))
-    access_key = filters.get("access_key")
-    if access_key:
-        conditions.append(document_has_access_key(access_key))
+    selection = filters.get("document_selection")
+    if selection is not None:
+        candidate = candidate_condition(selection)
+        if candidate is not None:
+            conditions.append(candidate)
     if conditions:
         stmt = stmt.where(and_(*conditions))
     return stmt

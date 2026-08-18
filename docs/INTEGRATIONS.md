@@ -34,13 +34,14 @@ CLI 可用 `--workspace research`，或设置 `CANGZHI_WORKSPACE=research`。远
 令牌明文只返回一次，数据库仅保存 SHA-256。建议外部平台只授予
 `knowledge:read` 和 `knowledge:search`；只有确实需要调用藏知问答模型时，
 才授予 `knowledge:ask`。
-需要 API 上传和维护文档 Access Key 时额外授予 `documents:write`。
+需要 API 上传和维护文档 Scope Key 时额外授予 `documents:write`。
 
 ## 外部系统文档范围
 
-外部系统可在上传时为文档写入多个 `access_keys`，并在查询时通过
-`X-Cangzhi-Access-Key` 或请求字段选择一个范围。不传表示空间全局查询。该 Key 由外部
-系统维护，不是藏知用户身份；共享 MCP 时应由可信服务固定请求头，不让模型自由选择。
+外部系统可在上传时为文档写入多个 `scope_keys`，并在 Search/Ask/MCP 的
+`document_selection` 中同时传入多个 Scope Key 和多个 Document ID。它们组成候选并集，
+再与分类、标签、来源和保存范围取交集。不传表示空间全局查询。Scope Key 是文档分组，
+不是用户身份或访问凭证；PAT 才决定工作空间访问。
 上传和管理契约见[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
 
 ## Hermes / OpenClaw
@@ -114,7 +115,7 @@ DuckDB 在 Parquet 上下推执行，最多返回 200 行。不要循环调用�
 - `knowledge:read`：读取知识范围、文档和切片。
 - `knowledge:search`：执行知识检索。
 - `knowledge:ask`：调用藏知配置的对话模型生成带引用回答。
-- `documents:write`：通过 REST 上传文档并管理 Access Key。
+- `documents:write`：通过 REST 上传文档并管理 Scope Key。
 
-读取和检索是推荐的默认权限。MCP 仍保持只读；受控文件上传和 Access Key 管理使用
+读取和检索是推荐的默认权限。MCP 仍保持只读；受控文件上传和 Scope Key 管理使用
 REST 与独立 `documents:write`，不开放删除、令牌管理或任意 SQL。

@@ -140,7 +140,7 @@
 ### 受控写入 API
 
 - **已完成**：文件上传的稳定 v1 接口、`external_id` 幂等版本更新
-- **已完成**：`documents:write` 最小权限与文档 Access Key 单篇/批量管理
+- **已完成**：`documents:write` 最小权限与文档 Scope Key 单篇/批量管理
 - 待完成：URL、随手记采集的稳定 v1 接口
 - `Idempotency-Key` 与任务状态查询
 - 写入审计、速率限制和大小限制

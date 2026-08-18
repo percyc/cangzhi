@@ -33,7 +33,6 @@ class CangzhiClient:
     token: str
     workspace: str = "default"
     timeout: float = 30.0
-    access_key: str | None = None
 
     def request(
         self,
@@ -49,8 +48,6 @@ class CangzhiClient:
                 "User-Agent": "cangzhi-cli/0.1",
                 "X-Cangzhi-Workspace": self.workspace,
             }
-            if self.access_key:
-                headers["X-Cangzhi-Access-Key"] = self.access_key
             response = httpx.request(
                 method,
                 f"{self.base_url.rstrip('/')}{path}",
@@ -110,7 +107,6 @@ def _scope_payload(args: argparse.Namespace) -> dict[str, Any]:
         ("category_ids", True),
         ("tag_ids", True),
         ("connector_ids", True),
-        ("document_ids", True),
         ("source_types", False),
     ):
         value = _comma_values(getattr(args, key, None), integers=integers)
@@ -120,6 +116,15 @@ def _scope_payload(args: argparse.Namespace) -> dict[str, Any]:
         payload["scope_id"] = args.scope_id
     if getattr(args, "scope", None):
         payload["scope_slug"] = args.scope
+    scope_keys = _comma_values(getattr(args, "scope_keys", None))
+    document_ids = _comma_values(
+        getattr(args, "document_ids", None), integers=True
+    )
+    if scope_keys or document_ids:
+        payload["document_selection"] = {
+            "scope_keys": scope_keys,
+            "document_ids": document_ids,
+        }
     return payload
 
 
@@ -132,6 +137,7 @@ def _add_scope_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-types", help="来源类型，逗号分隔")
     parser.add_argument("--connector-ids", help="连接器 ID，逗号分隔")
     parser.add_argument("--document-ids", help="文档 ID，逗号分隔")
+    parser.add_argument("--scope-keys", help="文档范围键，逗号分隔")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,11 +161,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="工作空间 slug（环境变量 CANGZHI_WORKSPACE，默认 default）",
     )
     parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument(
-        "--access-key",
-        default=os.getenv("CANGZHI_ACCESS_KEY"),
-        help="可选文档检索范围（环境变量 CANGZHI_ACCESS_KEY）",
-    )
     parser.add_argument(
         "--compact",
         action="store_true",
@@ -252,7 +253,6 @@ def main(argv: list[str] | None = None) -> int:
                 token=args.token,
                 workspace=args.workspace,
                 timeout=args.timeout,
-                access_key=args.access_key,
             ),
         )
     except CLIError as exc:

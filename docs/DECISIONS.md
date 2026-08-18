@@ -305,15 +305,16 @@ Top 5 命中率；或 active profile 超过 10 万个切片导致精确余弦查
 选择、后台导入、增量键和调度；仅在 SQL dump 有明确通用解析需求时增加“解析但不执行”
 的隔离导入器。
 
-## ADR-021：外部系统使用工作空间令牌与文档 Access Key
+## ADR-021：外部系统使用工作空间令牌与文档 Scope Key
 
-**决定**：PAT 可选绑定一个工作空间；外部系统用独立 `document_access_keys` 关联表为
-文档维护不透明范围标识。查询不传 Key 时访问整个空间，传入时只返回具有关联的文档。
-Access Key 与 KnowledgeScope 求交，但不承担用户身份、角色或组织权限语义。文件上传和
-范围管理使用独立 `documents:write`，MCP 保持读取工具。
+**决定**：PAT 可选绑定一个工作空间；外部系统用独立 `document_scope_keys` 关联表为
+文档维护不透明分组标识。查询的 `document_selection` 将多个 Scope Key 命中文档与多个
+明确 Document ID 取并集，再与 KnowledgeScope 和元数据筛选取交集；不传选择时访问整个
+空间。Scope Key 不承担用户身份、角色或组织权限语义。文件上传和范围管理使用独立
+`documents:write`，MCP 保持读取工具。
 
-**原因**：满足外部系统按自身用户权限缩小资料范围的需求，同时避免把单用户知识中枢
-扩展成复杂权限平台。规范化关联表又能保证大规模过滤下推和文档多范围管理。
+**原因**：为外部系统和 Agent 提供可组合的文档集合，同时避免把单用户知识中枢扩展成
+复杂权限平台。规范化关联表和 SQL 下推保证大规模过滤与统一相关性排序。
 
 完整安全边界和接口见 [ADR-021](ADR-021-external-client-access.md) 与
 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。

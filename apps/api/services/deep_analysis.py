@@ -405,7 +405,7 @@ class DeepAnalysisService:
                 source_types=request.source_types,
                 document_ids=request.document_ids,
                 connector_ids=request.connector_ids,
-                access_key=request.access_key,
+                document_selection=request.document_selection,
                 matches_none=request.matches_none,
             )
             retrieval_statuses.append(retrieval)
@@ -712,7 +712,7 @@ class DeepAnalysisService:
                 source_types=request.source_types,
                 document_ids=request.document_ids,
                 connector_ids=request.connector_ids,
-                access_key=request.access_key,
+                document_selection=request.document_selection,
                 matches_none=request.matches_none,
                 limit=MAX_SEARCH_HITS_IN_OBSERVATION,
             )
@@ -731,7 +731,7 @@ class DeepAnalysisService:
                     source_types=request.source_types,
                     document_ids=request.document_ids,
                     connector_ids=request.connector_ids,
-                    access_key=request.access_key,
+                    document_selection=request.document_selection,
                     matches_none=request.matches_none,
                     limit=MAX_SEARCH_HITS_IN_OBSERVATION,
                 )
@@ -918,7 +918,7 @@ async def _resolve_dataset_document_ids(
                 "tag_slugs": list(request.tag_slugs),
                 "source_types": list(request.source_types),
                 "document_ids": document_ids,
-                "access_key": request.access_key,
+                "document_selection": request.document_selection,
                 "matches_none": False,
             },
             limit=50,

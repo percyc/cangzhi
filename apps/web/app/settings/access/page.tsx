@@ -35,7 +35,7 @@ const scopeLabels: Record<string, string> = {
   'knowledge:read': '读取文档',
   'knowledge:search': '检索知识',
   'knowledge:ask': '问知识库与表格精确计算',
-  'documents:write': '上传文档与管理 Access Key',
+  'documents:write': '上传文档与管理 Scope Key',
 };
 
 export default function AccessSettingsPage() {

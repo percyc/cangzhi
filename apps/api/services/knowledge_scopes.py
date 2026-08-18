@@ -13,6 +13,7 @@ from ..models.documents import Document, DocumentSourceType
 from ..models.knowledge_scopes import KnowledgeScope
 from ..models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
 from ..models.webdav import WebDAVEntry, WebDAVSource
+from .scope_keys import DocumentSelection, candidate_condition
 
 FILTER_DIMENSIONS = (
     "category_ids",
@@ -364,13 +365,19 @@ async def list_scope_catalog(db: AsyncSession) -> list[dict[str, Any]]:
 
 
 async def list_facet_catalog(
-    db: AsyncSession, *, access_key: str | None = None
+    db: AsyncSession,
+    *,
+    document_selection: DocumentSelection | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Return filter choices and active-document counts for every adapter."""
+    """Return filter choices and active-document counts for every adapter.
 
-    from .access_keys import document_has_access_key
+    ``document_selection`` is the union of scope-key-bound documents
+    and explicit document ids. When provided, the facet counts only
+    include documents that intersect with the selection, mirroring the
+    Search/Ask/Deep contract.
+    """
 
-    access_condition = document_has_access_key(access_key) if access_key else None
+    selection_condition = candidate_condition(document_selection) if document_selection else None
 
     category_rows = (
         await db.execute(
@@ -389,7 +396,7 @@ async def list_facet_catalog(
                     Document.is_deleted.is_(False),
                     Document.current_version_id
                     == DocumentCategory.document_version_id,
-                    access_condition if access_condition is not None else True,
+                    selection_condition if selection_condition is not None else True,
                 ),
             )
             .group_by(Category.id)
@@ -409,7 +416,7 @@ async def list_facet_catalog(
                     Document.id == DocumentTag.document_id,
                     Document.is_deleted.is_(False),
                     Document.current_version_id == DocumentTag.document_version_id,
-                    access_condition if access_condition is not None else True,
+                    selection_condition if selection_condition is not None else True,
                 ),
             )
             .group_by(Tag.id)
@@ -429,7 +436,7 @@ async def list_facet_catalog(
                 select(Document.source_type, func.count(Document.id))
                 .where(
                     Document.is_deleted.is_(False),
-                    access_condition if access_condition is not None else True,
+                    selection_condition if selection_condition is not None else True,
                 )
                 .group_by(Document.source_type)
             )
@@ -447,13 +454,14 @@ async def list_facet_catalog(
                 and_(
                     Document.id == WebDAVEntry.document_id,
                     Document.is_deleted.is_(False),
-                    access_condition if access_condition is not None else True,
+                    selection_condition if selection_condition is not None else True,
                 ),
             )
             .group_by(WebDAVSource.id)
             .order_by(WebDAVSource.name, WebDAVSource.id)
         )
     ).all()
+    has_selection = document_selection is not None
     return {
         "categories": [
             {
@@ -464,7 +472,7 @@ async def list_facet_catalog(
                 "document_count": int(document_count),
             }
             for category, document_count in category_rows
-            if access_key is None or int(document_count) > 0
+            if not has_selection or int(document_count) > 0
         ],
         "tags": [
             {
@@ -474,7 +482,7 @@ async def list_facet_catalog(
                 "document_count": int(document_count),
             }
             for tag, document_count in tag_rows
-            if access_key is None or int(document_count) > 0
+            if not has_selection or int(document_count) > 0
         ],
         "source_types": [
             {
@@ -483,7 +491,7 @@ async def list_facet_catalog(
                 "document_count": source_counts.get(source_type.value, 0),
             }
             for source_type in DocumentSourceType
-            if access_key is None or source_counts.get(source_type.value, 0) > 0
+            if not has_selection or source_counts.get(source_type.value, 0) > 0
         ],
         "connectors": [
             {
@@ -493,6 +501,6 @@ async def list_facet_catalog(
                 "document_count": int(document_count),
             }
             for source, document_count in connector_rows
-            if access_key is None or int(document_count) > 0
+            if not has_selection or int(document_count) > 0
         ],
     }

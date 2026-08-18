@@ -13,7 +13,7 @@ import apps.api.models  # noqa: F401 - ensure all tables register
 from apps.api.core.db import Base, get_db
 from apps.api.main import app
 from apps.api.models.chunks import DocumentChunk
-from apps.api.models.document_access_keys import DocumentAccessKey
+from apps.api.models.document_scope_keys import DocumentScopeKey
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.taxonomy import (
     Category,
@@ -528,7 +528,8 @@ def test_search_treats_like_wildcards_as_literal(search_db):
     assert result.total == 0
 
 
-def test_access_key_narrows_without_changing_global_search(search_db):
+def test_scope_key_narrows_without_changing_global_search(search_db):
+    from apps.api.services.scope_keys import DocumentSelection
     from apps.api.services.search import search_documents
 
     async def _run():
@@ -554,15 +555,26 @@ def test_access_key_narrows_without_changing_global_search(search_db):
                         DocumentVersion.document_id == document_id
                     )
                 )
-            session.add(DocumentAccessKey(workspace_id=1, document_id=first, access_key="id-a"))
-            session.add(DocumentAccessKey(workspace_id=1, document_id=second, access_key="id-b"))
+            session.add(DocumentScopeKey(workspace_id=1, document_id=first, scope_key="id-a"))
+            session.add(DocumentScopeKey(workspace_id=1, document_id=second, scope_key="id-b"))
             await session.commit()
             global_result = await search_documents(session, query="共同检索词")
-            scoped_result = await search_documents(session, query="共同检索词", access_key="id-a")
-            missing_result = await search_documents(session, query="共同检索词", access_key="missing")
+            scoped_result = await search_documents(
+                session,
+                query="共同检索词",
+                document_selection=DocumentSelection(scope_keys=("id-a",)),
+            )
+            missing_result = await search_documents(
+                session,
+                query="共同检索词",
+                document_selection=DocumentSelection(scope_keys=("missing",)),
+            )
             from apps.api.services.knowledge_scopes import list_facet_catalog
 
-            facets = await list_facet_catalog(session, access_key="id-a")
+            facets = await list_facet_catalog(
+                session,
+                document_selection=DocumentSelection(scope_keys=("id-a",)),
+            )
             return global_result, scoped_result, missing_result, facets
 
     global_result, scoped_result, missing_result, facets = asyncio.run(_run())
@@ -570,3 +582,72 @@ def test_access_key_narrows_without_changing_global_search(search_db):
     assert [hit.title for hit in scoped_result.hits] == ["甲方资料"]
     assert missing_result.hits == []
     assert {item["slug"] for item in facets["categories"]} == {"scope-a"}
+
+
+def test_document_selection_unions_scope_keys_and_ids(search_db):
+    from apps.api.services.scope_keys import DocumentSelection
+    from apps.api.services.search import search_documents
+
+    async def _run():
+        a = await _seed_document(
+            search_db,
+            title="A 资料",
+            source_type=DocumentSourceType.note,
+            body="共同词与A内容。",
+            category_slug="cat-a",
+        )
+        b = await _seed_document(
+            search_db,
+            title="B 资料",
+            source_type=DocumentSourceType.note,
+            body="共同词与B内容。",
+            category_slug="cat-b",
+        )
+        c = await _seed_document(
+            search_db,
+            title="C 资料",
+            source_type=DocumentSourceType.note,
+            body="共同词与C内容。",
+            category_slug="cat-c",
+        )
+        async with search_db() as session:
+            for document_id in (a, b, c):
+                document = await session.get(Document, document_id)
+                document.current_version_id = await session.scalar(
+                    select(DocumentVersion.id).where(
+                        DocumentVersion.document_id == document_id
+                    )
+                )
+            session.add(DocumentScopeKey(workspace_id=1, document_id=a, scope_key="team-a"))
+            session.add(DocumentScopeKey(workspace_id=1, document_id=b, scope_key="team-b"))
+            await session.commit()
+            selection = DocumentSelection(scope_keys=("team-a",), document_ids=(c,))
+            result = await search_documents(session, query="共同词", document_selection=selection)
+            return result
+
+    result = asyncio.run(_run())
+    titles = {hit.title for hit in result.hits}
+    assert titles == {"A 资料", "C 资料"}
+
+
+def test_empty_internal_document_selection_fails_closed(search_db):
+    from apps.api.services.scope_keys import DocumentSelection
+    from apps.api.services.search import search_documents
+
+    async def _run():
+        await _seed_document(
+            search_db,
+            title="不可意外放宽的资料",
+            source_type=DocumentSourceType.note,
+            body="共同词与敏感内容。",
+            category_slug="closed-selection",
+        )
+        async with search_db() as session:
+            return await search_documents(
+                session,
+                query="共同词",
+                document_selection=DocumentSelection(),
+            )
+
+    result = asyncio.run(_run())
+    assert result.hits == []

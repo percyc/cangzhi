@@ -1,4 +1,4 @@
-# ADR-021：工作空间令牌与文档 Access Key
+# ADR-021：工作空间令牌与文档 Scope Key
 
 **状态**：已接受并实现 · **关联说明**：[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)
 
@@ -12,39 +12,38 @@
 
 1. PAT 可选绑定一个工作空间。绑定后忽略 Cookie，且请求头或查询参数不能切换到其他
    空间；未绑定旧令牌保持兼容。
-2. 文档与不透明字符串 `access_key` 通过 `document_access_keys` 多对多关联。不存在
-   Access Key 注册表，也不复用内容标签。
-3. 不传 `access_key` 表示检索令牌工作空间全部文档；传入时只返回关联该 Key 的文档。
-   没有关联 Key 的文档只会出现在全空间查询中。
-4. `access_key` 是受信任外部系统提供的检索范围，不是藏知自己的用户身份认证。外部
-   系统负责确认当前用户能够使用哪个 Key。
-5. Access Key 作为 KnowledgeScope、分类、标签、来源、连接器和文档 ID 过滤之上的
-   额外交集，用 SQL `EXISTS` 下推到全文、向量和数据集发现查询。
-6. 搜索、快速/深度/流式问答、MCP、数据集、证据、正文、原文与预览共享相同范围语义。
-7. `documents:write` 仅允许上传文档和管理 Access Key；MCP 保持只读取证，不开放写操作。
+2. 文档与不透明字符串 `scope_key` 通过 `document_scope_keys` 多对多关联。不存在
+   Scope Key 注册表，也不复用内容标签。
+3. PAT 是唯一工作空间授权；Scope Key 只是文档分组元数据，不是凭证或 ACL。
+4. Search/Ask/MCP 使用可选 `document_selection`。其中任意 Scope Key 命中的文档与
+   明确 Document ID 取并集并去重；不传表示全工作空间，显式空选择是错误。
+5. `document_selection` 通过 SQL `EXISTS(scope_key IN ...) OR Document.id IN (...)`
+   下推；KnowledgeScope、分类、标签、来源和连接器继续与候选集合取交集。
+6. 搜索、快速/深度/流式问答、MCP 和数据集发现共享该选择语义。正文、片段和证据的
+   明确 ID 读取只受 PAT 工作空间隔离，不重复检查 Scope Key。
+7. `documents:write` 仅允许上传文档和管理 Scope Key；MCP 保持只读取证，不开放写操作。
 
 ## 数据模型
 
 ```text
 personal_access_tokens.workspace_id? -> workspaces.id
 
-document_access_keys
+document_scope_keys
   workspace_id -> workspaces.id
   document_id  -> documents.id
-  access_key   varchar(128)
-  unique(document_id, access_key)
-  index(workspace_id, access_key, document_id)
+  scope_key   varchar(128)
+  unique(document_id, scope_key)
+  index(workspace_id, scope_key, document_id)
 ```
 
 关联绑定文档实体而不是版本，因此文档更新不会丢失范围；永久删除文档时数据库级联删除。
 
 ## 安全边界
 
-- 如果最终用户或模型能任意改变 `access_key`，它就不能承担安全隔离。共享 MCP 场景应由
-  外部系统固定 `X-Cangzhi-Access-Key`，而不是让模型自行决定。
-- 不传 Key 的调用拥有空间全局视图，因此只应向可信后台签发或保管相应令牌。
-- 真正出现多用户、成员共享和角色权限时，另行建设 workspace membership；不把本机制
-  演化成隐式 ACL。
+- Scope Key 可以由外部系统或 Agent 用于探索，但不能承担用户授权。
+- PAT 持有者可以读取其绑定工作空间；外部系统必须自行保管 PAT 并完成用户鉴权。
+- 真正出现多用户、成员共享和角色权限时，另行建设 workspace membership；不把 Scope
+  Key 演化成隐式 ACL。
 
 ## 重新评估条件
 

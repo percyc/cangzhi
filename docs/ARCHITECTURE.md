@@ -208,7 +208,7 @@ MCP / Skill ─────┘
 ```
 
 - 浏览器 API：Cookie 鉴权，服务产品管理页面，可随 UI 演进。
-- REST v1：Cookie 或 Bearer PAT，提供稳定知识读取、受控文件上传与 Access Key 管理契约。
+- REST v1：Cookie 或 Bearer PAT，提供稳定知识读取、受控文件上传与 Scope Key 管理契约。
 - CLI：REST v1 的 JSON 客户端，不直连数据库。
 - MCP：Streamable HTTP，只读取证工具优先；`knowledge_ask` 是可选快速回答。
 - Skill：指导外部 Agent 自主组合搜索、读取和数据集查询，不复制业务逻辑。
@@ -233,14 +233,15 @@ MCP / Skill ─────┘
 | 数据集 | `knowledge_datasets`、`dataset_fields`、`structured_table_rows`、`dataset_artifacts` |
 | 外部来源 | `webdav_sources`、`webdav_entries`、`external_item_exclusions` |
 | 范围与问答 | `knowledge_scopes`、`ask_conversations`、`ask_turns` |
-| 外部系统接入 | `document_access_keys`、`personal_access_tokens.workspace_id`（见 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)） |
+| 外部系统接入 | `document_scope_keys`、`personal_access_tokens.workspace_id`（见 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)） |
 
-`documents`、`document_access_keys`、`categories`、`tags`、`knowledge_scopes`、`webdav_sources`、
+`documents`、`document_scope_keys`、`categories`、`tags`、`knowledge_scopes`、`webdav_sources`、
 `external_item_exclusions` 和 `ask_conversations` 直接携带 `workspace_id`；其版本、切片、
 数据集和证据通过父对象继承空间边界。模型配置、向量 Profile、备份和管理员仍是全局资源。
 
-Access Key 是受信任调用方选择的检索范围，不是用户/角色系统；过滤以 SQL `EXISTS`
-与 KnowledgeScope 求交。知识图谱、团队空间和多用户权限仍属于路线图，
+Scope Key 是文档分组而不是用户/角色系统；`document_selection` 以 SQL
+`EXISTS(scope_key IN ...) OR Document.id IN (...)` 形成候选并集，再与 KnowledgeScope
+及其他元数据筛选求交。知识图谱、团队空间和多用户权限仍属于路线图，
 不作为当前部署依赖。
 
 ## 9. 安全边界

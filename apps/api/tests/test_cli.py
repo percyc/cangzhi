@@ -30,6 +30,7 @@ def test_search_command_builds_same_scope_contract_as_rest():
         tag_ids=None,
         source_types="file,note",
         connector_ids="3",
+        scope_keys=None,
         document_ids=None,
     )
     assert run(args, client) == {"ok": True}
@@ -58,6 +59,7 @@ def test_scope_payload_omits_empty_dimensions():
         tag_ids=None,
         source_types=None,
         connector_ids=None,
+        scope_keys=None,
         document_ids=None,
     )
     assert _scope_payload(args) == {}
@@ -81,6 +83,7 @@ def test_ask_command_can_select_deep_analysis():
         tag_ids=None,
         source_types=None,
         connector_ids=None,
+        scope_keys=None,
         document_ids=None,
     )
 
@@ -96,6 +99,30 @@ def test_ask_command_can_select_deep_analysis():
             },
         )
     ]
+
+
+def test_search_command_unions_scope_keys_and_document_ids_in_selection():
+    client = StubClient()
+    args = argparse.Namespace(
+        command="search",
+        query="合同期限",
+        limit=10,
+        offset=0,
+        scope=None,
+        scope_id=None,
+        category_ids=None,
+        tag_ids=None,
+        source_types=None,
+        connector_ids=None,
+        scope_keys="tenant-a,tenant-b",
+        document_ids="7,9",
+    )
+
+    assert run(args, client) == {"ok": True}
+    assert client.calls[0][2]["document_selection"] == {
+        "scope_keys": ["tenant-a", "tenant-b"],
+        "document_ids": [7, 9],
+    }
 
 
 def test_missing_token_is_machine_readable(capsys):

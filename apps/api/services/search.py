@@ -37,6 +37,7 @@ from ..models.taxonomy import (
     DocumentTag,
     Tag,
 )
+from .scope_keys import DocumentSelection
 
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
@@ -317,10 +318,18 @@ async def search_documents(
     source_types: Sequence[str] | None = None,
     document_ids: Sequence[int] | None = None,
     connector_ids: Sequence[int] | None = None,
-    access_key: str | None = None,
+    document_selection: DocumentSelection | None = None,
     matches_none: bool = False,
 ) -> SearchResult:
-    """Run hybrid retrieval, transparently degrading to lexical search."""
+    """Run hybrid retrieval, transparently degrading to lexical search.
+
+    ``document_ids`` is a restrictive list (intersected with metadata
+    filters). ``document_selection`` is a union of scope-key-bound
+    documents and the explicit selection ids and is applied as a SQL
+    pushdown ``(EXISTS scope_key) OR (Document.id IN selection)``
+    condition so the database never has to materialise the candidate
+    list in Python.
+    """
 
     effective_document_ids = list(document_ids or [])
     if connector_ids and not matches_none:
@@ -355,7 +364,7 @@ async def search_documents(
         source_types=source_types,
         document_ids=effective_document_ids,
         connector_ids=connector_ids,
-        access_key=access_key,
+        document_selection=document_selection,
         matches_none=matches_none,
     )
     if not (query or "").strip():
@@ -538,7 +547,7 @@ async def _search_documents_lexical(
     source_types: Sequence[str] | None = None,
     document_ids: Sequence[int] | None = None,
     connector_ids: Sequence[int] | None = None,
-    access_key: str | None = None,
+    document_selection: DocumentSelection | None = None,
     matches_none: bool = False,
 ) -> SearchResult:
     """Run a search and return a :class:`SearchResult`.
@@ -564,7 +573,7 @@ async def _search_documents_lexical(
         "source_types": list(source_types or []),
         "document_ids": list(document_ids or []),
         "connector_ids": list(connector_ids or []),
-        "access_key": access_key,
+        "document_selection": document_selection,
         "matches_none": matches_none,
     }
 
@@ -881,7 +890,7 @@ async def _search_like(
 
 
 def _apply_filters(stmt, filters: dict):
-    from .access_keys import document_has_access_key
+    from .scope_keys import candidate_condition
 
     conditions = []
     if filters.get("matches_none"):
@@ -914,9 +923,11 @@ def _apply_filters(stmt, filters: dict):
     document_ids = filters.get("document_ids") or []
     if document_ids:
         conditions.append(Document.id.in_(document_ids))
-    access_key = filters.get("access_key")
-    if access_key:
-        conditions.append(document_has_access_key(access_key))
+    selection = filters.get("document_selection")
+    if selection is not None:
+        candidate = candidate_condition(selection)
+        if candidate is not None:
+            conditions.append(candidate)
     if conditions:
         stmt = stmt.where(and_(*conditions))
     return stmt

@@ -31,7 +31,7 @@ KnowledgeScope 或文档存活状态，也不各自维护另一套向量索引�
 | `knowledge:read` | 读取知识范围、文档、片段、证据 | 默认授予 |
 | `knowledge:search` | 执行检索、数据集查询 | 默认授予 |
 | `knowledge:ask` | 调用藏知对话模型生成带引用回答 | 仅确需时授予 |
-| `documents:write` | 上传文档、整体替换文档 Access Key | 仅可信外部系统 |
+| `documents:write` | 上传文档、整体替换文档 Scope Key | 仅可信外部系统 |
 
 ### 1.2 工作空间
 
@@ -46,12 +46,13 @@ X-Cangzhi-Workspace: research
 - 新令牌可绑定一个空间；绑定后不能通过请求头或查询参数切换空间
 - 未绑定旧令牌保持兼容，由 `X-Cangzhi-Workspace` 选择空间
 
-### 1.3 文档 Access Key
+### 1.3 文档 Scope Key
 
-外部系统可用一个不透明 `access_key` 进一步缩小工作空间范围。请求体中的
-`access_key` 或请求头 `X-Cangzhi-Access-Key` 二选一；两者同时提供必须一致。不传表示
-空间全局查询，传入时只返回关联该 Key 的文档。它是受信任调用方的检索范围，不是藏知
-自己的用户认证。详见[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
+PAT 决定可访问的工作空间。Scope Key 是不透明的文档分组标识，不是认证信息。Search、
+Ask 和 MCP 可通过 `document_selection` 同时指定多个 `scope_keys` 与多个
+`document_ids`；两组内部及两组之间均取并集，再与 KnowledgeScope 和元数据筛选取交集。
+不传表示全空间，显式空选择返回 `400 invalid_document_selection`。详见
+[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
 
 ### 1.4 通用信息
 
@@ -71,7 +72,7 @@ X-Cangzhi-Workspace: research
 - `tag_ids`：标签 ID 列表
 - `source_types`：来源类型列表（如 `note`、`web`、`file`）
 - `connector_ids`：WebDAV 连接器 ID 列表
-- `document_ids`：文档 ID 列表
+- `document_selection`：Scope Key 与明确文档 ID 组成的候选并集
 
 **匹配规则**：同一维度内满足任一选项（OR）；不同维度之间同时满足（AND）。
 临时筛选只能继续缩小已有 KnowledgeScope，不能扩大。
@@ -121,18 +122,18 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/v1/knowledge/facets
 ```
 
-### 3.3 文档上传与 Access Key 管理
+### 3.3 文档上传与 Scope Key 管理
 
 - `POST /api/v1/documents`（`documents:write`）：multipart 上传，支持 `title`、
-  `external_id`、`access_keys`，返回 `202`。
+  `external_id`、`scope_keys`，返回 `202`。
 - `GET /api/v1/documents/{id}/processing-status`（`documents:write`）：按上传响应的
   `status_url` 查询解析、AI 整理、切片和向量化进度。
-- `GET /api/v1/documents/{id}/access-keys`（`documents:write`）：读取关联。
-- `PUT /api/v1/documents/{id}/access-keys`（`documents:write`）：整体替换关联。
-- `PUT /api/v1/document-access-keys/batch`（`documents:write`）：按文档 ID 或
+- `GET /api/v1/documents/{id}/scope-keys`（`documents:write`）：读取关联。
+- `PUT /api/v1/documents/{id}/scope-keys`（`documents:write`）：整体替换关联。
+- `PUT /api/v1/document-scope-keys/batch`（`documents:write`）：按文档 ID 或
   `external_id` 批量整体替换。
-- `GET /api/v1/knowledge/documents/{id}/original|preview`（`knowledge:read`）：按同一
-  Access Key 范围下载原文或打开转换预览。
+- `GET /api/v1/knowledge/documents/{id}/original|preview`（`knowledge:read`）：在令牌
+  工作空间内按明确 ID 下载原文或打开转换预览。
 
 上传和管理示例见[外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
 
@@ -154,7 +155,10 @@ curl -H "Authorization: Bearer $TOKEN" \
   "tag_ids": [],
   "source_types": [],
   "connector_ids": [],
-  "document_ids": []
+  "document_selection": {
+    "scope_keys": ["project-a", "project-b"],
+    "document_ids": [12, 13]
+  }
 }
 ```
 
@@ -414,7 +418,6 @@ CLI 是 `apps/cli` 目录下的一个轻量 Python 客户端，通过环境变�
 | `CANGZHI_URL` | API 基地址，默认 `http://localhost:8000` |
 | `CANGZHI_TOKEN` | 个人访问令牌（必填） |
 | `CANGZHI_WORKSPACE` | 工作空间 slug，默认 `default` |
-| `CANGZHI_ACCESS_KEY` | 可选的固定文档检索范围 |
 
 ### 5.2 命令
 
@@ -431,13 +434,13 @@ python -m apps.cli chunk 34                              # 读取片段
 
 通用选项：
 
-- `--url`、`--token`、`--workspace`、`--access-key`、`--timeout`、`--compact`（单行 JSON）
+- `--url`、`--token`、`--workspace`、`--timeout`、`--compact`（单行 JSON）
 
 检索/问答的范围选项：
 
 - `--scope <slug>` 或 `--scope-id <id>`（互斥）
 - `--category-ids`、`--tag-ids`、`--source-types`、`--connector-ids`、
-  `--document-ids`（逗号分隔）
+  `--scope-keys`、`--document-ids`（逗号分隔）
 
 示例：
 
@@ -459,9 +462,9 @@ python -m apps.cli ask "统计各状态缺陷数量" --scope project_x
 - `knowledge:read`：读取知识范围、文档和切片（含证据）。
 - `knowledge:search`：执行知识检索与数据集查询。
 - `knowledge:ask`：调用藏知配置的对话模型生成带引用回答。
-- `documents:write`：上传文档和管理文档 Access Key，不包含删除或任意 SQL。
+- `documents:write`：上传文档和管理文档 Scope Key，不包含删除或任意 SQL。
 
-读取和检索是推荐的默认权限。文档上传和 Access Key 管理已经通过独立
+读取和检索是推荐的默认权限。文档上传和 Scope Key 管理已经通过独立
 `documents:write` 开放；删除、令牌管理和任意 SQL 仍不对外开放。
 
 ### 6.2 错误约定
@@ -520,8 +523,7 @@ python -m apps.cli ask "统计各状态缺陷数量" --scope project_x
 
 1. 登录藏知，创建令牌：`POST /api/access-tokens`（授予 `knowledge:read`、
    `knowledge:search`，必要时加 `knowledge:ask`）。
-2. 设置环境变量 `CANGZHI_URL`、`CANGZHI_TOKEN`、`CANGZHI_WORKSPACE`；需要固定
-   外部业务范围时再设置 `CANGZHI_ACCESS_KEY`。
+2. 设置环境变量 `CANGZHI_URL`、`CANGZHI_TOKEN`、`CANGZHI_WORKSPACE`。
 3. 调 `GET /api/v1/capabilities` 确认能力。
 4. 浏览 `scopes` / `facets` 确定知识边界。
 5. 按场景选择 REST / CLI / MCP 发起检索或问答。

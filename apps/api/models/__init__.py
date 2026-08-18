@@ -4,7 +4,7 @@ from .blobs import Blob
 from .chunks import DocumentChunk
 from .database_source import DatabaseSnapshot, DatabaseSource
 from .datasets import DatasetArtifact, DatasetField, KnowledgeDataset
-from .document_access_keys import DocumentAccessKey
+from .document_scope_keys import DocumentScopeKey
 from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from .knowledge_scopes import KnowledgeScope
@@ -33,14 +33,14 @@ __all__ = [
     "Blob",
     "Category",
     "ChunkEmbedding",
-    "DatasetArtifact",
-    "DatasetField",
     "DatabaseSnapshot",
     "DatabaseSource",
+    "DatasetArtifact",
+    "DatasetField",
     "Document",
-    "DocumentAccessKey",
     "DocumentCategory",
     "DocumentChunk",
+    "DocumentScopeKey",
     "DocumentSourceType",
     "DocumentSummary",
     "DocumentTag",

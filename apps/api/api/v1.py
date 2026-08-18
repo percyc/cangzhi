@@ -16,13 +16,12 @@ from fastapi import (
     Depends,
     File,
     Form,
-    Header,
     HTTPException,
     Query,
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,19 +29,9 @@ from ..ai import build_provider_from_db
 from ..core.config import settings
 from ..core.db import get_db
 from ..models.blobs import Blob
-from ..models.chunks import DocumentChunk
-from ..models.datasets import KnowledgeDataset
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from ..models.processing import ProcessingJob
 from ..security.api_auth import APIIdentity, require_api_identity
-from ..services.access_keys import (
-    document_has_access_key,
-    ensure_document_visible,
-    list_document_access_keys,
-    normalize_access_keys,
-    replace_document_access_keys,
-    resolve_access_key,
-)
 from ..services.ask_history import (
     AskHistoryError,
     get_owned_conversation,
@@ -52,6 +41,7 @@ from ..services.dataset_execution import (
     DatasetExecutionError,
     execute_dataset_query,
     get_dataset_schema,
+    list_visible_datasets,
     preview_dataset,
 )
 from ..services.deep_analysis import DeepAnalysisService
@@ -72,6 +62,12 @@ from ..services.processing_status import (
     compute_processing_status,
 )
 from ..services.qa import AskError, AskRequest, QAService
+from ..services.scope_keys import (
+    DocumentSelection,
+    list_document_scope_keys,
+    normalize_scope_keys,
+    replace_document_scope_keys,
+)
 from ..services.search import DEFAULT_LIMIT, MAX_LIMIT, search_documents
 from ..storage import get_storage
 from ..storage.base import BlobStorage, BlobTooLargeError
@@ -87,28 +83,40 @@ _ask_identity = require_api_identity("knowledge:ask")
 _write_identity = require_api_identity("documents:write")
 
 
-class AccessKeysPayload(BaseModel):
-    access_keys: list[str] = Field(default_factory=list, max_length=100)
+class ScopeKeysPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope_keys: list[str] = Field(default_factory=list, max_length=100)
 
 
-class AccessKeysBatchItem(AccessKeysPayload):
+class ScopeKeysBatchItem(ScopeKeysPayload):
     document_id: int | None = Field(default=None, ge=1)
     external_id: str | None = Field(default=None, max_length=64)
 
 
-class AccessKeysBatchPayload(BaseModel):
-    items: list[AccessKeysBatchItem] = Field(min_length=1, max_length=200)
+class ScopeKeysBatchPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ScopeKeysBatchItem] = Field(min_length=1, max_length=200)
+
+
+class DocumentSelectionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope_keys: list[str] = Field(default_factory=list, max_length=100)
+    document_ids: list[int] = Field(default_factory=list, max_length=200)
 
 
 class ScopeSelector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     scope_id: int | None = Field(default=None, ge=1)
     scope_slug: str | None = Field(default=None, max_length=128)
     category_ids: list[int] = Field(default_factory=list)
     tag_ids: list[int] = Field(default_factory=list)
     source_types: list[str] = Field(default_factory=list)
     connector_ids: list[int] = Field(default_factory=list)
-    document_ids: list[int] = Field(default_factory=list)
-    access_key: str | None = Field(default=None, max_length=128)
+    document_selection: DocumentSelectionPayload | None = None
 
 
 class KnowledgeSearchPayload(ScopeSelector):
@@ -125,7 +133,8 @@ class KnowledgeAskPayload(ScopeSelector):
 
 
 class DatasetQueryPayload(BaseModel):
-    access_key: str | None = Field(default=None, max_length=128)
+    model_config = ConfigDict(extra="forbid")
+
     filters: list[DatasetFilterInput] = Field(default_factory=list, max_length=8)
     columns: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list, max_length=3)
@@ -154,27 +163,47 @@ async def _resolve_scope(db: AsyncSession, payload: ScopeSelector):
             tag_ids=payload.tag_ids,
             source_types=payload.source_types,
             connector_ids=payload.connector_ids,
-            document_ids=payload.document_ids,
         )
     except KnowledgeScopeError as exc:
         raise _scope_error(exc) from None
 
 
-def _parse_form_access_keys(values: list[str] | None) -> list[str] | None:
+def _parse_form_scope_keys(values: list[str] | None) -> list[str] | None:
     if values is None:
         return None
     if len(values) == 1 and values[0].lstrip().startswith("["):
         try:
             decoded = json.loads(values[0])
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="access_keys JSON 格式无效") from exc
+            raise HTTPException(status_code=400, detail="scope_keys JSON 格式无效") from exc
         if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
-            raise HTTPException(status_code=400, detail="access_keys 必须是字符串数组")
+            raise HTTPException(status_code=400, detail="scope_keys 必须是字符串数组")
         values = decoded
     try:
-        return normalize_access_keys(values)
-    except ValueError as exc:
+        return normalize_scope_keys(values)
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+def _selection(value: DocumentSelectionPayload | None) -> DocumentSelection | None:
+    if value is None:
+        return None
+    try:
+        selection = DocumentSelection.coerce(value.scope_keys, value.document_ids)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_document_selection", "message": str(exc)},
+        ) from None
+    if selection is None or selection.is_empty:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_document_selection",
+                "message": "document_selection 至少需要一个 scope_key 或 document_id",
+            },
+        )
+    return selection
 
 
 @router.post("/documents", status_code=202, response_model=dict[str, Any])
@@ -182,7 +211,7 @@ async def upload_document_v1(
     file: Annotated[UploadFile, File()],
     title: Annotated[str, Form()] = "",
     external_id: Annotated[str | None, Form(max_length=64)] = None,
-    access_keys: Annotated[list[str] | None, Form()] = None,
+    scope_keys: Annotated[list[str] | None, Form()] = None,
     identity: APIIdentity = Depends(_write_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
     storage: BlobStorage = Depends(get_storage),  # noqa: B008
@@ -192,7 +221,7 @@ async def upload_document_v1(
     del identity
     filename = normalized_filename(file.filename)
     content_type = validate_file_type(filename, file.content_type)
-    keys = _parse_form_access_keys(access_keys)
+    keys = _parse_form_scope_keys(scope_keys)
     cleaned_external_id = (external_id or "").strip() or None
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
     try:
@@ -219,7 +248,7 @@ async def upload_document_v1(
             raise HTTPException(status_code=409, detail="相同 external_id 的文档已在回收站")
 
         # Blobs are intentionally global and reference-counted across
-        # workspaces; only Documents and their access ranges are isolated.
+        # workspaces; Documents and their scope-key groupings remain isolated.
         existing_blob = await db.scalar(select(Blob).where(Blob.sha256 == stored.sha256))
         if existing_blob is not None:
             storage.delete(stored.storage_key)
@@ -250,13 +279,13 @@ async def upload_document_v1(
             if title.strip():
                 document.title = display_title[:1024]
             if keys is not None:
-                await replace_document_access_keys(db, document, keys)
+                await replace_document_scope_keys(db, document, keys)
             await db.commit()
             return {
                 "document_id": document.id,
                 "version_id": current_version.id,
                 "status": "unchanged",
-                "access_keys": await list_document_access_keys(db, document.id),
+                "scope_keys": await list_document_scope_keys(db, document.id),
             }
         else:
             if title.strip():
@@ -281,7 +310,7 @@ async def upload_document_v1(
         await db.flush()
         document.current_version_id = version.id
         if keys is not None:
-            await replace_document_access_keys(db, document, keys)
+            await replace_document_scope_keys(db, document, keys)
         db.add(
             ProcessingJob(
                 document_id=document.id,
@@ -299,7 +328,7 @@ async def upload_document_v1(
             "version_id": version.id,
             "version_number": version.version_number,
             "status": "queued",
-            "access_keys": await list_document_access_keys(db, document.id),
+            "scope_keys": await list_document_scope_keys(db, document.id),
             "status_url": f"/api/v1/documents/{document.id}/processing-status",
         }
     except Exception:
@@ -325,8 +354,8 @@ async def get_document_processing_status_v1(
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 
-@router.get("/documents/{document_id}/access-keys", response_model=dict[str, Any])
-async def get_document_access_keys_v1(
+@router.get("/documents/{document_id}/scope-keys", response_model=dict[str, Any])
+async def get_document_scope_keys_v1(
     document_id: int,
     _identity: APIIdentity = Depends(_write_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
@@ -334,13 +363,13 @@ async def get_document_access_keys_v1(
     document = await db.scalar(select(Document).where(Document.id == document_id, Document.is_deleted.is_(False)))
     if document is None:
         raise HTTPException(status_code=404, detail="知识文档不存在")
-    return {"document_id": document.id, "external_id": document.external_identity, "access_keys": await list_document_access_keys(db, document.id)}
+    return {"document_id": document.id, "external_id": document.external_identity, "scope_keys": await list_document_scope_keys(db, document.id)}
 
 
-@router.put("/documents/{document_id}/access-keys", response_model=dict[str, Any])
-async def put_document_access_keys_v1(
+@router.put("/documents/{document_id}/scope-keys", response_model=dict[str, Any])
+async def put_document_scope_keys_v1(
     document_id: int,
-    payload: AccessKeysPayload,
+    payload: ScopeKeysPayload,
     _identity: APIIdentity = Depends(_write_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
@@ -348,16 +377,16 @@ async def put_document_access_keys_v1(
     if document is None:
         raise HTTPException(status_code=404, detail="知识文档不存在")
     try:
-        keys = await replace_document_access_keys(db, document, payload.access_keys)
-    except ValueError as exc:
+        keys = await replace_document_scope_keys(db, document, payload.scope_keys)
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     await db.commit()
-    return {"document_id": document.id, "external_id": document.external_identity, "access_keys": keys}
+    return {"document_id": document.id, "external_id": document.external_identity, "scope_keys": keys}
 
 
-@router.put("/document-access-keys/batch", response_model=dict[str, Any])
-async def put_document_access_keys_batch_v1(
-    payload: AccessKeysBatchPayload,
+@router.put("/document-scope-keys/batch", response_model=dict[str, Any])
+async def put_document_scope_keys_batch_v1(
+    payload: ScopeKeysBatchPayload,
     _identity: APIIdentity = Depends(_write_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
@@ -369,8 +398,11 @@ async def put_document_access_keys_batch_v1(
         document = await db.scalar(select(Document).where(condition, Document.is_deleted.is_(False)))
         if document is None:
             raise HTTPException(status_code=404, detail="批量项目中的知识文档不存在")
-        keys = await replace_document_access_keys(db, document, item.access_keys)
-        results.append({"document_id": document.id, "external_id": document.external_identity, "access_keys": keys})
+        try:
+            keys = await replace_document_scope_keys(db, document, item.scope_keys)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        results.append({"document_id": document.id, "external_id": document.external_identity, "scope_keys": keys})
     await db.commit()
     return {"items": results}
 
@@ -406,7 +438,8 @@ async def capabilities(
             "evidence_viewer": True,
             "version_bound_evidence": True,
             "document_upload": True,
-            "document_access_keys": True,
+            "document_scope_keys": True,
+            "document_selection_union": True,
         },
     }
 
@@ -427,39 +460,26 @@ def _dataset_http_error(exc: DatasetExecutionError) -> HTTPException:
 async def list_datasets_v1(
     document_id: int | None = Query(default=None, ge=1),
     limit: int = Query(default=100, ge=1, le=200),
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
+    scope_keys: list[str] | None = Query(default=None),  # noqa: B008
+    document_ids: list[int] | None = Query(default=None),  # noqa: B008
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    statement = (
-        select(KnowledgeDataset)
-        .join(Document, Document.id == KnowledgeDataset.document_id)
-        .where(
-            Document.is_deleted.is_(False),
-            Document.current_version_id == KnowledgeDataset.document_version_id,
+    selection = None
+    if scope_keys is not None or document_ids is not None:
+        selection = _selection(
+            DocumentSelectionPayload(
+                scope_keys=scope_keys or [], document_ids=document_ids or []
+            )
         )
-        .order_by(KnowledgeDataset.id.desc())
-        .limit(limit)
+    datasets = await list_visible_datasets(
+        db,
+        document_id=document_id,
+        limit=limit,
+        document_selection=selection,
     )
-    if document_id is not None:
-        statement = statement.where(KnowledgeDataset.document_id == document_id)
-    if access_key:
-        statement = statement.where(document_has_access_key(resolve_access_key(access_key, None)))
-    datasets = list((await db.scalars(statement)).all())
     return {
-        "items": [
-            {
-                "id": item.id,
-                "document_id": item.document_id,
-                "name": item.name,
-                "sheet_name": item.sheet_name,
-                "region_index": item.region_index,
-                "row_count": item.row_count,
-                "column_count": item.column_count,
-                "status": item.status,
-            }
-            for item in datasets
-        ],
+        "items": datasets,
         "limit": limit,
     }
 
@@ -467,13 +487,9 @@ async def list_datasets_v1(
 @router.get("/knowledge/datasets/{dataset_id}/schema", response_model=dict[str, Any])
 async def get_dataset_schema_v1(
     dataset_id: int,
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
-    if document_id is not None:
-        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         return await get_dataset_schema(db, dataset_id)
     except DatasetExecutionError as exc:
@@ -485,13 +501,9 @@ async def preview_dataset_v1(
     dataset_id: int,
     offset: int = Query(default=0, ge=0, le=1_000_000),
     limit: int = Query(default=50, ge=1, le=200),
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
-    if document_id is not None:
-        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         return await preview_dataset(db, dataset_id, offset=offset, limit=limit)
     except DatasetExecutionError as exc:
@@ -502,18 +514,11 @@ async def preview_dataset_v1(
 async def query_dataset_v1(
     dataset_id: int,
     payload: DatasetQueryPayload,
-    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_search_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    access_key = resolve_access_key(access_key_header, payload.access_key)
-    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
-    if document_id is not None:
-        await ensure_document_visible(db, document_id, access_key)
     try:
-        return await execute_dataset_query(
-            db, dataset_id, payload.model_dump(exclude={"access_key"})
-        )
+        return await execute_dataset_query(db, dataset_id, payload.model_dump())
     except DatasetExecutionError as exc:
         raise _dataset_http_error(exc) from None
 
@@ -528,23 +533,28 @@ async def list_knowledge_scopes(
 
 @router.get("/knowledge/facets", response_model=dict[str, Any])
 async def list_knowledge_facets(
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
+    scope_keys: list[str] | None = Query(default=None),  # noqa: B008
+    document_ids: list[int] | None = Query(default=None),  # noqa: B008
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    return await list_facet_catalog(
-        db, access_key=resolve_access_key(access_key, None)
-    )
+    selection = None
+    if scope_keys is not None or document_ids is not None:
+        selection = _selection(
+            DocumentSelectionPayload(
+                scope_keys=scope_keys or [], document_ids=document_ids or []
+            )
+        )
+    return await list_facet_catalog(db, document_selection=selection)
 
 
 @router.post("/knowledge/search", response_model=dict[str, Any])
 async def knowledge_search(
     payload: KnowledgeSearchPayload,
-    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_search_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    access_key = resolve_access_key(access_key_header, payload.access_key)
+    selection = _selection(payload.document_selection)
     scope = await _resolve_scope(db, payload)
     result = await search_documents(
         db,
@@ -556,7 +566,7 @@ async def knowledge_search(
         source_types=scope.source_types,
         document_ids=scope.document_ids,
         connector_ids=scope.connector_ids,
-        access_key=access_key,
+        document_selection=selection,
         matches_none=scope.matches_none,
     )
     return {
@@ -564,7 +574,9 @@ async def knowledge_search(
         "scope": {
             "id": scope.scope_id,
             "slug": scope.scope_slug,
-            "access_key": access_key,
+            "document_selection": payload.document_selection.model_dump()
+            if payload.document_selection
+            else None,
             **scope.to_filters_dict(),
         },
     }
@@ -573,11 +585,10 @@ async def knowledge_search(
 @router.post("/knowledge/ask", response_model=dict[str, Any])
 async def knowledge_ask(
     payload: KnowledgeAskPayload,
-    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    access_key = resolve_access_key(access_key_header, payload.access_key)
+    selection = _selection(payload.document_selection)
     scope = await _resolve_scope(db, payload)
     if payload.conversation_id is not None:
         try:
@@ -598,7 +609,7 @@ async def knowledge_ask(
                 source_types=scope.source_types,
                 document_ids=scope.document_ids,
                 connector_ids=scope.connector_ids,
-                access_key=access_key,
+                document_selection=selection,
                 matches_none=scope.matches_none,
             ),
         )
@@ -618,7 +629,9 @@ async def knowledge_ask(
         "scope": {
             "id": scope.scope_id,
             "slug": scope.scope_slug,
-            "access_key": access_key,
+            "document_selection": payload.document_selection.model_dump()
+            if payload.document_selection
+            else None,
             **scope.to_filters_dict(),
         },
     }
@@ -643,13 +656,12 @@ async def knowledge_ask(
 @router.post("/knowledge/ask/stream")
 async def knowledge_ask_stream(
     payload: KnowledgeAskPayload,
-    access_key_header: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     identity: APIIdentity = Depends(_ask_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> StreamingResponse:
     """Stream auditable tool progress and finish with the normal answer DTO."""
 
-    access_key = resolve_access_key(access_key_header, payload.access_key)
+    selection = _selection(payload.document_selection)
     scope = await _resolve_scope(db, payload)
     if payload.conversation_id is not None:
         try:
@@ -664,13 +676,15 @@ async def knowledge_ask_stream(
         source_types=scope.source_types,
         document_ids=scope.document_ids,
         connector_ids=scope.connector_ids,
-        access_key=access_key,
+        document_selection=selection,
         matches_none=scope.matches_none,
     )
     scope_payload = {
         "id": scope.scope_id,
         "slug": scope.scope_slug,
-        "access_key": access_key,
+        "document_selection": payload.document_selection.model_dump()
+        if payload.document_selection
+        else None,
         **scope.to_filters_dict(),
     }
     if db.bind is None:
@@ -794,13 +808,9 @@ async def get_knowledge_chunk(
     chunk_id: int,
     version_id: int | None = Query(default=None, ge=1),
     include_context: bool = Query(default=False),
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    document_id = await db.scalar(select(DocumentChunk.document_id).where(DocumentChunk.id == chunk_id))
-    if document_id is not None:
-        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         chunk = await read_current_chunk(db, chunk_id)
     except KnowledgeReadError as exc:
@@ -843,11 +853,9 @@ async def get_knowledge_chunk(
 async def get_knowledge_document(
     document_id: int,
     version_id: int | None = Query(default=None, ge=1),
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         document = await read_current_document(db, document_id)
     except KnowledgeReadError as exc:
@@ -870,11 +878,9 @@ async def _document_blob_response(
     db: AsyncSession,
     storage: BlobStorage,
     document_id: int,
-    access_key: str | None,
     *,
     preview: bool,
 ) -> StreamingResponse:
-    await ensure_document_visible(db, document_id, access_key)
     row = (
         await db.execute(
             select(Document, DocumentVersion)
@@ -910,36 +916,30 @@ async def _document_blob_response(
 @router.get("/knowledge/documents/{document_id}/original")
 async def download_knowledge_document_original(
     document_id: int,
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
     storage: BlobStorage = Depends(get_storage),  # noqa: B008
 ) -> StreamingResponse:
-    return await _document_blob_response(db, storage, document_id, resolve_access_key(access_key, None), preview=False)
+    return await _document_blob_response(db, storage, document_id, preview=False)
 
 
 @router.get("/knowledge/documents/{document_id}/preview")
 async def preview_knowledge_document_original(
     document_id: int,
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
     storage: BlobStorage = Depends(get_storage),  # noqa: B008
 ) -> StreamingResponse:
-    return await _document_blob_response(db, storage, document_id, resolve_access_key(access_key, None), preview=True)
+    return await _document_blob_response(db, storage, document_id, preview=True)
 
 
 @router.get("/knowledge/evidence/by-chunk/{chunk_id}", response_model=dict[str, Any])
 async def get_evidence_by_chunk(
     chunk_id: int,
     document_version_id: int = Query(..., ge=1),
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    document_id = await db.scalar(select(DocumentChunk.document_id).where(DocumentChunk.id == chunk_id))
-    if document_id is not None:
-        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         evidence = await EvidenceService().resolve_chunk(
             db,
@@ -968,13 +968,9 @@ async def get_evidence_by_dataset(
     dataset_id: int,
     document_version_id: int = Query(..., ge=1),
     artifact_version: int | None = Query(default=None, ge=1),
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
-    if document_id is not None:
-        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         evidence = await EvidenceService().resolve_dataset(
             db,
@@ -1011,13 +1007,9 @@ async def preview_evidence_rows(
     payload: EvidenceRowPreviewPayload,
     document_version_id: int = Query(..., ge=1),
     artifact_version: int | None = Query(default=None, ge=1),
-    access_key: str | None = Header(default=None, alias="X-Cangzhi-Access-Key"),
     _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == dataset_id))
-    if document_id is not None:
-        await ensure_document_visible(db, document_id, resolve_access_key(access_key, None))
     try:
         return await EvidenceService().preview_dataset_rows(
             db,

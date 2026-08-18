@@ -93,7 +93,7 @@ PostgreSQL 健康 -> Alembic 迁移完成 -> API 健康 -> Web 与 Worker 启动
 6. 创建第一次系统备份并执行校验。
 
 如需对接外部业务系统，在“设置 → 外部接入”创建绑定目标工作空间的令牌；读取通常选择
-`knowledge:read/search`，上传与文档范围同步另选 `documents:write`。Access Key 不需要
+`knowledge:read/search`，上传与文档范围同步另选 `documents:write`。Scope Key 不需要
 部署配置，关系存储在 PostgreSQL 并随常规备份恢复。
 
 不配置模型也能采集、保存、解析、浏览和全文搜索。对话模型负责自动整理与问答，

@@ -27,6 +27,7 @@ from ..core.config import settings
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document
 from ..models.table_rows import StructuredTableRow
+from .scope_keys import DocumentSelection, candidate_condition
 
 MAX_PREVIEW_ROWS = 200
 MAX_QUERY_RESULT_ROWS = 200
@@ -284,10 +285,12 @@ async def get_visible_dataset(db: AsyncSession, dataset_id: int) -> KnowledgeDat
 
 
 async def list_visible_datasets(
-    db: AsyncSession, *, document_id: int | None = None, limit: int = 100,
-    access_key: str | None = None,
+    db: AsyncSession,
+    *,
+    document_id: int | None = None,
+    limit: int = 100,
+    document_selection: DocumentSelection | None = None,
 ) -> list[dict[str, Any]]:
-    from .access_keys import document_has_access_key
     statement = (
         select(KnowledgeDataset)
         .join(Document, Document.id == KnowledgeDataset.document_id)
@@ -300,8 +303,10 @@ async def list_visible_datasets(
     )
     if document_id is not None:
         statement = statement.where(KnowledgeDataset.document_id == document_id)
-    if access_key:
-        statement = statement.where(document_has_access_key(access_key))
+    if document_selection is not None:
+        condition = candidate_condition(document_selection)
+        if condition is not None:
+            statement = statement.where(condition)
     items = list((await db.scalars(statement)).all())
     return [
         {

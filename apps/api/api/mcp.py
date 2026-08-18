@@ -11,16 +11,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import build_provider_from_db
 from ..core.db import get_db
-from ..models.chunks import DocumentChunk
-from ..models.datasets import KnowledgeDataset
 from ..security.api_auth import APIIdentity, require_api_identity
-from ..services.access_keys import ensure_document_visible
 from ..services.dataset_execution import (
     DatasetExecutionError,
     execute_dataset_query,
@@ -41,6 +37,7 @@ from ..services.knowledge_scopes import (
     list_scope_catalog,
 )
 from ..services.qa import AskError, AskRequest, QAService
+from ..services.scope_keys import DocumentSelection
 from ..services.search import search_documents
 from .schemas import DatasetFilterInput
 
@@ -59,7 +56,30 @@ class MCPRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class DocumentSelectionArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope_keys: list[str] = Field(default_factory=list, max_length=100)
+    document_ids: list[int] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode="after")
+    def require_selector(self):
+        if not self.scope_keys and not self.document_ids:
+            raise ValueError(
+                "document_selection 至少需要一个 scope_key 或 document_id"
+            )
+        return self
+
+    def to_domain(self) -> DocumentSelection:
+        selection = DocumentSelection.coerce(self.scope_keys, self.document_ids)
+        if selection is None or selection.is_empty:
+            raise ValueError("document_selection 不能为空")
+        return selection
+
+
 class SearchArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str = Field(min_length=1, max_length=512)
     limit: int = Field(default=10, ge=1, le=50)
     offset: int = Field(default=0, ge=0, le=10_000)
@@ -69,8 +89,7 @@ class SearchArguments(BaseModel):
     tag_ids: list[int] = Field(default_factory=list)
     source_types: list[str] = Field(default_factory=list)
     connector_ids: list[int] = Field(default_factory=list)
-    document_ids: list[int] = Field(default_factory=list)
-    access_key: str | None = Field(default=None, max_length=128)
+    document_selection: DocumentSelectionArguments | None = None
 
 
 class AskArguments(BaseModel):
@@ -83,31 +102,41 @@ class AskArguments(BaseModel):
     tag_ids: list[int] = Field(default_factory=list)
     source_types: list[str] = Field(default_factory=list)
     connector_ids: list[int] = Field(default_factory=list)
-    document_ids: list[int] = Field(default_factory=list)
-    access_key: str | None = Field(default=None, max_length=128)
+    document_selection: DocumentSelectionArguments | None = None
+
+
+class FacetArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_selection: DocumentSelectionArguments | None = None
 
 
 class DocumentReadArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     document_id: int = Field(ge=1)
     offset: int = Field(default=0, ge=0)
     max_chars: int = Field(default=12_000, ge=1, le=50_000)
-    access_key: str | None = Field(default=None, max_length=128)
 
 
 class ChunkReadArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     chunk_id: int = Field(ge=1)
-    access_key: str | None = Field(default=None, max_length=128)
 
 
 class DatasetListArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     document_id: int | None = Field(default=None, ge=1)
     limit: int = Field(default=100, ge=1, le=200)
-    access_key: str | None = Field(default=None, max_length=128)
+    document_selection: DocumentSelectionArguments | None = None
 
 
 class DatasetIdArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     dataset_id: int = Field(ge=1)
-    access_key: str | None = Field(default=None, max_length=128)
 
 
 class DatasetPreviewArguments(DatasetIdArguments):
@@ -132,7 +161,6 @@ class EvidenceChunkArguments(BaseModel):
 
     chunk_id: int = Field(ge=1)
     document_version_id: int = Field(ge=1)
-    access_key: str | None = Field(default=None, max_length=128)
 
 
 class EvidenceDatasetArguments(DatasetIdArguments):
@@ -173,13 +201,7 @@ TOOLS = [
         "name": "knowledge_list_facets",
         "title": "列出知识筛选项",
         "description": "列出可用于收窄检索的分类、标签、来源类型和 WebDAV 连接器。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "access_key": {"type": "string", "minLength": 1, "maxLength": 128}
-            },
-            "additionalProperties": False,
-        },
+        "inputSchema": FacetArguments.model_json_schema(),
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -194,7 +216,7 @@ TOOLS = [
             "从藏知检索相关证据片段；适合由外部模型自行组织回答。hits[].context "
             "是包含相邻片段的完整证据窗口，snippet 仅用于命中预览；"
             "retrieval_channels 同时包含 lexical 和 vector 时表示两个检索通道共同支持。"
-            "access_key 仅是受信任调用方提供的检索范围，不是独立身份认证。"
+            "document_selection 将多个 scope key 与明确文档 ID 合并为一次候选集合。"
         ),
         "inputSchema": SearchArguments.model_json_schema(),
         "annotations": {
@@ -551,7 +573,11 @@ async def _call_tool(
                 tag_ids=args.tag_ids,
                 source_types=args.source_types,
                 connector_ids=args.connector_ids,
-                document_ids=args.document_ids,
+            )
+            selection = (
+                args.document_selection.to_domain()
+                if args.document_selection is not None
+                else None
             )
             result = await search_documents(
                 db,
@@ -563,10 +589,10 @@ async def _call_tool(
                 source_types=scope.source_types,
                 connector_ids=scope.connector_ids,
                 document_ids=scope.document_ids,
-                access_key=args.access_key,
+                document_selection=selection,
                 matches_none=scope.matches_none,
             )
-        except ValidationError as exc:
+        except (TypeError, ValueError, ValidationError) as exc:
             return _tool_error("invalid_arguments", str(exc))
         except KnowledgeScopeError as exc:
             return _tool_error(exc.code, str(exc))
@@ -576,7 +602,9 @@ async def _call_tool(
                 "scope": {
                     "id": scope.scope_id,
                     "slug": scope.scope_slug,
-                    "access_key": args.access_key,
+                    "document_selection": args.document_selection.model_dump()
+                    if args.document_selection
+                    else None,
                     **scope.to_filters_dict(),
                 },
             }
@@ -595,7 +623,11 @@ async def _call_tool(
                 tag_ids=args.tag_ids,
                 source_types=args.source_types,
                 connector_ids=args.connector_ids,
-                document_ids=args.document_ids,
+            )
+            selection = (
+                args.document_selection.to_domain()
+                if args.document_selection is not None
+                else None
             )
             provider = await build_provider_from_db(db)
             result = await QAService(provider).ask(
@@ -607,12 +639,12 @@ async def _call_tool(
                     source_types=scope.source_types,
                     connector_ids=scope.connector_ids,
                     document_ids=scope.document_ids,
-                    access_key=args.access_key,
+                    document_selection=selection,
                     matches_none=scope.matches_none,
                 ),
                 on_progress=on_progress,
             )
-        except ValidationError as exc:
+        except (TypeError, ValueError, ValidationError) as exc:
             return _tool_error("invalid_arguments", str(exc))
         except KnowledgeScopeError as exc:
             return _tool_error(exc.code, str(exc))
@@ -624,7 +656,9 @@ async def _call_tool(
                 "scope": {
                     "id": scope.scope_id,
                     "slug": scope.scope_slug,
-                    "access_key": args.access_key,
+                    "document_selection": args.document_selection.model_dump()
+                    if args.document_selection
+                    else None,
                     **scope.to_filters_dict(),
                 },
             }
@@ -636,10 +670,7 @@ async def _call_tool(
             return forbidden
         try:
             args = DatasetQueryArguments.model_validate(arguments)
-            document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == args.dataset_id))
-            if document_id is not None:
-                await ensure_document_visible(db, document_id, args.access_key)
-            payload = args.model_dump(exclude={"dataset_id", "access_key"})
+            payload = args.model_dump(exclude={"dataset_id"})
             return _tool_result(
                 await execute_dataset_query(db, args.dataset_id, payload)
             )
@@ -660,9 +691,6 @@ async def _call_tool(
             service = EvidenceService()
             if name == "knowledge_get_evidence_by_chunk":
                 args = EvidenceChunkArguments.model_validate(arguments)
-                document_id = await db.scalar(select(DocumentChunk.document_id).where(DocumentChunk.id == args.chunk_id))
-                if document_id is not None:
-                    await ensure_document_visible(db, document_id, args.access_key)
                 return _tool_result(
                     (
                         await service.resolve_chunk(
@@ -674,9 +702,6 @@ async def _call_tool(
                 )
             if name == "knowledge_get_evidence_by_dataset":
                 args = EvidenceDatasetArguments.model_validate(arguments)
-                document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == args.dataset_id))
-                if document_id is not None:
-                    await ensure_document_visible(db, document_id, args.access_key)
                 return _tool_result(
                     (
                         await service.resolve_dataset(
@@ -688,9 +713,6 @@ async def _call_tool(
                     ).to_dict()
                 )
             args = EvidenceRowsArguments.model_validate(arguments)
-            document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == args.dataset_id))
-            if document_id is not None:
-                await ensure_document_visible(db, document_id, args.access_key)
             return _tool_result(
                 await service.preview_dataset_rows(
                     db,
@@ -714,40 +736,43 @@ async def _call_tool(
         if name == "knowledge_list_scopes":
             return _tool_result({"items": await list_scope_catalog(db)})
         if name == "knowledge_list_facets":
-            access_key = str(arguments.get("access_key") or "").strip() or None
-            return _tool_result(await list_facet_catalog(db, access_key=access_key))
+            args = FacetArguments.model_validate(arguments)
+            selection = (
+                args.document_selection.to_domain()
+                if args.document_selection is not None
+                else None
+            )
+            return _tool_result(
+                await list_facet_catalog(db, document_selection=selection)
+            )
         if name == "knowledge_get_document":
             args = DocumentReadArguments.model_validate(arguments)
-            await ensure_document_visible(db, args.document_id, args.access_key)
             document = await read_current_document(db, args.document_id)
             return _tool_result(_window_document(document, args))
         if name == "knowledge_get_chunk":
             args = ChunkReadArguments.model_validate(arguments)
-            document_id = await db.scalar(select(DocumentChunk.document_id).where(DocumentChunk.id == args.chunk_id))
-            if document_id is not None:
-                await ensure_document_visible(db, document_id, args.access_key)
             return _tool_result(await read_current_chunk(db, args.chunk_id))
         if name == "knowledge_list_datasets":
             args = DatasetListArguments.model_validate(arguments)
             return _tool_result(
                 {
                     "items": await list_visible_datasets(
-                        db, document_id=args.document_id, limit=args.limit
-                        , access_key=args.access_key
+                        db,
+                        document_id=args.document_id,
+                        limit=args.limit,
+                        document_selection=(
+                            args.document_selection.to_domain()
+                            if args.document_selection is not None
+                            else None
+                        ),
                     )
                 }
             )
         if name == "knowledge_get_dataset_schema":
             args = DatasetIdArguments.model_validate(arguments)
-            document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == args.dataset_id))
-            if document_id is not None:
-                await ensure_document_visible(db, document_id, args.access_key)
             return _tool_result(await get_dataset_schema(db, args.dataset_id))
         if name == "knowledge_preview_dataset_rows":
             args = DatasetPreviewArguments.model_validate(arguments)
-            document_id = await db.scalar(select(KnowledgeDataset.document_id).where(KnowledgeDataset.id == args.dataset_id))
-            if document_id is not None:
-                await ensure_document_visible(db, document_id, args.access_key)
             return _tool_result(
                 await preview_dataset(
                     db, args.dataset_id, offset=args.offset, limit=args.limit
@@ -813,12 +838,6 @@ async def mcp_post(
         arguments = payload.params.get("arguments") or {}
         if not isinstance(name, str) or not isinstance(arguments, dict):
             return _error(payload.id, -32602, "Invalid params")
-        header_access_key = (request.headers.get("X-Cangzhi-Access-Key") or "").strip()
-        argument_access_key = arguments.get("access_key")
-        if header_access_key and argument_access_key and header_access_key != str(argument_access_key).strip():
-            return _error(payload.id, -32602, "请求头与工具参数中的 access_key 不一致")
-        if header_access_key and name != "knowledge_list_scopes":
-            arguments = {**arguments, "access_key": header_access_key}
         meta = payload.params.get("_meta") or {}
         progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
         accepts_sse = "text/event-stream" in (
