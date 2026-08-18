@@ -11,7 +11,7 @@ from .base import BaseModel
 
 
 class ExplorationGrant(BaseModel):
-    """Opaque MCP credential derived from a workspace PAT.
+    """Opaque knowledge credential derived from a workspace PAT.
 
     Only a SHA-256 token hash is persisted. The document selector is immutable;
     current scope-key bindings are evaluated for every MCP request so removing

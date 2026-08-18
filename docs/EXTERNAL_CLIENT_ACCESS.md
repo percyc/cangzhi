@@ -139,8 +139,10 @@ curl -X POST 'http://localhost:8000/api/v1/exploration-grants' \
 ```
 
 响应中的 `cz_eg_...` 明文只返回一次。第三方后端保管 PAT，仅把短期凭证作为
-`Authorization: Bearer cz_eg_...` 交给 MCP 客户端，连接地址仍为 `/api/mcp`，不需要
-在工具参数里重复传边界。探索凭证不能调用普通 REST v1 端点，最长有效 24 小时；撤销：
+`Authorization: Bearer cz_eg_...` 交给 Skill 或 MCP 客户端。Skill 可调用
+`/api/v1/capabilities` 以及 `/api/v1/knowledge/**` 的读取、搜索、问答和数据集接口；MCP
+连接地址仍为 `/api/mcp`。两种入口都不需要在请求参数里重复传固定边界，并且按调用传入
+的 `document_selection` 只能进一步收窄。探索凭证最长有效 24 小时；撤销：
 
 ```http
 POST /api/v1/exploration-grants/{grant_id}/revoke
@@ -149,6 +151,8 @@ Authorization: Bearer cz_pat_xxx
 
 藏知数据库只保存凭证哈希，不保存可再次展示的明文；响应和日志只呈现安全前缀及范围
 数量，不呈现 Scope Key 值。创建它的 PAT 被撤销或删除后，派生凭证也立即失效。
+探索凭证不能上传文档、修改 Scope Key、创建/撤销凭证或访问历史对话；携带
+`conversation_id` 的问答请求会返回 `403 conversation_history_not_allowed`。
 
 CLI 可使用：
 

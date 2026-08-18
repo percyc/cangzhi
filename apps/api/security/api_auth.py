@@ -26,7 +26,7 @@ _bearer_scheme = HTTPBearer(
     auto_error=False,
     scheme_name="CangzhiBearer",
     description=(
-        "输入普通 PAT（cz_pat_...）；/api/mcp 也接受短期探索凭证（cz_eg_...）。"
+        "输入普通 PAT（cz_pat_...）；只读知识 API 和 MCP 也接受短期探索凭证（cz_eg_...）。"
     ),
 )
 PAT_SCOPES = frozenset(
@@ -218,7 +218,7 @@ def require_api_identity(
                 status_code=403,
                 detail={
                     "code": "credential_not_allowed",
-                    "message": "探索凭证仅可用于 MCP",
+                    "message": "探索凭证仅可用于只读知识 API 和 MCP",
                 },
             )
         missing = [

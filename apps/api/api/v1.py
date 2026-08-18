@@ -73,6 +73,7 @@ from ..services.processing_status import (
 from ..services.qa import AskError, AskRequest, QAService
 from ..services.scope_keys import (
     DocumentSelection,
+    candidate_condition,
     list_document_scope_keys,
     normalize_scope_keys,
     replace_document_scope_keys,
@@ -86,9 +87,9 @@ from .schemas import DatasetFilterInput
 router = APIRouter(prefix="/v1", tags=["knowledge-v1"])
 logger = logging.getLogger(__name__)
 
-_read_identity = require_api_identity("knowledge:read")
-_search_identity = require_api_identity("knowledge:search")
-_ask_identity = require_api_identity("knowledge:ask")
+_read_identity = require_api_identity("knowledge:read", allow_exploration=True)
+_search_identity = require_api_identity("knowledge:search", allow_exploration=True)
+_ask_identity = require_api_identity("knowledge:ask", allow_exploration=True)
 _write_identity = require_api_identity("documents:write")
 MAX_ACTIVE_EXPLORATION_GRANTS = 500
 
@@ -223,13 +224,26 @@ def _selection(value: DocumentSelectionPayload | None) -> DocumentSelection | No
     return selection
 
 
+def _reject_exploration_history(
+    identity: APIIdentity, conversation_id: int | None
+) -> None:
+    if identity.auth_method == "exploration" and conversation_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "conversation_history_not_allowed",
+                "message": "短期知识探索凭证不允许读取或写入历史对话",
+            },
+        )
+
+
 @router.post("/exploration-grants", status_code=201, response_model=dict[str, Any])
 async def create_exploration_grant(
     payload: ExplorationGrantCreatePayload,
     identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
-    """Mint a short-lived MCP-only credential with an immutable boundary."""
+    """Mint a short-lived knowledge credential with an immutable boundary."""
 
     if identity.auth_method != "pat" or identity.pat_id is None:
         raise HTTPException(
@@ -287,8 +301,9 @@ async def create_exploration_grant(
     return {
         "token": plaintext,
         "grant": grant.to_audit_dict(),
+        "knowledge_api_path": "/api/v1/knowledge",
         "mcp_path": "/api/mcp",
-        "notice": "探索凭证明文只显示这一次，请仅交给 MCP 客户端。",
+        "notice": "探索凭证明文只显示这一次，可交给 Skill 或 MCP 客户端。",
     }
 
 
@@ -532,7 +547,11 @@ async def capabilities(
     return {
         "api_version": "v1",
         "service": "cangzhi",
-        "authentication": ["bearer_pat", "session_cookie"],
+        "authentication": [
+            "bearer_pat",
+            "bearer_exploration_grant",
+            "session_cookie",
+        ],
         "scopes": [
             "knowledge:read",
             "knowledge:search",
@@ -559,6 +578,7 @@ async def capabilities(
             "document_scope_keys": True,
             "document_selection_union": True,
             "mcp_exploration_grants": True,
+            "rest_exploration_grants": True,
         },
     }
 
@@ -581,7 +601,7 @@ async def list_datasets_v1(
     limit: int = Query(default=100, ge=1, le=200),
     scope_keys: list[str] | None = Query(default=None),  # noqa: B008
     document_ids: list[int] | None = Query(default=None),  # noqa: B008
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     selection = None
@@ -596,6 +616,7 @@ async def list_datasets_v1(
         document_id=document_id,
         limit=limit,
         document_selection=selection,
+        document_boundary=identity.exploration_boundary,
     )
     return {
         "items": datasets,
@@ -606,11 +627,13 @@ async def list_datasets_v1(
 @router.get("/knowledge/datasets/{dataset_id}/schema", response_model=dict[str, Any])
 async def get_dataset_schema_v1(
     dataset_id: int,
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
-        return await get_dataset_schema(db, dataset_id)
+        return await get_dataset_schema(
+            db, dataset_id, document_boundary=identity.exploration_boundary
+        )
     except DatasetExecutionError as exc:
         raise _dataset_http_error(exc) from None
 
@@ -620,11 +643,17 @@ async def preview_dataset_v1(
     dataset_id: int,
     offset: int = Query(default=0, ge=0, le=1_000_000),
     limit: int = Query(default=50, ge=1, le=200),
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
-        return await preview_dataset(db, dataset_id, offset=offset, limit=limit)
+        return await preview_dataset(
+            db,
+            dataset_id,
+            offset=offset,
+            limit=limit,
+            document_boundary=identity.exploration_boundary,
+        )
     except DatasetExecutionError as exc:
         raise _dataset_http_error(exc) from None
 
@@ -633,11 +662,16 @@ async def preview_dataset_v1(
 async def query_dataset_v1(
     dataset_id: int,
     payload: DatasetQueryPayload,
-    _identity: APIIdentity = Depends(_search_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_search_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
-        return await execute_dataset_query(db, dataset_id, payload.model_dump())
+        return await execute_dataset_query(
+            db,
+            dataset_id,
+            payload.model_dump(),
+            document_boundary=identity.exploration_boundary,
+        )
     except DatasetExecutionError as exc:
         raise _dataset_http_error(exc) from None
 
@@ -654,7 +688,7 @@ async def list_knowledge_scopes(
 async def list_knowledge_facets(
     scope_keys: list[str] | None = Query(default=None),  # noqa: B008
     document_ids: list[int] | None = Query(default=None),  # noqa: B008
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     selection = None
@@ -664,13 +698,17 @@ async def list_knowledge_facets(
                 scope_keys=scope_keys or [], document_ids=document_ids or []
             )
         )
-    return await list_facet_catalog(db, document_selection=selection)
+    return await list_facet_catalog(
+        db,
+        document_selection=selection,
+        document_boundary=identity.exploration_boundary,
+    )
 
 
 @router.post("/knowledge/search", response_model=dict[str, Any])
 async def knowledge_search(
     payload: KnowledgeSearchPayload,
-    _identity: APIIdentity = Depends(_search_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_search_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     selection = _selection(payload.document_selection)
@@ -686,6 +724,7 @@ async def knowledge_search(
         document_ids=scope.document_ids,
         connector_ids=scope.connector_ids,
         document_selection=selection,
+        document_boundary=identity.exploration_boundary,
         matches_none=scope.matches_none,
     )
     return {
@@ -708,6 +747,7 @@ async def knowledge_ask(
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     selection = _selection(payload.document_selection)
+    _reject_exploration_history(identity, payload.conversation_id)
     scope = await _resolve_scope(db, payload)
     if payload.conversation_id is not None:
         try:
@@ -729,6 +769,7 @@ async def knowledge_ask(
                 document_ids=scope.document_ids,
                 connector_ids=scope.connector_ids,
                 document_selection=selection,
+                document_boundary=identity.exploration_boundary,
                 matches_none=scope.matches_none,
             ),
         )
@@ -781,6 +822,7 @@ async def knowledge_ask_stream(
     """Stream auditable tool progress and finish with the normal answer DTO."""
 
     selection = _selection(payload.document_selection)
+    _reject_exploration_history(identity, payload.conversation_id)
     scope = await _resolve_scope(db, payload)
     if payload.conversation_id is not None:
         try:
@@ -796,6 +838,7 @@ async def knowledge_ask_stream(
         document_ids=scope.document_ids,
         connector_ids=scope.connector_ids,
         document_selection=selection,
+        document_boundary=identity.exploration_boundary,
         matches_none=scope.matches_none,
     )
     scope_payload = {
@@ -927,11 +970,13 @@ async def get_knowledge_chunk(
     chunk_id: int,
     version_id: int | None = Query(default=None, ge=1),
     include_context: bool = Query(default=False),
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
-        chunk = await read_current_chunk(db, chunk_id)
+        chunk = await read_current_chunk(
+            db, chunk_id, document_boundary=identity.exploration_boundary
+        )
     except KnowledgeReadError as exc:
         raise HTTPException(
             status_code=404,
@@ -952,6 +997,7 @@ async def get_knowledge_chunk(
             db,
             chunk_id=chunk_id,
             document_version_id=chunk["document_version_id"],
+            document_boundary=identity.exploration_boundary,
         )
     except EvidenceError as exc:
         raise HTTPException(
@@ -972,11 +1018,13 @@ async def get_knowledge_chunk(
 async def get_knowledge_document(
     document_id: int,
     version_id: int | None = Query(default=None, ge=1),
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
-        document = await read_current_document(db, document_id)
+        document = await read_current_document(
+            db, document_id, document_boundary=identity.exploration_boundary
+        )
     except KnowledgeReadError as exc:
         raise HTTPException(
             status_code=404,
@@ -999,14 +1047,17 @@ async def _document_blob_response(
     document_id: int,
     *,
     preview: bool,
+    document_boundary: DocumentSelection | None = None,
 ) -> StreamingResponse:
-    row = (
-        await db.execute(
-            select(Document, DocumentVersion)
+    statement = (
+        select(Document, DocumentVersion)
             .join(DocumentVersion, DocumentVersion.id == Document.current_version_id)
             .where(Document.id == document_id, Document.is_deleted.is_(False))
-        )
-    ).one_or_none()
+    )
+    boundary_condition = candidate_condition(document_boundary)
+    if boundary_condition is not None:
+        statement = statement.where(boundary_condition)
+    row = (await db.execute(statement)).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="知识文档不存在")
     document, version = row
@@ -1035,28 +1086,40 @@ async def _document_blob_response(
 @router.get("/knowledge/documents/{document_id}/original")
 async def download_knowledge_document_original(
     document_id: int,
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
     storage: BlobStorage = Depends(get_storage),  # noqa: B008
 ) -> StreamingResponse:
-    return await _document_blob_response(db, storage, document_id, preview=False)
+    return await _document_blob_response(
+        db,
+        storage,
+        document_id,
+        preview=False,
+        document_boundary=identity.exploration_boundary,
+    )
 
 
 @router.get("/knowledge/documents/{document_id}/preview")
 async def preview_knowledge_document_original(
     document_id: int,
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
     storage: BlobStorage = Depends(get_storage),  # noqa: B008
 ) -> StreamingResponse:
-    return await _document_blob_response(db, storage, document_id, preview=True)
+    return await _document_blob_response(
+        db,
+        storage,
+        document_id,
+        preview=True,
+        document_boundary=identity.exploration_boundary,
+    )
 
 
 @router.get("/knowledge/evidence/by-chunk/{chunk_id}", response_model=dict[str, Any])
 async def get_evidence_by_chunk(
     chunk_id: int,
     document_version_id: int = Query(..., ge=1),
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
@@ -1064,6 +1127,7 @@ async def get_evidence_by_chunk(
             db,
             chunk_id=chunk_id,
             document_version_id=document_version_id,
+            document_boundary=identity.exploration_boundary,
         )
     except EvidenceError as exc:
         raise HTTPException(
@@ -1087,7 +1151,7 @@ async def get_evidence_by_dataset(
     dataset_id: int,
     document_version_id: int = Query(..., ge=1),
     artifact_version: int | None = Query(default=None, ge=1),
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
@@ -1096,6 +1160,7 @@ async def get_evidence_by_dataset(
             dataset_id=dataset_id,
             document_version_id=document_version_id,
             artifact_version=artifact_version,
+            document_boundary=identity.exploration_boundary,
         )
     except EvidenceError as exc:
         raise HTTPException(
@@ -1126,7 +1191,7 @@ async def preview_evidence_rows(
     payload: EvidenceRowPreviewPayload,
     document_version_id: int = Query(..., ge=1),
     artifact_version: int | None = Query(default=None, ge=1),
-    _identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
 ) -> dict[str, Any]:
     try:
@@ -1138,6 +1203,7 @@ async def preview_evidence_rows(
             source_rows=payload.source_rows,
             columns=payload.columns,
             limit=payload.limit,
+            document_boundary=identity.exploration_boundary,
         )
     except EvidenceError as exc:
         raise HTTPException(

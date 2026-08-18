@@ -371,7 +371,7 @@ def test_bound_token_cannot_switch_workspace(client):
     assert response.json()["detail"]["code"] == "workspace_token_mismatch"
 
 
-def test_exploration_grant_is_mcp_only_and_cannot_escape_boundary(client):
+def test_exploration_grant_supports_rest_and_mcp_without_escaping_boundary(client):
     test_client, _ = client
     _enable_real_login()
     _setup_owner(test_client)
@@ -468,10 +468,60 @@ def test_exploration_grant_is_mcp_only_and_cannot_escape_boundary(client):
 
     asyncio.run(assert_stored_as_hash())
     grant_headers = {"Authorization": f"Bearer {grant_token}"}
-    # Exploration credentials are intentionally MCP-only.
-    denied = test_client.get("/api/v1/capabilities", headers=grant_headers)
-    assert denied.status_code == 403
-    assert denied.json()["detail"]["code"] == "credential_not_allowed"
+    capabilities = test_client.get("/api/v1/capabilities", headers=grant_headers)
+    assert capabilities.status_code == 200
+    assert capabilities.json()["features"]["rest_exploration_grants"] is True
+
+    rest_allowed = test_client.get(
+        f"/api/v1/knowledge/documents/{document_ids[0]}", headers=grant_headers
+    )
+    assert rest_allowed.status_code == 200
+    rest_escaped = test_client.get(
+        f"/api/v1/knowledge/documents/{document_ids[1]}", headers=grant_headers
+    )
+    assert rest_escaped.status_code == 404
+    rest_search = test_client.post(
+        "/api/v1/knowledge/search",
+        headers=grant_headers,
+        json={"query": "共同检索词"},
+    )
+    assert rest_search.status_code == 200
+    assert {hit["document_id"] for hit in rest_search.json()["hits"]} <= {
+        document_ids[0]
+    }
+    rest_narrowed = test_client.post(
+        "/api/v1/knowledge/search",
+        headers=grant_headers,
+        json={
+            "query": "共同检索词",
+            "document_selection": {"document_ids": [document_ids[1]]},
+        },
+    )
+    assert rest_narrowed.status_code == 200
+    assert rest_narrowed.json()["hits"] == []
+    history_denied = test_client.post(
+        "/api/v1/knowledge/ask",
+        headers=grant_headers,
+        json={"question": "共同检索词", "conversation_id": 1},
+    )
+    assert history_denied.status_code == 403
+    assert history_denied.json()["detail"]["code"] == (
+        "conversation_history_not_allowed"
+    )
+    write_denied = test_client.put(
+        f"/api/v1/documents/{document_ids[0]}/scope-keys",
+        headers=grant_headers,
+        json={"scope_keys": ["forbidden"]},
+    )
+    assert write_denied.status_code == 403
+    assert write_denied.json()["detail"]["code"] == "credential_not_allowed"
+    mint_denied = test_client.post(
+        "/api/v1/exploration-grants",
+        headers=grant_headers,
+        json={"document_selection": {"document_ids": [document_ids[0]]}},
+    )
+    assert mint_denied.status_code == 403
+    assert mint_denied.json()["detail"]["code"] == "pat_required"
 
     def call_tool(name, arguments, headers):
         return test_client.post(

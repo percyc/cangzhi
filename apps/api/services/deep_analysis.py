@@ -65,6 +65,7 @@ from .qa import (
     QAService,
     _model_name,
 )
+from .scope_keys import DocumentSelection
 from .search import (
     SearchHit,
     search_documents,
@@ -407,6 +408,7 @@ class DeepAnalysisService:
                 connector_ids=request.connector_ids,
                 document_selection=request.document_selection,
                 matches_none=request.matches_none,
+                **_boundary_kwargs(request),
             )
             retrieval_statuses.append(retrieval)
             for item in fallback:
@@ -715,6 +717,7 @@ class DeepAnalysisService:
                 document_selection=request.document_selection,
                 matches_none=request.matches_none,
                 limit=MAX_SEARCH_HITS_IN_OBSERVATION,
+                **_boundary_kwargs(request),
             )
             candidates = list(search_result.hits)
             if (
@@ -734,6 +737,7 @@ class DeepAnalysisService:
                     document_selection=request.document_selection,
                     matches_none=request.matches_none,
                     limit=MAX_SEARCH_HITS_IN_OBSERVATION,
+                    **_boundary_kwargs(request),
                 )
                 seen_documents = {item.document_id for item in candidates}
                 for item in planner_result.hits:
@@ -797,7 +801,12 @@ class DeepAnalysisService:
             items: list[dict[str, Any]] = []
             for document_id in sorted(document_ids)[:20]:
                 items.extend(
-                    await list_visible_datasets(db, document_id=document_id, limit=20)
+                    await list_visible_datasets(
+                        db,
+                        document_id=document_id,
+                        limit=20,
+                        **_boundary_kwargs(request),
+                    )
                 )
             items = items[:50]
             allowed_dataset_ids.update(int(item["id"]) for item in items)
@@ -819,7 +828,9 @@ class DeepAnalysisService:
         if decision.action == "get_dataset_schema":
             dataset_id = _required_id(decision.dataset_id, "dataset_id")
             _require_allowed_dataset(dataset_id, allowed_dataset_ids)
-            schema = await get_dataset_schema(db, dataset_id)
+            schema = await get_dataset_schema(
+                db, dataset_id, **_boundary_kwargs(request)
+            )
             return (
                 {"tool": "get_dataset_schema", "status": "completed", "output": schema},
                 AnalysisStep(
@@ -836,7 +847,12 @@ class DeepAnalysisService:
             _require_allowed_dataset(dataset_id, allowed_dataset_ids)
             query_plan = dict(decision.query_plan or {})
             query_plan["limit"] = max(1, min(int(query_plan.get("limit") or 50), 50))
-            result = await execute_dataset_query(db, dataset_id, query_plan)
+            result = await execute_dataset_query(
+                db,
+                dataset_id,
+                query_plan,
+                **_boundary_kwargs(request),
+            )
             result_rows = list(result.get("rows") or [])
             context_result = {
                 **result,
@@ -848,7 +864,11 @@ class DeepAnalysisService:
                 or len(result_rows) > MAX_DATASET_ROWS_IN_CONTEXT,
             }
             evidence = await _dataset_result_to_evidence(
-                db, dataset_id, query_plan, result
+                db,
+                dataset_id,
+                query_plan,
+                result,
+                **_boundary_kwargs(request),
             )
             return (
                 {
@@ -870,7 +890,9 @@ class DeepAnalysisService:
             chunk_id = _required_id(decision.chunk_id, "chunk_id")
             if chunk_id not in allowed_chunk_ids:
                 raise ValueError("片段尚未通过当前范围的搜索发现")
-            payload = await read_current_chunk(db, chunk_id)
+            payload = await read_current_chunk(
+                db, chunk_id, **_boundary_kwargs(request)
+            )
             content = str(payload.get("content") or "")[:4_000]
             source = await _chunk_to_evidence(db, chunk_id, content)
             if source is None:
@@ -920,6 +942,7 @@ async def _resolve_dataset_document_ids(
                 "document_ids": document_ids,
                 "document_selection": request.document_selection,
                 "matches_none": False,
+                **_boundary_kwargs(request),
             },
             limit=50,
         )
@@ -931,13 +954,17 @@ async def _dataset_result_to_evidence(
     dataset_id: int,
     query_plan: dict[str, Any],
     result: dict[str, Any],
+    *,
+    document_boundary: DocumentSelection | None = None,
 ) -> Evidence | None:
     rows = list(result.get("rows") or [])
     if int(result.get("matched_row_count") or 0) <= 0 or not rows:
         # Zero rows are valuable feedback for the next Agent decision, but
         # they do not substantiate a final answer or citation.
         return None
-    dataset = await get_visible_dataset(db, dataset_id)
+    dataset = await get_visible_dataset(
+        db, dataset_id, document_boundary=document_boundary
+    )
     document = await db.get(Document, dataset.document_id)
     chunks = list(
         (
@@ -1119,6 +1146,14 @@ async def _emit_progress(
 ) -> None:
     if callback is not None:
         await callback(event)
+
+
+def _boundary_kwargs(request: AskRequest) -> dict[str, DocumentSelection]:
+    """Keep ordinary AskRequest calls source-compatible with test adapters."""
+
+    if request.document_boundary is None:
+        return {}
+    return {"document_boundary": request.document_boundary}
 
 
 async def _chunk_to_evidence(

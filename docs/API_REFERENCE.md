@@ -70,16 +70,17 @@ Ask 和 MCP 可通过 `document_selection` 同时指定多个 `scope_keys` 与�
   `ttl_seconds`（60–86400，默认 3600），返回仅显示一次的 `cz_eg_...`。
 - `POST /api/v1/exploration-grants/{grant_id}/revoke`：必须使用创建它的 PAT。
 
-`cz_eg_...` 只能作为 `/api/mcp` 的 Bearer 凭证，不能调用其他 REST v1 接口。它固定
-工作空间与文档边界；每个 MCP 工具的筛选只能和该边界取交集，按 ID 直接读取也不能
-越界。服务端只保存令牌哈希，创建 PAT 失效时派生凭证同时失效。完整流程见
+`cz_eg_...` 可作为 `/api/mcp` 或只读 `/api/v1/knowledge/**` 的 Bearer 凭证，也可调用
+`/api/v1/capabilities`。它固定工作空间与文档边界；MCP 工具或 REST 请求的筛选只能和
+该边界取交集，按 ID 直接读取也不能越界。上传、Scope Key 管理、凭证管理和历史对话
+仍被禁止。服务端只保存令牌哈希，创建 PAT 失效时派生凭证同时失效。完整流程见
 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
 
 在浏览器打开 `/docs` 可以直接模拟请求：点击右上角 **Authorize**，只填写完整的
 `cz_pat_...`（不需要手写 `Bearer`），然后展开 `POST /api/v1/exploration-grants`，点击
 **Try it out**。非默认空间同时填写该接口显示的 `X-Cangzhi-Workspace` 参数。创建响应中
-复制 `cz_eg_...` 后，可以再次在 Authorize 中替换令牌并调试 `/api/mcp`；探索凭证不能
-用于其他 REST v1 接口。
+复制 `cz_eg_...` 后，可以再次在 Authorize 中替换令牌，调试 `/api/v1/knowledge/**`
+或 `/api/mcp`；写入和管理接口会返回 403。
 
 ---
 
