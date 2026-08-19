@@ -42,6 +42,13 @@ type AnalysisStep = {
   detail?: string;
 };
 
+type EvidenceAudit = {
+  status: 'sufficient' | 'needs_more' | 'insufficient';
+  summary: string;
+  missing_evidence: string[];
+  next_query?: string | null;
+};
+
 type AskResponse = {
   question: string;
   answer: string;
@@ -67,6 +74,7 @@ type AskResponse = {
       tool_calls: number;
       max_tool_calls: number;
       steps: AnalysisStep[];
+      evidence_audits?: EvidenceAudit[];
     };
   };
   scope?: { slug: string };
@@ -147,6 +155,7 @@ type LiveAnalysis = {
   contextLabel: string;
   message: string;
   steps: AnalysisStep[];
+  evidenceAudits: EvidenceAudit[];
   toolCalls: number;
   maxToolCalls: number;
   iterations?: number;
@@ -158,6 +167,7 @@ type AskStreamEvent =
       phase: string;
       message?: string;
       step?: AnalysisStep;
+      audit?: EvidenceAudit;
       tool_calls?: number;
       max_tool_calls?: number;
       iterations?: number;
@@ -402,6 +412,7 @@ function AskClient() {
         contextLabel,
         message: '正在分析问题',
         steps: [],
+        evidenceAudits: [],
         toolCalls: 0,
         maxToolCalls: 12,
       });
@@ -464,6 +475,9 @@ function AskClient() {
                 const steps = event.step
                   ? [...current.steps, event.step]
                   : current.steps;
+                const evidenceAudits = event.audit
+                  ? [...current.evidenceAudits, event.audit]
+                  : current.evidenceAudits;
                 return {
                   ...current,
                   message:
@@ -472,6 +486,7 @@ function AskClient() {
                       ? progressMessage(event.step)
                       : current.message),
                   steps,
+                  evidenceAudits,
                   toolCalls: event.tool_calls ?? current.toolCalls,
                   maxToolCalls: event.max_tool_calls ?? current.maxToolCalls,
                   iterations: event.iterations ?? current.iterations,
@@ -1339,6 +1354,21 @@ function LiveAnalysisCard({ analysis }: { analysis: LiveAnalysis }) {
               ))}
             </ol>
           )}
+          {analysis.evidenceAudits.length > 0 && (
+            <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
+              {analysis.evidenceAudits.map((audit, index) => (
+                <div key={`${audit.status}-${index}`} className="rounded-xl bg-amber-50 px-3 py-2 text-xs">
+                  <span className="font-medium text-amber-800">证据审计：</span>
+                  <span className="text-slate-600">{audit.summary}</span>
+                  {audit.missing_evidence.length > 0 && (
+                    <p className="mt-1 text-slate-500">
+                      待补充：{audit.missing_evidence.join('、')}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           <p className="mt-3 text-[11px] text-slate-400">
             展示的是可审计工具过程，不包含模型内部思维链。
           </p>
@@ -1420,6 +1450,24 @@ function AnalysisTrace({
             </li>
           ))}
         </ol>
+        {(analysis.evidence_audits?.length ?? 0) > 0 && (
+          <div className="mt-3 space-y-2 border-t border-indigo-100 pt-3">
+            {analysis.evidence_audits?.map((audit, index) => (
+              <div key={`${audit.status}-${index}`} className="rounded-xl bg-white/70 px-3 py-2 text-xs">
+                <p className="font-medium text-amber-800">证据完整性检查</p>
+                <p className="mt-1 text-slate-600">{audit.summary}</p>
+                {audit.missing_evidence.length > 0 && (
+                  <p className="mt-1 text-slate-500">
+                    待补充：{audit.missing_evidence.join('、')}
+                  </p>
+                )}
+                {audit.next_query && (
+                  <p className="mt-1 text-slate-400">继续检索：{audit.next_query}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </details>
   );

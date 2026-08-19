@@ -967,6 +967,12 @@ def test_deep_ask_stream_emits_live_tool_progress_and_result(client, monkeypatch
             self.decisions = [
                 {"action": "search", "query": "流式问答 工具进度"},
                 {"action": "finish", "summary": "证据充分"},
+                {
+                    "status": "sufficient",
+                    "summary": "证据链完整",
+                    "missing_evidence": [],
+                    "next_query": "",
+                },
             ]
 
         def is_configured(self):

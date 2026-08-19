@@ -182,6 +182,29 @@ def test_adaptive_budget_stops_after_two_calls_without_new_information():
     assert budget.early_exit_reason == "no_new_information"
 
 
+def test_evidence_audit_cannot_silently_drop_prior_gap():
+    provider = StubProvider()
+    provider.json_responses.append(_audit_result())
+
+    audit = asyncio.run(
+        DeepAnalysisService(provider)._audit_evidence(
+            "某日期的事项适用哪个版本？",
+            [
+                {
+                    "tool": "search",
+                    "status": "completed",
+                    "output": {"hits": []},
+                }
+            ],
+            unresolved_evidence=["版本过渡适用规则"],
+        )
+    )
+
+    assert audit.status == "needs_more"
+    assert audit.missing_evidence == ["版本过渡适用规则"]
+    assert audit.next_query == "版本过渡适用规则"
+
+
 def test_dataset_discovery_schema_and_recovery_hint_count_as_progress():
     seen: set[str] = set()
     assert _record_observation_progress(
@@ -333,6 +356,23 @@ class StubProvider(AIProvider):
         if not self.responses:
             raise AIProviderError("no queued response")
         return self.responses.pop(0)
+
+
+def _audit_result(
+    status: str = "sufficient",
+    *,
+    summary: str = "证据链完整",
+    missing_evidence: list[str] | None = None,
+    resolved_evidence: list[str] | None = None,
+    next_query: str = "",
+) -> dict:
+    return {
+        "status": status,
+        "summary": summary,
+        "missing_evidence": missing_evidence or [],
+        "resolved_evidence": resolved_evidence or [],
+        "next_query": next_query,
+    }
 
 
 async def _seed_document(
@@ -629,6 +669,7 @@ def test_deep_analysis_observes_each_search_before_next_action(qa_db):
                 {"action": "search", "query": "向量检索", "summary": "检索语义召回"},
                 {"action": "search", "query": "关键词检索", "summary": "补充精确匹配"},
                 {"action": "finish", "summary": "证据充分"},
+                _audit_result(),
             ]
         )
         provider.queue(
@@ -653,7 +694,7 @@ def test_deep_analysis_observes_each_search_before_next_action(qa_db):
     assert analysis["tool_calls"] <= analysis["max_tool_calls"]
     assert all(step["tool"] == "knowledge_search" for step in analysis["steps"])
     assert result.citations[0]["title"] == "向量检索"
-    assert len(provider.json_calls) == 3
+    assert len(provider.json_calls) == 4
     assert "向量检索" in provider.json_calls[1]["prompt"]
 
 
@@ -679,6 +720,7 @@ def test_deep_search_discovers_each_document_and_reads_full_chunks(qa_db):
                         "summary": "发现相关规定",
                     },
                     {"action": "finish", "summary": "证据充分"},
+                    _audit_result(),
                 ]
             )
             provider.queue(
@@ -713,6 +755,79 @@ def test_deep_search_discovers_each_document_and_reads_full_chunks(qa_db):
     assert all(len(item["snippet"]) > 0 for item in result.citations)
 
 
+def test_deep_analysis_audits_evidence_gap_before_finishing(qa_db):
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="旧版服务标准",
+            body="旧版服务标准规定申请响应时间为四十八小时。",
+        )
+        await _seed_document(
+            qa_db,
+            title="新版服务标准",
+            body="新版服务标准规定申请响应时间为二十四小时。",
+        )
+        await _seed_document(
+            qa_db,
+            title="服务标准实施安排",
+            body=(
+                "新版服务标准自2025年2月1日起生效；此前提交的申请继续适用"
+                "旧版服务标准。"
+            ),
+        )
+        provider = StubProvider()
+        provider.json_responses.extend(
+            [
+                {
+                    "action": "search",
+                    "query": "2025年1月申请 响应时间",
+                    "summary": "检索相关服务标准",
+                },
+                {"action": "finish", "summary": "已有新旧标准"},
+                _audit_result(
+                    "needs_more",
+                    summary="新旧标准冲突，缺少生效与过渡规则",
+                    missing_evidence=["生效日期", "过渡适用规则"],
+                    next_query="新版服务标准 生效日期 过渡适用规则 2025年1月",
+                ),
+                {"action": "finish", "summary": "适用关系已经补齐"},
+                _audit_result(
+                    resolved_evidence=["生效日期", "过渡适用规则"],
+                ),
+            ]
+        )
+        provider.queue(
+            AnswerResult(
+                answer="2025年1月提交的申请适用旧版四十八小时标准。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            return await DeepAnalysisService(provider).ask(
+                session,
+                AskRequest(question="2025年1月提交的申请响应时间是多久？"),
+            ), provider
+
+    result, provider = asyncio.run(_run())
+
+    analysis = result.retrieval["analysis"]
+    assert [item["status"] for item in analysis["evidence_audits"]] == [
+        "needs_more",
+        "sufficient",
+    ]
+    assert analysis["evidence_audits"][0]["missing_evidence"] == [
+        "生效日期",
+        "过渡适用规则",
+    ]
+    assert any(
+        step["tool"] == "knowledge_search"
+        and step["label"] == "新版服务标准 生效日期 过渡适用规则 2025年1月"
+        for step in analysis["steps"]
+    )
+    assert "相互冲突的来源或版本" in provider.json_calls[2]["prompt"]
+
+
 def test_deep_search_does_not_auto_read_dataset_catalogs(qa_db):
     async def _run():
         for index in range(2):
@@ -740,6 +855,7 @@ def test_deep_search_does_not_auto_read_dataset_catalogs(qa_db):
                         "summary": "发现数据集",
                     },
                     {"action": "finish", "summary": "完成发现"},
+                    _audit_result(),
                 ]
             )
             provider.queue(
@@ -875,6 +991,7 @@ def test_deep_analysis_revises_dataset_query_after_zero_rows(qa_db, monkeypatch)
                     },
                 },
                 {"action": "finish", "summary": "修正后得到完整结果"},
+                _audit_result(),
             ]
         )
         provider.queue(AnswerResult(answer="统计结果为 369174。", citation_ids=[1]))
@@ -935,6 +1052,11 @@ def test_deep_analysis_repairs_insufficient_answer_with_conflicting_citation(qa_
             [
                 {"action": "search", "query": "待核实资料"},
                 {"action": "finish", "summary": "没有更多可验证事实"},
+                _audit_result(
+                    "insufficient",
+                    summary="当前知识中没有最终数值",
+                    missing_evidence=["最终数值"],
+                ),
                 {
                     "answer": "当前证据没有给出可确认的最终数值。",
                     "citation_ids": [1],
@@ -969,6 +1091,7 @@ def test_deep_analysis_rejects_fabricated_citation(qa_db):
             [
                 {"action": "search", "query": "引用校验", "summary": "核验引用规则"},
                 {"action": "finish", "summary": "完成"},
+                _audit_result(),
             ]
         )
         provider.queue(
@@ -1112,6 +1235,11 @@ def test_deep_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
         [
             {"action": "list_datasets", "summary": "发现连接器数据集"},
             {"action": "finish", "summary": "没有可用数据集"},
+            _audit_result(
+                "insufficient",
+                summary="没有发现可查询的数据集",
+                missing_evidence=["可查询数据集"],
+            ),
         ]
     )
 
@@ -1621,6 +1749,7 @@ def test_ask_endpoint_accepts_deep_mode(qa_db):
         [
             {"action": "search", "query": "混合检索", "summary": "检索实现依据"},
             {"action": "finish", "summary": "证据充分"},
+            _audit_result(),
         ]
     )
     provider.queue(

@@ -92,6 +92,7 @@ MAX_DEEP_EVIDENCE_CHARS = 8_000
 MAX_OBSERVATION_CHARS = 18_000
 MAX_DATASET_ROWS_IN_CONTEXT = 20
 MAX_DECISION_ATTEMPTS = 3
+MAX_EVIDENCE_AUDITS = 3
 MAX_SEARCH_HITS_IN_OBSERVATION = 10
 AUTO_READ_DISCOVERY_HITS = 2
 MAX_AUTO_READS_TOTAL = 4
@@ -145,6 +146,32 @@ class AgentDecision(BaseModel):
     @classmethod
     def normalize_query(cls, value: str) -> str:
         return str(value or "").strip()[:MAX_QUESTION_LENGTH]
+
+
+class EvidenceAudit(BaseModel):
+    """A concise completeness verdict, never a model chain-of-thought."""
+
+    status: Literal["sufficient", "needs_more", "insufficient"]
+    summary: str = Field(default="", max_length=160)
+    missing_evidence: list[str] = Field(default_factory=list, max_length=5)
+    resolved_evidence: list[str] = Field(default_factory=list, max_length=5)
+    next_query: str = Field(default="", max_length=MAX_QUESTION_LENGTH)
+
+    @model_validator(mode="after")
+    def require_query_for_more_evidence(self):
+        self.next_query = self.next_query.strip()
+        if self.status == "needs_more" and not self.next_query:
+            raise ValueError("needs_more 必须提供 next_query")
+        return self
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "summary": self.summary,
+            "missing_evidence": list(self.missing_evidence),
+            "resolved_evidence": list(self.resolved_evidence),
+            "next_query": self.next_query or None,
+        }
 
 
 @dataclass
@@ -218,6 +245,8 @@ class DeepAnalysisService:
         dataset_evidence: list[Evidence] = []
         observations: list[dict[str, Any]] = []
         steps: list[AnalysisStep] = []
+        evidence_audits: list[EvidenceAudit] = []
+        audit_queries: set[str] = set()
         retrieval_statuses: list[dict[str, Any]] = []
         seen_actions: dict[str, int] = {}
         pending_chunk_reads: list[int] = []
@@ -292,7 +321,65 @@ class DeepAnalysisService:
                     else:
                         break
             if decision.action == "finish":
-                break
+                if (
+                    observations
+                    and len(steps) < budget.tool_limit
+                    and len(evidence_audits) < MAX_EVIDENCE_AUDITS
+                ):
+                    remaining_seconds = DEEP_ANALYSIS_BUDGET_SECONDS - (
+                        loop.time() - budget_started
+                    )
+                    if remaining_seconds <= 0:
+                        budget.early_exit_reason = "time_budget_exhausted"
+                        break
+                    try:
+                        audit = await asyncio.wait_for(
+                            self._audit_evidence(
+                                question,
+                                observations,
+                                unresolved_evidence=_unresolved_evidence(
+                                    evidence_audits
+                                ),
+                            ),
+                            timeout=remaining_seconds,
+                        )
+                    except (
+                        TimeoutError,
+                        AIProviderError,
+                        ValidationError,
+                        TypeError,
+                        ValueError,
+                    ) as exc:
+                        logger.warning("deep evidence audit failed error=%s", str(exc))
+                        break
+                    evidence_audits.append(audit)
+                    await _emit_progress(
+                        on_progress,
+                        {
+                            "phase": "evidence_audit",
+                            "message": audit.summary or "已完成证据完整性检查",
+                            "audit": audit.to_public_dict(),
+                            "tool_calls": len(steps),
+                            "max_tool_calls": budget.tool_limit,
+                            "iterations": iterations,
+                        },
+                    )
+                    normalized_query = audit.next_query.casefold().strip()
+                    if (
+                        audit.status == "needs_more"
+                        and normalized_query
+                        and normalized_query not in audit_queries
+                    ):
+                        audit_queries.add(normalized_query)
+                        decision = AgentDecision(
+                            action="search",
+                            query=audit.next_query,
+                            summary=audit.summary or "补充缺失证据",
+                        )
+                    else:
+                        break
+                else:
+                    break
 
             signature = json.dumps(
                 decision.model_dump(exclude={"summary"}),
@@ -506,6 +593,7 @@ class DeepAnalysisService:
             last_dataset_result=last_dataset_result,
             max_tool_calls=budget.tool_limit,
             early_exit_reason=budget.early_exit_reason,
+            evidence_audits=evidence_audits,
         )
         if not evidence:
             return AskResult(
@@ -730,6 +818,79 @@ class DeepAnalysisService:
                 )
         assert last_error is not None
         raise last_error
+
+    async def _audit_evidence(
+        self,
+        question: str,
+        observations: list[dict[str, Any]],
+        *,
+        unresolved_evidence: list[str],
+    ) -> EvidenceAudit:
+        """Ask the model to check evidence closure before allowing finish."""
+
+        assert self._provider is not None
+        payload = await asyncio.to_thread(
+            self._provider.generate_json,
+            system=(
+                "你是藏知的证据完整性审计器。检查已有证据是否足以直接回答问题。"
+                "只输出结论和可执行的证据缺口，不输出思维链，不使用资料外知识。"
+            ),
+            prompt=json.dumps(
+                {
+                    "用户问题": question,
+                    "已有观察": _bound_observations(observations),
+                    "前次审计尚未核销的证据缺口": unresolved_evidence,
+                    "审计维度": [
+                        "回答所需的关键事实是否都有直接证据",
+                        "相互冲突的来源或版本是否已经解决",
+                        "日期、生效时间、适用范围、对象层级和口径是否明确",
+                        "数值、列表或统计是否来自精确且完整的明细或计算",
+                        "是否仍存在可通过一次针对性检索补齐的关键缺口",
+                    ],
+                    "状态定义": {
+                        "sufficient": "证据链完整，可以生成确定回答",
+                        "needs_more": "存在关键缺口，且可给出一条高价值检索词继续探索",
+                        "insufficient": "证据不足且当前观察无法形成有价值的新检索",
+                    },
+                    "输出格式": {
+                        "status": "sufficient|needs_more|insufficient",
+                        "summary": "面向用户的简短审计结论，不写思维过程",
+                        "missing_evidence": ["仍缺失的原子证据，一项只写一个事实"],
+                        "resolved_evidence": [
+                            "已被直接证据解决的前次缺口，必须原样复制缺口名称"
+                        ],
+                        "next_query": "needs_more 时必填的一条检索词",
+                    },
+                    "规则": (
+                        "不要因为已经找到若干相关片段就判定充分。若存在多个版本、"
+                        "相互矛盾的事实、特定日期或适用对象，必须有证据解决适用关系；"
+                        "单独的发布日期或生效日期不能证明生效日前事项如何过渡处理。"
+                        "前次缺口必须逐项由观察中的直接表述核销；不得依靠常识、时间"
+                        "先后或推断填入 resolved_evidence。只要仍有一项未核销，就不能"
+                        "返回 sufficient。检索词应针对缺失的连接事实，而不是重复已有结论。"
+                    ),
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+        audit = EvidenceAudit.model_validate(payload)
+        if audit.status == "sufficient" and unresolved_evidence:
+            resolved = {item.strip().casefold() for item in audit.resolved_evidence}
+            unresolved = [
+                item
+                for item in unresolved_evidence
+                if item.strip().casefold() not in resolved
+            ]
+            if unresolved:
+                return EvidenceAudit(
+                    status="needs_more",
+                    summary="前次证据缺口尚未逐项获得直接证据，继续补充检索",
+                    missing_evidence=unresolved,
+                    resolved_evidence=audit.resolved_evidence,
+                    next_query=" ".join(unresolved)[:MAX_QUESTION_LENGTH],
+                )
+        return audit
 
     async def _execute_action(
         self,
@@ -1284,6 +1445,7 @@ def _build_retrieval(
     last_dataset_result: dict[str, Any] | None,
     max_tool_calls: int = MAX_TOOL_CALLS_DEFAULT,
     early_exit_reason: str | None = None,
+    evidence_audits: list[EvidenceAudit] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "mode": "deep_analysis",
@@ -1306,6 +1468,9 @@ def _build_retrieval(
             "tool_calls": len(steps),
             "max_tool_calls": max_tool_calls,
             "steps": [item.to_dict() for item in steps],
+            "evidence_audits": [
+                item.to_public_dict() for item in (evidence_audits or [])
+            ],
         },
     }
     if early_exit_reason is not None:
@@ -1322,6 +1487,20 @@ def _build_retrieval(
             "warnings": list(last_dataset_result.get("warnings") or []),
         }
     return payload
+
+
+def _unresolved_evidence(audits: list[EvidenceAudit]) -> list[str]:
+    """Carry atomic evidence gaps forward until a later audit resolves them."""
+
+    unresolved: dict[str, str] = {}
+    for audit in audits:
+        for item in audit.resolved_evidence:
+            unresolved.pop(item.strip().casefold(), None)
+        for item in audit.missing_evidence:
+            normalized = item.strip().casefold()
+            if normalized:
+                unresolved.setdefault(normalized, item.strip())
+    return list(unresolved.values())[:5]
 
 
 def _bound_evidence(items: list[Evidence]) -> list[Evidence]:
