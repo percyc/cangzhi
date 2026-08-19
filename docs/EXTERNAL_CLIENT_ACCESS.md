@@ -111,10 +111,22 @@ documents(scope_key in [id-a, id-b]) UNION documents(id in [42, 73])
 `400 invalid_document_selection`，绝不回退全空间。Scope Key 和 ID 不存在时只产生空
 候选，不扩大范围。
 
+如需按 Scope Key 反查文档目录，使用：
+
+```http
+GET /api/v1/knowledge/documents?scope_keys=id-a&scope_keys=id-b&limit=50&offset=0
+```
+
+该接口只返回文档元数据和当前处理状态，不返回正文或 Scope Key。多个 Key 与显式
+`document_ids` 仍按并集选文档；探索凭证会在此基础上强制与其固定边界取交集。
+MCP 中使用 `knowledge_list_documents`，参数结构与搜索工具的
+`document_selection` 一致。
+
 ## 6. MCP 与 CLI
 
-MCP 的 `knowledge_search`、`knowledge_ask`、`knowledge_list_facets` 和
-`knowledge_list_datasets` 均接受 `document_selection`。MCP 只提供读取、检索和问答；
+MCP 的 `knowledge_search`、`knowledge_ask`、`knowledge_list_facets`、
+`knowledge_list_documents` 和 `knowledge_list_datasets` 均接受
+`document_selection`。MCP 只提供读取、检索和问答；
 上传与 Scope Key 管理走 REST。
 
 MCP 有两种凭证模式：

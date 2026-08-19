@@ -101,6 +101,7 @@ Ask 和 MCP 可通过 `document_selection` 同时指定多个 `scope_keys` 与�
 发现可用选项：
 
 - REST：`GET /api/v1/knowledge/scopes` 与 `GET /api/v1/knowledge/facets`
+- 文档目录：`GET /api/v1/knowledge/documents` 或 MCP `knowledge_list_documents`
 - MCP：`knowledge_list_scopes` 与 `knowledge_list_facets`
 - CLI：`cangzhi scopes` 与 `cangzhi facets`
 
@@ -248,6 +249,24 @@ curl -N -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
 
 ### 3.6 读取文档与片段
 
+**`GET /api/v1/knowledge/documents`** — 作用域 `knowledge:read`
+
+分页列出当前可访问范围内的文档元数据，不返回正文或 Scope Key。可重复传入
+`scope_keys` 与 `document_ids`，两类选择器组成候选并集；再与探索凭证的固定边界
+取交集。省略选择器时，普通 PAT 列出工作空间文档，探索凭证只列出其边界内文档。
+
+```bash
+curl -G -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode "scope_keys=id-a" \
+  --data-urlencode "scope_keys=id-b" \
+  --data-urlencode "document_ids=42" \
+  --data-urlencode "limit=50" \
+  http://localhost:8000/api/v1/knowledge/documents
+```
+
+响应包含 `items`、`total`、`limit`、`offset`。每项包含文档 ID、标题、描述、来源、
+外部 ID、更新时间和当前版本处理状态。
+
 **`GET /api/v1/knowledge/documents/{document_id}`** — 作用域 `knowledge:read`
 
 读取当前文档正文。可选 `version_id` 查询参数用于版本绑定；若指定的版本与当前
@@ -355,6 +374,7 @@ curl -N -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
 | --- | --- | --- |
 | `knowledge_list_scopes` | read | 列出知识范围 |
 | `knowledge_list_facets` | read | 列出分类/标签/来源/连接器筛选项 |
+| `knowledge_list_documents` | read | 分页列出当前范围内的文档元数据，可按 Scope Key/文档 ID 筛选 |
 | `knowledge_search` | search | 检索证据片段，适合外部模型自行组织回答 |
 | `knowledge_ask` | ask | 快速检索并回答，返回可核验引用；固定快速模式，不暴露 deep |
 | `knowledge_get_document` | read | 按文档 ID 分页读取正文（默认最多 12000 字符） |

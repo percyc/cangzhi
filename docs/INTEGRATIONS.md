@@ -12,6 +12,8 @@
 REST 的 `/api/v1/knowledge/facets` 与 MCP 的 `knowledge_list_facets`
 用于发现可用分类、标签、来源类型和 WebDAV 连接器。检索时同一维度内满足任一
 选项，不同维度之间同时满足；临时筛选只能继续缩小已有 KnowledgeScope。
+REST 的 `/api/v1/knowledge/documents` 与 MCP 的 `knowledge_list_documents` 可按
+Scope Key/文档 ID 分页枚举候选文档，响应只含目录元数据，不暴露 Scope Key 或正文。
 
 这三种入口不会绕过藏知的回收站、KnowledgeScope 或文档存活状态，也不会各自维护
 另一套向量索引。
@@ -102,6 +104,7 @@ MCP 的 `knowledge_ask` 固定为快速问答，不暴露 `deep`；Skill 和外�
 
 结构化数据也提供独立的发现和执行工具：
 
+- `knowledge_list_documents`：分页发现当前范围内的文档；
 - `knowledge_list_datasets`：发现当前有效数据集；
 - `knowledge_get_dataset_schema`：读取字段类型、画像与样例；
 - `knowledge_preview_dataset_rows`：只分页预览少量行；

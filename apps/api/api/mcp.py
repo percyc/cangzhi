@@ -27,6 +27,7 @@ from ..services.dataset_execution import (
 from ..services.evidence import EvidenceError, EvidenceService
 from ..services.knowledge_read import (
     KnowledgeReadError,
+    list_current_documents,
     read_current_chunk,
     read_current_document,
 )
@@ -109,6 +110,14 @@ class FacetArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     document_selection: DocumentSelectionArguments | None = None
+
+
+class DocumentListArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_selection: DocumentSelectionArguments | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0, le=10_000)
 
 
 class DocumentReadArguments(BaseModel):
@@ -202,6 +211,22 @@ TOOLS = [
         "title": "列出知识筛选项",
         "description": "列出可用于收窄检索的分类、标签、来源类型和 WebDAV 连接器。",
         "inputSchema": FacetArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_list_documents",
+        "title": "列出知识文档",
+        "description": (
+            "分页列出当前可访问范围内的文档元数据。可用 document_selection 按多个 "
+            "scope key 和明确文档 ID 的并集筛选；探索凭证仍会与其固定边界取交集。"
+            "响应不返回正文或 scope key。"
+        ),
+        "inputSchema": DocumentListArguments.model_json_schema(),
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -759,6 +784,22 @@ async def _call_tool(
                     document_boundary=identity.exploration_boundary,
                 )
             )
+        if name == "knowledge_list_documents":
+            args = DocumentListArguments.model_validate(arguments)
+            selection = (
+                args.document_selection.to_domain()
+                if args.document_selection is not None
+                else None
+            )
+            return _tool_result(
+                await list_current_documents(
+                    db,
+                    limit=args.limit,
+                    offset=args.offset,
+                    document_selection=selection,
+                    document_boundary=identity.exploration_boundary,
+                )
+            )
         if name == "knowledge_get_document":
             args = DocumentReadArguments.model_validate(arguments)
             document = await read_current_document(
@@ -851,7 +892,8 @@ async def mcp_post(
                 "serverInfo": {"name": "cangzhi", "version": "0.3.0"},
                 "instructions": (
                     "范围不明确时先使用 knowledge_list_scopes；需要按分类、标签、"
-                    "来源或连接器收窄时使用 knowledge_list_facets。需要藏知直接"
+                    "来源或连接器收窄时使用 knowledge_list_facets；需要枚举当前范围"
+                    "中的文档时使用 knowledge_list_documents。需要藏知直接"
                     "回答或精确查询表格时使用 knowledge_ask；需要原始证据供外部"
                     "模型自行分析时使用 knowledge_search。需要完整上下文时，再按"
                     "返回的 chunk.id 读取。完整文档必须通过 knowledge_get_document "

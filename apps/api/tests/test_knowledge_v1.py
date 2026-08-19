@@ -104,6 +104,7 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     assert {item["name"] for item in tools.json()["result"]["tools"]} == {
         "knowledge_list_scopes",
         "knowledge_list_facets",
+        "knowledge_list_documents",
         "knowledge_search",
         "knowledge_ask",
         "knowledge_get_document",
@@ -476,6 +477,31 @@ def test_exploration_grant_supports_rest_and_mcp_without_escaping_boundary(clien
         f"/api/v1/knowledge/documents/{document_ids[0]}", headers=grant_headers
     )
     assert rest_allowed.status_code == 200
+    grant_catalog = test_client.get(
+        "/api/v1/knowledge/documents", headers=grant_headers
+    )
+    assert grant_catalog.status_code == 200
+    assert grant_catalog.json()["total"] == 1
+    assert [item["id"] for item in grant_catalog.json()["items"]] == [
+        document_ids[0]
+    ]
+    assert "scope_keys" not in grant_catalog.json()["items"][0]
+    assert "content" not in grant_catalog.json()["items"][0]
+    escaped_catalog = test_client.get(
+        "/api/v1/knowledge/documents",
+        headers=grant_headers,
+        params={"document_ids": document_ids[1]},
+    )
+    assert escaped_catalog.status_code == 200
+    assert escaped_catalog.json()["total"] == 0
+    pat_catalog = test_client.get(
+        "/api/v1/knowledge/documents",
+        headers=pat_headers,
+        params={"scope_keys": "external-user-a"},
+    )
+    assert pat_catalog.status_code == 200
+    assert pat_catalog.json()["total"] == 1
+    assert pat_catalog.json()["items"][0]["id"] == document_ids[0]
     rest_escaped = test_client.get(
         f"/api/v1/knowledge/documents/{document_ids[1]}", headers=grant_headers
     )
@@ -539,6 +565,18 @@ def test_exploration_grant_supports_rest_and_mcp_without_escaping_boundary(clien
         "knowledge_get_document", {"document_id": document_ids[0]}, grant_headers
     )
     assert allowed["isError"] is False
+    listed = call_tool("knowledge_list_documents", {}, grant_headers)
+    assert listed["isError"] is False
+    assert listed["structuredContent"]["total"] == 1
+    assert [item["id"] for item in listed["structuredContent"]["items"]] == [
+        document_ids[0]
+    ]
+    narrowed_list = call_tool(
+        "knowledge_list_documents",
+        {"document_selection": {"document_ids": [document_ids[1]]}},
+        grant_headers,
+    )
+    assert narrowed_list["structuredContent"]["total"] == 0
     escaped_document = call_tool(
         "knowledge_get_document", {"document_id": document_ids[1]}, grant_headers
     )

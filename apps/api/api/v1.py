@@ -57,6 +57,7 @@ from ..services.deep_analysis import DeepAnalysisService
 from ..services.evidence import EvidenceError, EvidenceService
 from ..services.knowledge_read import (
     KnowledgeReadError,
+    list_current_documents,
     read_current_chunk,
     read_current_document,
 )
@@ -577,6 +578,7 @@ async def capabilities(
             "document_upload": True,
             "document_scope_keys": True,
             "document_selection_union": True,
+            "document_catalog": True,
             "mcp_exploration_grants": True,
             "rest_exploration_grants": True,
         },
@@ -592,6 +594,33 @@ def _dataset_http_error(exc: DatasetExecutionError) -> HTTPException:
     }.get(exc.code, 400)
     return HTTPException(
         status_code=status, detail={"code": exc.code, "message": str(exc)}
+    )
+
+
+@router.get("/knowledge/documents", response_model=dict[str, Any])
+async def list_knowledge_documents(
+    scope_keys: list[str] | None = Query(default=None),  # noqa: B008
+    document_ids: list[int] | None = Query(default=None),  # noqa: B008
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0, le=10_000),
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    """List current document metadata, optionally selected by opaque keys."""
+
+    selection = None
+    if scope_keys is not None or document_ids is not None:
+        selection = _selection(
+            DocumentSelectionPayload(
+                scope_keys=scope_keys or [], document_ids=document_ids or []
+            )
+        )
+    return await list_current_documents(
+        db,
+        limit=limit,
+        offset=offset,
+        document_selection=selection,
+        document_boundary=identity.exploration_boundary,
     )
 
 
