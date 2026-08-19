@@ -1,5 +1,6 @@
 from datetime import datetime
 from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
@@ -327,6 +328,37 @@ class TestOfficeParsers:
         ]
         assert result.structured_content.blocks[1].heading_path == ["合同条款"]
         assert result.structured_content.blocks[2].text == "甲方\t乙方"
+
+    def test_parse_docx_with_vendor_specific_style_type(self):
+        from docx import Document
+
+        document = Document()
+        document.add_heading("非标准样式标题", level=1)
+        document.add_paragraph("正文仍应成功提取。")
+        source = BytesIO()
+        document.save(source)
+
+        malformed = BytesIO()
+        with (
+            ZipFile(BytesIO(source.getvalue())) as input_archive,
+            ZipFile(malformed, "w", ZIP_DEFLATED) as output_archive,
+        ):
+            for item in input_archive.infolist():
+                data = input_archive.read(item.filename)
+                if item.filename == "word/styles.xml":
+                    data = data.replace(
+                        b'w:type="paragraph" w:styleId="Heading1"',
+                        b'w:type="titleLevel1" w:styleId="Heading1"',
+                    )
+                output_archive.writestr(item, data)
+
+        result = DocxParser().parse(malformed.getvalue())
+
+        assert result.success is True
+        assert result.structured_content.full_text() == (
+            "非标准样式标题\n正文仍应成功提取。"
+        )
+        assert result.structured_content.blocks[0].type == "heading"
 
     def test_parse_pdf_preserves_page_count(self):
         from pypdf import PdfWriter

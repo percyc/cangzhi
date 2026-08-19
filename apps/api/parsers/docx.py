@@ -1,5 +1,33 @@
+import re
 from io import BytesIO
-from .base import BaseParser, Block, StructuredContent, ParserResult
+
+from .base import BaseParser, Block, ParserResult, StructuredContent
+
+_HEADING_STYLE_PATTERN = re.compile(
+    r"(?:heading|titlelevel|标题)[\s_-]*(\d+)$", re.IGNORECASE
+)
+
+
+def _safe_style_name(paragraph) -> str:
+    """Read a paragraph style without rejecting vendor-specific DOCX styles."""
+
+    try:
+        style = paragraph.style
+        return style.name.strip().lower() if style and style.name else ""
+    except (KeyError, ValueError):
+        # Some producers write a non-standard value into w:style/@w:type.
+        # python-docx rejects that enum while the paragraph text remains valid.
+        style_id = paragraph._p.style
+        return style_id.strip().lower() if isinstance(style_id, str) else ""
+
+
+def _heading_level(style_name: str) -> int | None:
+    if style_name == "title":
+        return 1
+    match = _HEADING_STYLE_PATTERN.search(style_name)
+    if match is None:
+        return None
+    return min(max(int(match.group(1)), 1), 6)
 
 
 class DocxParser(BaseParser):
@@ -23,19 +51,10 @@ class DocxParser(BaseParser):
                 if not text:
                     continue
 
-                style_name = para.style.name.lower() if para.style else ""
+                style_name = _safe_style_name(para)
+                level = _heading_level(style_name)
 
-                if style_name.startswith("heading") or style_name == "title":
-                    if style_name.startswith("heading"):
-                        try:
-                            level = int(style_name[-1])
-                            if level > 6:
-                                level = 6
-                        except ValueError:
-                            level = 1
-                    else:
-                        level = 1
-
+                if level is not None:
                     while len(heading_path) >= level:
                         heading_path.pop()
                     heading_path.append(text)
