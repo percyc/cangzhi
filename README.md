@@ -193,3 +193,8 @@ make install          # 安装本地开发依赖
 - Web：`GET http://localhost:3000/api/health`
 - API liveness：`GET http://localhost:8000/api/liveness`
 - API readiness：`GET http://localhost:8000/api/readiness`
+
+## 开源协议
+
+本项目采用 [MIT License](LICENSE) 开源，允许修改、分发及商业使用，但须保留原始
+版权声明和许可证文本。第三方依赖、模型及导入资料仍分别遵循其自身许可。
