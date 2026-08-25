@@ -19,6 +19,20 @@ from apps.api.models.documents import (
 from apps.api.models.exploration_grants import ExplorationGrant
 
 
+def test_mcp_search_accepts_dify_serialized_document_selection():
+    args = mcp_module.SearchArguments.model_validate(
+        {
+            "query": "搜索",
+            "document_selection": (
+                '{"scope_keys": ["kb-oai-2089967679615209472"]}\n'
+            ),
+        }
+    )
+
+    assert args.document_selection is not None
+    assert args.document_selection.scope_keys == ["kb-oai-2089967679615209472"]
+
+
 def _enable_real_login():
     app.dependency_overrides.pop(require_admin, None)
     reset_auth_limiters_for_tests()
@@ -176,6 +190,27 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
     tool_result = mcp_search.json()["result"]
     assert tool_result["isError"] is False
     assert tool_result["structuredContent"]["hits"] == []
+    dify_mcp_search = test_client.post(
+        "/api/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": {
+                "name": "knowledge_search",
+                "arguments": {
+                    "query": "不存在的资料",
+                    "scope_slug": "all",
+                    "document_selection": (
+                        '{"scope_keys": ["kb-oai-2089967679615209472"]}\n'
+                    ),
+                },
+            },
+        },
+    ).json()["result"]
+    assert dify_mcp_search["isError"] is False
+    assert dify_mcp_search["structuredContent"]["hits"] == []
     legacy_selection = test_client.post(
         "/api/mcp",
         headers=headers,

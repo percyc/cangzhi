@@ -7,11 +7,18 @@ import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai import build_provider_from_db
@@ -78,6 +85,39 @@ class DocumentSelectionArguments(BaseModel):
         return selection
 
 
+def _coerce_document_selection(value: Any) -> Any:
+    """Accept Dify's serialized nested object for MCP compatibility.
+
+    MCP clients should send ``document_selection`` as a JSON object.  Some
+    workflow adapters (notably Dify's tool argument mapping) serialize nested
+    objects into a string before invoking the tool.  Parse only that one
+    documented compatibility case; all other values are left to Pydantic so
+    callers still receive the normal validation error.
+    """
+
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "document_selection 必须是对象；如果客户端只能传字符串，"
+            "请传入合法的 JSON 对象字符串"
+        ) from exc
+    if decoded is None or isinstance(decoded, dict):
+        return decoded
+    raise ValueError("document_selection JSON 必须是对象")
+
+
+DocumentSelectionInput = Annotated[
+    DocumentSelectionArguments | None,
+    BeforeValidator(_coerce_document_selection),
+]
+
+
 class SearchArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -90,7 +130,7 @@ class SearchArguments(BaseModel):
     tag_ids: list[int] = Field(default_factory=list)
     source_types: list[str] = Field(default_factory=list)
     connector_ids: list[int] = Field(default_factory=list)
-    document_selection: DocumentSelectionArguments | None = None
+    document_selection: DocumentSelectionInput = None
 
 
 class AskArguments(BaseModel):
@@ -103,19 +143,19 @@ class AskArguments(BaseModel):
     tag_ids: list[int] = Field(default_factory=list)
     source_types: list[str] = Field(default_factory=list)
     connector_ids: list[int] = Field(default_factory=list)
-    document_selection: DocumentSelectionArguments | None = None
+    document_selection: DocumentSelectionInput = None
 
 
 class FacetArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    document_selection: DocumentSelectionArguments | None = None
+    document_selection: DocumentSelectionInput = None
 
 
 class DocumentListArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    document_selection: DocumentSelectionArguments | None = None
+    document_selection: DocumentSelectionInput = None
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0, le=10_000)
 
@@ -139,7 +179,7 @@ class DatasetListArguments(BaseModel):
 
     document_id: int | None = Field(default=None, ge=1)
     limit: int = Field(default=100, ge=1, le=200)
-    document_selection: DocumentSelectionArguments | None = None
+    document_selection: DocumentSelectionInput = None
 
 
 class DatasetIdArguments(BaseModel):
@@ -242,6 +282,7 @@ TOOLS = [
             "是包含相邻片段的完整证据窗口，snippet 仅用于命中预览；"
             "retrieval_channels 同时包含 lexical 和 vector 时表示两个检索通道共同支持。"
             "document_selection 将多个 scope key 与明确文档 ID 合并为一次候选集合。"
+            "标准请求应传对象；若 Dify 将嵌套参数序列化为 JSON 字符串，服务端也兼容解析。"
         ),
         "inputSchema": SearchArguments.model_json_schema(),
         "annotations": {

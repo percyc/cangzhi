@@ -97,6 +97,13 @@ MCP 的 `knowledge_ask` 固定为快速问答，不暴露 `deep`；Skill 和外�
 返回标准 JSON-RPC 工具结果。没有请求进度的旧客户端仍收到单个 JSON 响应。这里流式
 呈现的是可审计的执行阶段，不包含模型思维链，也不是逐字 token 输出。
 
+MCP 工具的 `document_selection` 标准格式是嵌套 JSON 对象，例如
+`{"document_selection":{"scope_keys":["id-a"]}}`。部分工作流平台（例如 Dify
+的工具参数映射）会把嵌套对象自动转换为字符串；藏知兼容这种形式，例如
+`{"document_selection":"{\"scope_keys\":[\"id-a\"]}"}`。这只是客户端适配兼容，
+其他字段仍需按照工具 Schema 传入；空字符串表示未指定范围，非空字符串必须是合法的
+JSON 对象。
+
 `knowledge_get_document` 是分页原文读取工具，默认最多返回 12000 字符，并在
 `content_window` 中给出总长度、截断状态和 `next_offset`。大型 Excel 或长文档不要
 一次读取全文：表格筛选与统计使用 `knowledge_ask`，证据定位使用
