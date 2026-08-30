@@ -543,3 +543,71 @@ def test_vector_repair_endpoint_reports_missing_active_profile(client):
     )
     assert response.status_code == 400
     assert "尚未启用向量模型" in response.json()["detail"]
+
+
+def test_pdf_extraction_summary_is_propagated_to_pipeline(client):
+    test_client, _ = client
+    created = test_client.post(
+        "/api/notes",
+        json={"title": "扫描 PDF 摘要", "content": "用于检查 OCR 摘要。"},
+    )
+    document_id = created.json()["id"]
+    version_id = created.json()["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    pdf_extraction = {
+        "version": "pdf-hybrid-v1",
+        "engine": "tesseract",
+        "page_count": 12,
+        "native_text_pages": [1, 2, 3],
+        "image_pages": [4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "ocr_candidate_pages": [4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "ocr_completed_pages": [4, 5, 6, 7, 8, 9],
+        "ocr_failed_pages": [10],
+        "ocr_skipped_pages": [11, 12],
+        "ocr_status": "partial",
+    }
+
+    async def seed_extraction():
+        dependency = db_dependency()
+        session = await _session(dependency)
+        try:
+            version = await session.get(DocumentVersion, version_id)
+            version.processing_status = "ready"
+            version.meta = {"ai_status": "not_configured"}
+            version.structured_content = {
+                "schema_version": 1,
+                "document_type": "pdf",
+                "blocks": [],
+                "metadata": {
+                    "page_count": 12,
+                    "pdf_extraction": pdf_extraction,
+                },
+            }
+            session.add(version)
+            await session.commit()
+        finally:
+            await dependency.aclose()
+
+    asyncio.run(seed_extraction())
+
+    async def run():
+        dependency = db_dependency()
+        session = await _session(dependency)
+        try:
+            return await compute_processing_status(session, document_id)
+        finally:
+            await dependency.aclose()
+
+    body = asyncio.run(run())
+    extraction = body["stages"]["parsing"]["extraction"]
+    assert extraction["version"] == "pdf-hybrid-v1"
+    assert extraction["engine"] == "tesseract"
+    assert extraction["page_count"] == 12
+    assert extraction["native_text_pages"] == 3
+    assert extraction["ocr_candidate_pages"] == 9
+    assert extraction["ocr_completed_pages"] == 6
+    assert extraction["ocr_failed_pages"] == [10]
+    assert extraction["ocr_skipped_pages"] == [11, 12]
+    assert extraction["ocr_status"] == "partial"
+    assert body["overall_status"] != "failed"

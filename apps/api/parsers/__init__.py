@@ -1,34 +1,35 @@
 from .base import (
     BaseParser,
     Block,
-    StructuredContent,
-    ParserResult,
     DocumentType,
+    ParserResult,
+    StructuredContent,
     get_parser_for_content,
 )
-from .note import NoteParser
-from .text import TextParser
-from .markdown import MarkdownParser
-from .pdf import PdfParser
 from .doc import DocParser
 from .docx import DocxParser
-from .spreadsheet import XlsParser, XlsxParser
 from .html import HtmlParser
+from .markdown import MarkdownParser
+from .note import NoteParser
+from .pdf import PdfOcrOptions, PdfParser
+from .spreadsheet import XlsParser, XlsxParser
+from .text import TextParser
 
 __all__ = [
     "BaseParser",
     "Block",
-    "StructuredContent",
-    "ParserResult",
-    "DocumentType",
-    "NoteParser",
-    "TextParser",
-    "MarkdownParser",
-    "PdfParser",
     "DocParser",
+    "DocumentType",
     "DocxParser",
-    "XlsxParser",
-    "XlsParser",
     "HtmlParser",
+    "MarkdownParser",
+    "NoteParser",
+    "ParserResult",
+    "PdfOcrOptions",
+    "PdfParser",
+    "StructuredContent",
+    "TextParser",
+    "XlsParser",
+    "XlsxParser",
     "get_parser_for_content",
 ]

@@ -74,6 +74,18 @@ type PipelineStage = {
   status: string;
   message: string;
   last_error?: string | null;
+  extraction?: {
+    version: string | null;
+    engine: string | null;
+    ocr_status: string | null;
+    page_count: number | null;
+    native_text_pages: number;
+    image_pages: number;
+    ocr_candidate_pages: number;
+    ocr_completed_pages: number;
+    ocr_failed_pages: number[];
+    ocr_skipped_pages: number[];
+  };
 };
 
 type ProcessingPipeline = {
@@ -1021,6 +1033,67 @@ function PipelineStatus({ pipeline }: { pipeline: ProcessingPipeline }) {
           </div>
         ))}
       </div>
+      {pipeline.stages.parsing.extraction && (
+        <PdfExtractionSummary extraction={pipeline.stages.parsing.extraction} />
+      )}
+    </div>
+  );
+}
+
+function PdfExtractionSummary({
+  extraction,
+}: {
+  extraction: NonNullable<PipelineStage['extraction']>;
+}) {
+  const failedPages = extraction.ocr_failed_pages.length;
+  const skippedPages = extraction.ocr_skipped_pages.length;
+  const completed = extraction.ocr_completed_pages;
+  const native = extraction.native_text_pages;
+  const candidates = extraction.ocr_candidate_pages;
+  const statusLabel: Record<string, string> = {
+    completed: 'OCR 已完成',
+    partial: 'OCR 部分完成',
+    failed: 'OCR 全部失败',
+    skipped: '已跳过 OCR',
+    not_needed: '无需 OCR',
+  };
+  const statusText = extraction.ocr_status
+    ? statusLabel[extraction.ocr_status] ?? extraction.ocr_status
+    : '无需 OCR';
+
+  return (
+    <div className="mt-4 rounded-lg border border-slate-200 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-sm font-medium text-slate-800">PDF 解析摘要</h4>
+        <span className="text-xs text-slate-500">
+          {statusText}
+          {extraction.engine ? ` · ${extraction.engine}` : ''}
+        </span>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600 sm:grid-cols-4">
+        <div>
+          <dt className="text-slate-400">总页数</dt>
+          <dd className="mt-1 text-slate-700">{extraction.page_count ?? '—'}</dd>
+        </div>
+        <div>
+          <dt className="text-slate-400">原生文字页</dt>
+          <dd className="mt-1 text-slate-700">{native}</dd>
+        </div>
+        <div>
+          <dt className="text-slate-400">OCR 完成</dt>
+          <dd className="mt-1 text-slate-700">{completed}</dd>
+        </div>
+        <div>
+          <dt className="text-slate-400">OCR 候选</dt>
+          <dd className="mt-1 text-slate-700">{candidates}</dd>
+        </div>
+      </dl>
+      {(failedPages > 0 || skippedPages > 0) && (
+        <p className="mt-3 text-xs text-slate-500">
+          OCR 失败 {failedPages} 页 · 跳过 {skippedPages} 页。这些页的图片文字尚未入库，
+          但不影响其他页面继续处理。
+        </p>
+      )}
     </div>
   );
 }

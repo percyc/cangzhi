@@ -30,8 +30,44 @@ class Settings(BaseSettings):
     url_fetch_timeout_seconds: float = 20.0
     url_fetch_max_redirects: int = 5
 
+    pdf_ocr_enabled: bool = True
+    pdf_ocr_language: str = "chi_sim+eng"
+    pdf_ocr_dpi: int = 180
+    pdf_ocr_min_native_chars: int = 24
+    pdf_ocr_max_pages: int = 300
+    pdf_ocr_timeout_seconds: float = 30.0
+
 
 settings = Settings()
+
+
+def _clamp_int(value: int, low: int, high: int, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _clamp_float(value: float, low: float, high: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def pdf_ocr_options_summary() -> dict:
+    return {
+        "enabled": bool(settings.pdf_ocr_enabled),
+        "language": (settings.pdf_ocr_language or "chi_sim+eng").strip() or "chi_sim+eng",
+        "dpi": _clamp_int(settings.pdf_ocr_dpi, 72, 600, 180),
+        "min_native_chars": _clamp_int(settings.pdf_ocr_min_native_chars, 1, 10_000, 24),
+        "max_pages": _clamp_int(settings.pdf_ocr_max_pages, 1, 50_000, 300),
+        "timeout_seconds": _clamp_float(
+            settings.pdf_ocr_timeout_seconds, 1.0, 600.0, 30.0
+        ),
+    }
 
 
 def ai_settings_summary() -> dict:

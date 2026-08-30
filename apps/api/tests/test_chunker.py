@@ -44,6 +44,44 @@ def test_short_section_becomes_single_parent_and_child():
     assert child.paragraph_index == 1
 
 
+def test_ocr_lines_merge_page_bbox_and_confidence():
+    blocks = [
+        Block(
+            type="paragraph",
+            text="扫描文件第一行。",
+            heading_path=[],
+            page=2,
+            paragraph_index=0,
+            extra={
+                "source": "ocr",
+                "ocr_engine": "tesseract",
+                "bbox": [10.0, 700.0, 200.0, 720.0],
+                "confidence": 0.8,
+            },
+        ),
+        Block(
+            type="paragraph",
+            text="扫描文件第二行。",
+            heading_path=[],
+            page=2,
+            paragraph_index=1,
+            extra={
+                "source": "ocr",
+                "ocr_engine": "tesseract",
+                "bbox": [12.0, 670.0, 260.0, 695.0],
+                "confidence": 0.9,
+            },
+        ),
+    ]
+
+    specs = build_chunk_specs(_structured(blocks), child_overlap_chars=0)
+    parent, child = specs
+    for spec in (parent, child):
+        assert spec.extra["source"] == "ocr"
+        assert spec.extra["bbox"] == [10.0, 670.0, 260.0, 720.0]
+        assert spec.extra["confidence"] == 0.85
+
+
 def test_level_one_headings_split_sections():
     blocks = [
         Block(type="heading", text="章节一", heading_path=["章节一"], level=1, paragraph_index=0),

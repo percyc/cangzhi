@@ -8,6 +8,8 @@ pydantic-settings>=2.0
 tenacity
 structlog
 pypdf>=3.0
+pypdfium2>=4.0,<6
+Pillow>=10,<13
 python-docx>=0.8
 openpyxl>=3.1
 xlrd>=2.0

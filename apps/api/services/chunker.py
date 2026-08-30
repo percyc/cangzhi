@@ -856,9 +856,38 @@ def _table_piece_extra(base: dict, text: str) -> dict:
 
 
 def _merge_block_extras(blocks: Sequence[Block]) -> dict:
-    table_ranges = [dict(block.extra) for block in blocks if block.extra]
-    if not table_ranges:
+    block_extras = [dict(block.extra) for block in blocks if block.extra]
+    if not block_extras:
         return {}
+
+    ocr_extras = [item for item in block_extras if item.get("source") == "ocr"]
+    if ocr_extras:
+        merged_ocr = dict(ocr_extras[0])
+        bboxes = [
+            item["bbox"]
+            for item in ocr_extras
+            if isinstance(item.get("bbox"), list) and len(item["bbox"]) == 4
+        ]
+        if bboxes:
+            merged_ocr["bbox"] = [
+                min(float(bbox[0]) for bbox in bboxes),
+                min(float(bbox[1]) for bbox in bboxes),
+                max(float(bbox[2]) for bbox in bboxes),
+                max(float(bbox[3]) for bbox in bboxes),
+            ]
+        confidences = [
+            float(item["confidence"])
+            for item in ocr_extras
+            if isinstance(item.get("confidence"), (int, float))
+        ]
+        if confidences:
+            merged_ocr["confidence"] = round(
+                sum(confidences) / len(confidences),
+                4,
+            )
+        return merged_ocr
+
+    table_ranges = block_extras
     if len(table_ranges) == 1:
         return table_ranges[0]
     regions = {

@@ -80,6 +80,48 @@ def _expected_chunks(
     return chunks
 
 
+def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
+    """Compact PDF extraction summary from the parser's structured metadata.
+
+    Returns ``None`` for non-PDF documents or older payloads that pre-date the
+    hybrid OCR metadata. The summary is intentionally bounded: successful page
+    groups become counts, while only failed or skipped page numbers are kept
+    for diagnosis.
+    """
+
+    structured = version.structured_content
+    if not isinstance(structured, dict):
+        return None
+    metadata = structured.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    extraction = metadata.get("pdf_extraction")
+    if not isinstance(extraction, dict):
+        return None
+
+    page_count = extraction.get("page_count")
+    native_text_pages = extraction.get("native_text_pages") or []
+    image_pages = extraction.get("image_pages") or []
+    candidate = extraction.get("ocr_candidate_pages") or []
+    completed = extraction.get("ocr_completed_pages") or []
+    failed = extraction.get("ocr_failed_pages") or []
+    skipped = extraction.get("ocr_skipped_pages") or []
+    return {
+        "version": extraction.get("version"),
+        "engine": extraction.get("engine"),
+        "ocr_status": extraction.get("ocr_status"),
+        "page_count": page_count if isinstance(page_count, int) else None,
+        "native_text_pages": len(native_text_pages)
+        if isinstance(native_text_pages, list)
+        else 0,
+        "image_pages": len(image_pages) if isinstance(image_pages, list) else 0,
+        "ocr_candidate_pages": len(candidate) if isinstance(candidate, list) else 0,
+        "ocr_completed_pages": len(completed) if isinstance(completed, list) else 0,
+        "ocr_failed_pages": failed if isinstance(failed, list) else [],
+        "ocr_skipped_pages": skipped if isinstance(skipped, list) else [],
+    }
+
+
 async def _active_profile(db: AsyncSession) -> EmbeddingProfile | None:
     config = (
         await db.execute(
@@ -220,6 +262,10 @@ async def load_pipeline_statuses(
                 "message": "已提取正文",
                 "last_error": None,
             }
+
+        pdf_extraction = _pdf_extraction_summary(version)
+        if pdf_extraction is not None:
+            parsing = {**parsing, "extraction": pdf_extraction}
 
         chunking = _stage_payload(jobs.get("chunking"))
         if all_chunks:

@@ -9,6 +9,7 @@ from apps.api.parsers import (
     DocxParser,
     MarkdownParser,
     NoteParser,
+    PdfOcrOptions,
     PdfParser,
     TextParser,
     XlsParser,
@@ -371,3 +372,352 @@ class TestOfficeParsers:
         result = PdfParser().parse(source.getvalue())
         assert result.success is True
         assert result.structured_content.metadata["page_count"] == 1
+
+
+def _make_pdf_with_image(
+    page_size: tuple[float, float] = (200.0, 200.0),
+    text_prefix: bytes | None = None,
+) -> bytes:
+    """Construct a minimal one-page PDF containing a 1x1 raster image.
+
+    The page is otherwise blank, so ``pypdf`` reports zero native text and the
+    parser's image probe returns one XObject. ``text_prefix`` lets a single
+    test also exercise the "text plus image" branch without writing a real
+    font/text object.
+    """
+
+    from pypdf import PdfWriter
+    from pypdf.generic import (
+        DecodedStreamObject,
+        DictionaryObject,
+        NameObject,
+        NumberObject,
+    )
+
+    width, height = page_size
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=width, height=height)
+
+    image_stream = DecodedStreamObject()
+    image_stream[NameObject("/Type")] = NameObject("/XObject")
+    image_stream[NameObject("/Subtype")] = NameObject("/Image")
+    image_stream[NameObject("/Width")] = NumberObject(1)
+    image_stream[NameObject("/Height")] = NumberObject(1)
+    image_stream[NameObject("/ColorSpace")] = NameObject("/DeviceRGB")
+    image_stream[NameObject("/BitsPerComponent")] = NumberObject(8)
+    image_stream.set_data(b"\xff\x00\x00")
+    writer._add_object(image_stream)
+    image_ref = image_stream.indirect_reference
+
+    resources = DictionaryObject()
+    xobjects = DictionaryObject()
+    xobjects[NameObject("/Im0")] = image_ref
+    resources[NameObject("/XObject")] = xobjects
+    page[NameObject("/Resources")] = resources
+
+    draw_cmd = f"q {width} 0 0 {height} 0 0 cm /Im0 Do Q".encode("latin-1")
+    payload = draw_cmd + (text_prefix or b"")
+    content_stream = DecodedStreamObject()
+    content_stream.set_data(payload)
+    writer._add_object(content_stream)
+    page[NameObject("/Contents")] = content_stream.indirect_reference
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def _make_pdf_with_text(label: str = "Hello native text") -> bytes:
+    """Construct a one-page PDF whose native text is non-empty."""
+
+    from pypdf import PdfWriter
+    from pypdf.generic import (
+        DecodedStreamObject,
+        DictionaryObject,
+        NameObject,
+    )
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=400, height=400)
+
+    font = DictionaryObject()
+    font[NameObject("/Type")] = NameObject("/Font")
+    font[NameObject("/Subtype")] = NameObject("/Type1")
+    font[NameObject("/BaseFont")] = NameObject("/Helvetica")
+    writer._add_object(font)
+    font_ref = font.indirect_reference
+
+    resources = DictionaryObject()
+    fonts = DictionaryObject()
+    fonts[NameObject("/F1")] = font_ref
+    resources[NameObject("/Font")] = fonts
+    page[NameObject("/Resources")] = resources
+
+    encoded = label.encode("latin-1")
+    content = DecodedStreamObject()
+    content.set_data(b"BT /F1 12 Tf 50 50 Td (" + encoded + b") Tj ET")
+    writer._add_object(content)
+    page[NameObject("/Contents")] = content.indirect_reference
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+class TestPdfOcrOptions:
+    def test_normalized_clamps_out_of_range_values(self):
+        normalized = PdfOcrOptions(
+            enabled=True,
+            language="",
+            dpi=10_000,
+            min_native_chars=0,
+            max_pages=-5,
+            timeout_seconds=0.1,
+        ).normalized()
+        assert normalized.dpi == 600
+        assert normalized.min_native_chars == 1
+        assert normalized.max_pages == 1
+        assert normalized.timeout_seconds == 1.0
+        assert normalized.language == "chi_sim+eng"
+
+
+class TestPdfParserOcr:
+    def test_native_text_page_does_not_invoke_ocr(self):
+        pdf_bytes = _make_pdf_with_text(
+            "Hello native text on this PDF page that is long enough"
+        )
+
+        renderer_called = {"value": False}
+        tesseract_called = {"value": False}
+
+        def renderer_factory(_pdf, _options):
+            def _render(_page):
+                renderer_called["value"] = True
+                raise AssertionError("render should not be called")
+            return _render
+
+        def tesseract_runner(_png, _options):
+            tesseract_called["value"] = True
+            raise AssertionError("tesseract should not be called")
+
+        parser = PdfParser(
+            options=PdfOcrOptions(enabled=True),
+            renderer_factory=renderer_factory,
+            tesseract_runner=tesseract_runner,
+            tesseract_lookup=lambda: "/usr/bin/tesseract",
+        )
+        result = parser.parse(pdf_bytes)
+        assert result.success is True
+        extraction = result.structured_content.metadata["pdf_extraction"]
+        assert extraction["ocr_candidate_pages"] == []
+        assert extraction["ocr_completed_pages"] == []
+        assert extraction["native_text_pages"] == [1]
+        assert not renderer_called["value"]
+        assert not tesseract_called["value"]
+
+    def test_scanned_candidate_page_runs_ocr_via_injected_renderer(self):
+        pdf_bytes = _make_pdf_with_image()
+
+        def renderer_factory(_pdf, _options):
+            def _render(_page):
+                from apps.api.parsers.pdf import _PageRender
+
+                return _PageRender(
+                    width_px=200,
+                    height_px=200,
+                    page_width_pt=200.0,
+                    page_height_pt=200.0,
+                    png=b"\x89PNG\r\n\x1a\nfake-bytes",
+                )
+
+            return _render
+
+        tsv = (
+            b"level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+            b"left\ttop\twidth\theight\tconf\ttext\n"
+            b"1\t1\t0\t0\t0\t0\t0\t0\t200\t200\t-1\t\n"
+            b"5\t1\t1\t1\t1\t1\t10\t20\t40\t20\t92\thello\n"
+            b"5\t1\t1\t1\t1\t2\t60\t20\t50\t20\t90\tworld\n"
+        )
+
+        def tesseract_runner(_png, _options):
+            from subprocess import CompletedProcess
+
+            return CompletedProcess(args=[], returncode=0, stdout=tsv, stderr=b"")
+
+        parser = PdfParser(
+            options=PdfOcrOptions(enabled=True, language="eng", min_native_chars=24),
+            renderer_factory=renderer_factory,
+            tesseract_runner=tesseract_runner,
+            tesseract_lookup=lambda: "/usr/bin/tesseract",
+        )
+        result = parser.parse(pdf_bytes)
+        assert result.success is True
+        assert result.structured_content.full_text() == "hello world"
+        extraction = result.structured_content.metadata["pdf_extraction"]
+        assert extraction["ocr_candidate_pages"] == [1]
+        assert extraction["ocr_completed_pages"] == [1]
+        assert extraction["ocr_failed_pages"] == []
+        assert extraction["ocr_status"] == "completed"
+        ocr_block = result.structured_content.blocks[0]
+        assert ocr_block.extra["source"] == "ocr"
+        assert ocr_block.extra["ocr_engine"] == "tesseract"
+        assert ocr_block.extra["bbox"] == [10.0, 160.0, 110.0, 180.0]
+        assert 0 < ocr_block.extra["confidence"] <= 1
+
+    def test_single_page_ocr_failure_still_succeeds(self):
+        from subprocess import CompletedProcess
+
+        from pypdf import PdfReader, PdfWriter
+
+        from apps.api.parsers.pdf import _PageRender
+
+        # Two image-only pages so we can verify one bad page does not abort.
+        writer = PdfWriter()
+        writer.add_page(PdfReader(BytesIO(_make_pdf_with_image())).pages[0])
+        writer.add_page(PdfReader(BytesIO(_make_pdf_with_image())).pages[0])
+        source = BytesIO()
+        writer.write(source)
+
+        def renderer_factory(_pdf, _options):
+            def _render(_page):
+                return _PageRender(
+                    width_px=200,
+                    height_px=200,
+                    page_width_pt=200.0,
+                    page_height_pt=200.0,
+                    png=b"\x89PNG\r\n\x1a\nfake",
+                )
+
+            return _render
+
+        calls = {"n": 0}
+
+        def tesseract_runner(_png, _options):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"")
+            tsv = (
+                b"level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+                b"left\ttop\twidth\theight\tconf\ttext\n"
+                b"5\t1\t1\t1\t1\t1\t5\t5\t40\t20\t88\trecovered\n"
+            )
+            return CompletedProcess(args=[], returncode=0, stdout=tsv, stderr=b"")
+
+        parser = PdfParser(
+            options=PdfOcrOptions(enabled=True, language="eng", min_native_chars=24),
+            renderer_factory=renderer_factory,
+            tesseract_runner=tesseract_runner,
+            tesseract_lookup=lambda: "/usr/bin/tesseract",
+        )
+        result = parser.parse(source.getvalue())
+        assert result.success is True
+        extraction = result.structured_content.metadata["pdf_extraction"]
+        assert extraction["ocr_candidate_pages"] == [1, 2]
+        assert extraction["ocr_completed_pages"] == [2]
+        assert extraction["ocr_failed_pages"] == [1]
+        assert result.structured_content.full_text() == "recovered"
+
+    def test_disabled_options_record_skipped_pages(self):
+        pdf_bytes = _make_pdf_with_image()
+
+        parser = PdfParser(options=PdfOcrOptions(enabled=False))
+        result = parser.parse(pdf_bytes)
+        assert result.success is True
+        extraction = result.structured_content.metadata["pdf_extraction"]
+        assert extraction["ocr_candidate_pages"] == [1]
+        assert extraction["ocr_skipped_pages"] == [1]
+        assert extraction["ocr_completed_pages"] == []
+        assert extraction["ocr_status"] == "skipped"
+        reasons = extraction.get("ocr_skipped_reasons", {})
+        assert "disabled" in reasons
+
+    def test_missing_dependencies_record_skipped_pages(self, monkeypatch):
+        pdf_bytes = _make_pdf_with_image()
+
+        monkeypatch.setattr("apps.api.parsers.pdf.shutil.which", lambda _name: None)
+
+        parser = PdfParser(
+            options=PdfOcrOptions(enabled=True),
+            tesseract_lookup=lambda: None,
+        )
+        result = parser.parse(pdf_bytes)
+        assert result.success is True
+        extraction = result.structured_content.metadata["pdf_extraction"]
+        assert extraction["ocr_candidate_pages"] == [1]
+        assert extraction["ocr_skipped_pages"] == [1]
+        assert extraction["ocr_completed_pages"] == []
+        assert extraction["ocr_status"] == "skipped"
+        reasons = extraction.get("ocr_skipped_reasons", {})
+        assert "dependencies_unavailable" in reasons
+
+    def test_missing_dependencies_when_pypdfium2_missing(self, monkeypatch):
+        import builtins
+
+        original_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "pypdfium2" or name.startswith("pypdfium2."):
+                raise ImportError("pypdfium2 not available in test env")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        monkeypatch.setattr("apps.api.parsers.pdf.shutil.which", lambda _name: "/usr/bin/tesseract")
+
+        pdf_bytes = _make_pdf_with_image()
+        parser = PdfParser(options=PdfOcrOptions(enabled=True))
+        result = parser.parse(pdf_bytes)
+        assert result.success is True
+        extraction = result.structured_content.metadata["pdf_extraction"]
+        assert extraction["ocr_candidate_pages"] == [1]
+        assert extraction["ocr_skipped_pages"] == [1]
+        assert extraction["ocr_completed_pages"] == []
+        reasons = extraction.get("ocr_skipped_reasons", {})
+        assert "dependencies_unavailable" in reasons
+
+    def test_ocr_disabled_does_not_require_pypdfium2(self, monkeypatch):
+        import builtins
+
+        original_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "pypdfium2" or name.startswith("pypdfium2."):
+                raise ImportError("pypdfium2 not available in test env")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        monkeypatch.setattr("apps.api.parsers.pdf.shutil.which", lambda _name: None)
+
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        source = BytesIO()
+        writer.write(source)
+
+        parser = PdfParser(options=PdfOcrOptions(enabled=False))
+        result = parser.parse(source.getvalue())
+        assert result.success is True
+        assert result.structured_content.metadata["page_count"] == 1
+
+
+class TestGetParserForContentOcr:
+    def test_pdf_parser_receives_options_via_get_parser(self):
+        from apps.api.parsers.base import get_parser_for_content
+        from apps.api.parsers.pdf import PdfOcrOptions
+
+        options = PdfOcrOptions(enabled=True, language="eng", max_pages=7)
+        parser = get_parser_for_content(
+            "application/pdf", "scan.pdf", pdf_ocr_options=options
+        )
+        assert isinstance(parser, PdfParser)
+        assert parser._options.language == "eng"
+        assert parser._options.max_pages == 7
+
+    def test_get_parser_for_content_without_options_remains_compatible(self):
+        from apps.api.parsers.base import get_parser_for_content
+
+        parser = get_parser_for_content("application/pdf", "doc.pdf")
+        assert isinstance(parser, PdfParser)
+        assert parser._options.enabled is False
+        assert parser._options.language == "chi_sim+eng"

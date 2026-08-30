@@ -48,6 +48,7 @@ from apps.api.models.taxonomy import (
 from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.api.parsers import get_parser_for_content
 from apps.api.parsers.base import StructuredContent
+from apps.api.parsers.pdf import PdfOcrOptions
 from apps.api.security import (
     URLFetchError,
     URLSecurityError,
@@ -69,7 +70,7 @@ from apps.api.services.structured_table import (
 from apps.api.services.webdav import WebDAVError, download_file
 from apps.api.services.workspaces import bind_workspace_context, clear_workspace_context
 from apps.api.storage.local import LocalBlobStorage
-from apps.worker.core.config import settings
+from apps.worker.core.config import pdf_ocr_options_summary, settings
 
 logger = structlog.get_logger()
 
@@ -93,6 +94,18 @@ CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
 TERMINAL_PARSE_FAILURE_REASONS = frozenset({"spreadsheet_limit_exceeded"})
+
+
+def _build_pdf_ocr_options() -> PdfOcrOptions:
+    summary = pdf_ocr_options_summary()
+    return PdfOcrOptions(
+        enabled=summary["enabled"],
+        language=summary["language"],
+        dpi=summary["dpi"],
+        min_native_chars=summary["min_native_chars"],
+        max_pages=summary["max_pages"],
+        timeout_seconds=summary["timeout_seconds"],
+    )
 
 
 def utc_now() -> datetime.datetime:
@@ -1730,9 +1743,11 @@ def _process_parsing(
             content_bytes, content_type, filename = loaded
 
         try:
+            pdf_ocr_options = _build_pdf_ocr_options()
             parser = get_parser_for_content(
                 content_type,
                 filename,
+                pdf_ocr_options=pdf_ocr_options,
             )
             result = parser.parse(content_bytes, content_type)
         except Exception as exc:
@@ -1763,6 +1778,7 @@ def _process_parsing(
             )
 
         structured_content = result.structured_content
+        _log_pdf_ocr_summary(document, version, structured_content)
         if (
             document.source_type == DocumentSourceType.url
             and len(structured_content.full_text().strip()) < MIN_USEFUL_URL_TEXT_LENGTH
@@ -1868,6 +1884,44 @@ def _release_webdav_source_blob(
     session.delete(blob)
     session.commit()
     LocalBlobStorage(settings.storage_path).delete(storage_key)
+
+
+def _log_pdf_ocr_summary(
+    document: Document,
+    version: DocumentVersion,
+    structured: StructuredContent,
+) -> None:
+    """Emit a compact PDF extraction summary when a PDF was just parsed.
+
+    Parsers that do not produce ``pdf_extraction`` metadata are skipped so the
+    log stays useful even when the parser pipeline falls back to a generic
+    type. Failed or skipped pages are listed by number rather than dumping
+    per-page detail to keep the line bounded.
+    """
+
+    metadata = structured.metadata if isinstance(structured.metadata, dict) else {}
+    summary = metadata.get("pdf_extraction")
+    if not isinstance(summary, dict):
+        return
+    def _count_pages(key: str) -> int:
+        pages = summary.get(key)
+        return len(pages) if isinstance(pages, list) else 0
+
+    logger.info(
+        "pdf_ocr_summary",
+        document_id=document.id,
+        version_id=version.id,
+        version=summary.get("version"),
+        engine=summary.get("engine"),
+        page_count=summary.get("page_count"),
+        native_text_page_count=_count_pages("native_text_pages"),
+        image_page_count=_count_pages("image_pages"),
+        ocr_candidate_page_count=_count_pages("ocr_candidate_pages"),
+        ocr_completed_page_count=_count_pages("ocr_completed_pages"),
+        ocr_failed_pages=summary.get("ocr_failed_pages"),
+        ocr_skipped_pages=summary.get("ocr_skipped_pages"),
+        ocr_status=summary.get("ocr_status"),
+    )
 
 
 def _apply_parse_result(

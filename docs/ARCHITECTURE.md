@@ -126,6 +126,23 @@ PDF、Word、Markdown、网页和随手记按章节、条款、段落、列表�
 原文件始终可下载。浏览时优先使用原生 PDF；Word 等格式可生成一次性 PDF 预览，
 预览不是事实源。Markdown 使用安全渲染；引用通过文档版本和切片位置回到原文。
 
+### 5.1.1 扫描 PDF 的文字兜底
+
+PDF 解析默认走 `pypdf` 的可复制文本通道；只有当一页去除空白后非空字符
+数低于 `PDF_OCR_MIN_NATIVE_CHARS`、且该页资源里至少有一个 `/XObject` 图像
+时，才被视作扫描候选页。Worker 容器安装 `pypdfium2` 与 `tesseract-ocr`
+（含 `chi_sim`、`eng` 训练数据），按 `PDF_OCR_DPI` 渲染候选页为 PNG，
+通过 `tesseract stdin stdout -l <lang> --psm 6 tsv` 拿到词级结果，再按
+`block_num/par_num/line_num` 聚合成行级段落。词级坐标转换为 PDF 点坐标
+（Y 轴向上），作为 `extra.bbox` 保留在切片元数据里。
+
+OCR 关闭、依赖缺失或超过 `PDF_OCR_MAX_PAGES` 候选页时，按页记录到
+`metadata.pdf_extraction.ocr_skipped_pages` 与 `ocr_skipped_reasons`，
+整体解析仍标记为成功，原始 PDF 不受影响。结构化 `pdf_extraction` 摘要
+会附加在 `processing_status` 的 `parsing.extraction` 上，文档详情页
+展示原生文字页、OCR 完成、失败、跳过数量，失败不阻塞其余阶段。图片
+语义理解、图表识别与版面重建仍属后续阶段。
+
 ### 5.2 数据集引擎
 
 XLS/XLSX 二维数据仍属于文档生命周期，但精确查询不依赖普通文本切片：

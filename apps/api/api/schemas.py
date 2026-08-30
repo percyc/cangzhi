@@ -143,6 +143,7 @@ class ProcessingStageResponse(BaseModel):
     status: str
     message: str
     last_error: str | None = None
+    extraction: dict[str, Any] | None = None
 
 
 class ChunkingStageResponse(ProcessingStageResponse):

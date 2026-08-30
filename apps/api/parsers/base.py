@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from .pdf import PdfOcrOptions
 
 BlockType = Literal[
     "heading",
@@ -85,17 +88,26 @@ class BaseParser(abc.ABC):
 def get_parser_for_content(
     content_type: str | None,
     file_name: str | None = None,
+    *,
+    pdf_ocr_options: PdfOcrOptions | None = None,
 ) -> BaseParser:
     from .doc import DocParser
     from .docx import DocxParser
     from .html import HtmlParser
     from .markdown import MarkdownParser
     from .note import NoteParser
-    from .pdf import PdfParser
+    from .pdf import PdfOcrOptions, PdfParser
     from .spreadsheet import XlsParser, XlsxParser
     from .text import TextParser
 
     content_type = (content_type or "").lower()
+
+    def _pdf() -> PdfParser:
+        if pdf_ocr_options is None:
+            return PdfParser()
+        if isinstance(pdf_ocr_options, PdfOcrOptions):
+            return PdfParser(options=pdf_ocr_options)
+        return PdfParser(options=PdfOcrOptions(**dict(pdf_ocr_options)))
 
     # Check specific extensions first
     if file_name:
@@ -103,7 +115,7 @@ def get_parser_for_content(
         if lower_name.endswith((".md", ".markdown")):
             return MarkdownParser()
         if lower_name.endswith(".pdf"):
-            return PdfParser()
+            return _pdf()
         if lower_name.endswith(".doc"):
             return DocParser()
         if lower_name.endswith(".docx"):
@@ -122,7 +134,7 @@ def get_parser_for_content(
     if "text/markdown" in content_type or "markdown" in content_type:
         return MarkdownParser()
     if "application/pdf" in content_type:
-        return PdfParser()
+        return _pdf()
     if content_type in {
         "application/msword",
         "application/doc",

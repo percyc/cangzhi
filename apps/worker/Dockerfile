@@ -7,6 +7,9 @@ RUN apt-get update \
         fonts-liberation \
         fonts-noto-cjk \
         libreoffice-writer \
+        tesseract-ocr \
+        tesseract-ocr-chi-sim \
+        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 COPY apps/api/requirements.txt ./apps/api/
