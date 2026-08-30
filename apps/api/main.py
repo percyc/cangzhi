@@ -35,6 +35,7 @@ from .api import (
     search,
     settings_ai,
     sources,
+    system,
     v1,
     webdav,
     workspaces,
@@ -120,6 +121,7 @@ app.include_router(embeddings.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(webdav.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(exports.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(workspaces.router, prefix="/api", dependencies=_admin_dep)
+app.include_router(system.router, prefix="/api", dependencies=_admin_dep)
 
 
 @app.get("/")
