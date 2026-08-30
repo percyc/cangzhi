@@ -21,14 +21,33 @@ const nextConfig = {
   env: {
     NEXT_PUBLIC_CANGZHI_WEB_BASE_PATH: basePath,
   },
+  async redirects() {
+    if (!basePath) return []
+    return [
+      {
+        source: '/',
+        destination: `${basePath}/documents`,
+        permanent: false,
+        basePath: false,
+      },
+    ]
+  },
   async rewrites() {
     const apiUrl = process.env.API_URL || 'http://localhost:8000'
-    return [
+    const routes = [
       {
         source: '/api/:path*',
         destination: `${apiUrl}/api/:path*`,
       },
     ]
+    if (basePath) {
+      routes.push({
+        source: '/api/:path*',
+        destination: `${apiUrl}/api/:path*`,
+        basePath: false,
+      })
+    }
+    return routes
   },
 }
 

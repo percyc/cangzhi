@@ -190,7 +190,7 @@ make install          # 安装本地开发依赖
 
 ### 健康检查
 
-- Web：`GET http://localhost:3000/api/health`
+- Web：`GET http://localhost:3000/_cangzhi/api/health`（自定义 `CANGZHI_WEB_BASE_PATH` 时替换 `/_cangzhi`；访问端口根路径会自动跳转到 Web 入口）
 - API liveness：`GET http://localhost:8000/api/liveness`
 - API readiness：`GET http://localhost:8000/api/readiness`
 

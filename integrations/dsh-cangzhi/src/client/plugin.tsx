@@ -92,6 +92,7 @@ const en = {
 
 interface ConsoleSnapshot {
   readonly open: boolean
+  readonly knowledgeOpen: boolean
 }
 
 interface ConsoleSource {
@@ -103,13 +104,15 @@ interface ConsoleFace {
   hooks: { cangzhiConsole: ConsoleSource }
   openConsole(): void
   closeConsole(): void
+  openKnowledge(): void
+  closeKnowledge(): void
 }
 
 function createConsoleFace(): ConsoleFace {
-  let snapshot: ConsoleSnapshot = { open: false }
+  let snapshot: ConsoleSnapshot = { open: false, knowledgeOpen: false }
   const listeners = new Set<() => void>()
   const publish = (next: ConsoleSnapshot): void => {
-    if (next.open === snapshot.open) return
+    if (next.open === snapshot.open && next.knowledgeOpen === snapshot.knowledgeOpen) return
     snapshot = next
     for (const listener of listeners) listener()
   }
@@ -122,8 +125,10 @@ function createConsoleFace(): ConsoleFace {
   }
   return {
     hooks: { cangzhiConsole: source },
-    openConsole: () => { publish({ ...snapshot, open: true }) },
+    openConsole: () => { publish({ open: true, knowledgeOpen: false }) },
     closeConsole: () => { publish({ ...snapshot, open: false }) },
+    openKnowledge: () => { publish({ open: false, knowledgeOpen: true }) },
+    closeKnowledge: () => { publish({ ...snapshot, knowledgeOpen: false }) },
   }
 }
 
@@ -133,10 +138,6 @@ function CangzhiMark({ size, className }: { size: number; className?: string }) 
 
 function CangzhiBrandName() {
   return <span className={css.cangzhiBrandName}><strong>藏知</strong><small>DSH</small></span>
-}
-
-function CangzhiHeadline() {
-  return <>和你的知识聊聊</>
 }
 
 function CangzhiDocumentTitle() {
@@ -155,12 +156,27 @@ function CangzhiDocumentTitle() {
   return null
 }
 
+function setWorkspaceCookie(slug: string): void {
+  document.cookie = `cangzhi_workspace=${encodeURIComponent(slug)}; Path=/; Max-Age=31536000; SameSite=Lax`
+}
+
+async function syncModelWorkspace(slug: string): Promise<void> {
+  const response = await fetch('/_cangzhi-plugin/workspace', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ slug }),
+  })
+  if (!response.ok) throw new Error(await errorMessage(response, '模型知识空间切换失败'))
+  window.dispatchEvent(new CustomEvent('cangzhi-workspace-changed', { detail: { slug } }))
+}
+
 type HomeIntegrationProps = InjectFace<ConsoleFace>
 
-function HomeIntegration({ openConsole }: HomeIntegrationProps) {
+function HomeIntegration({ openConsole, openKnowledge }: HomeIntegrationProps) {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [plugin, setPlugin] = useState<PluginStatus | null>(null)
-  const [stats, setStats] = useState({ documents: 0, categories: 0, processing: 0 })
+  const [workspace, setWorkspace] = useState<Workspace | null>(null)
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -176,18 +192,15 @@ function HomeIntegration({ openConsole }: HomeIntegrationProps) {
     setAuth(authValue)
     if (pluginResponse.ok) setPlugin(await pluginResponse.json() as PluginStatus)
     if (!authValue.authenticated) return
-    const [documentsResponse, categoriesResponse] = await Promise.all([
-      fetch(`${API}/documents/overview?limit=200&offset=0&include_processing=true`, { credentials: 'include', cache: 'no-store' }),
-      fetch(`${API}/categories`, { credentials: 'include', cache: 'no-store' }),
+    const [workspaceResponse, workspacesResponse] = await Promise.all([
+      fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+      fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
     ])
-    if (!documentsResponse.ok || !categoriesResponse.ok) return
-    const documents = await documentsResponse.json() as DocumentItem[]
-    const categories = await categoriesResponse.json() as Category[]
-    setStats({
-      documents: Number(documentsResponse.headers.get('x-total-count') ?? documents.length),
-      categories: categories.length,
-      processing: documents.filter(item => ['processing', 'created', 'retry'].includes(statusOf(item))).length,
-    })
+    if (!workspaceResponse.ok || !workspacesResponse.ok) return
+    const currentWorkspace = await workspaceResponse.json() as Workspace
+    setWorkspace(currentWorkspace)
+    setWorkspaces(await workspacesResponse.json() as Workspace[])
+    await syncModelWorkspace(currentWorkspace.slug)
   }
   useEffect(() => { void load().catch(() => { setNotice('藏知服务暂时不可用') }) }, [])
 
@@ -219,6 +232,19 @@ function HomeIntegration({ openConsole }: HomeIntegrationProps) {
     }
     setNotice('上传完成，已进入知识处理队列'); setBusy(false); await load()
   }
+  const switchWorkspace = async (slug: string) => {
+    const next = workspaces.find(item => item.slug === slug)
+    if (next === undefined || next.slug === workspace?.slug) return
+    setBusy(true); setNotice('正在切换知识空间…')
+    try {
+      setWorkspaceCookie(next.slug)
+      await syncModelWorkspace(next.slug)
+      setWorkspace(next)
+      setNotice(`已切换到“${next.name}”，新会话将使用这个空间`)
+      await load()
+    } catch (caught) { setNotice(caught instanceof Error ? caught.message : '知识空间切换失败') }
+    finally { setBusy(false) }
+  }
 
   if (auth === null) return <section className={css.homeIntegration}><div className={css.homeLoading}>正在连接藏知知识库…</div></section>
   if (!auth.authenticated) return <section className={css.homeIntegration} data-state="login">
@@ -227,23 +253,93 @@ function HomeIntegration({ openConsole }: HomeIntegrationProps) {
     {notice && <p className={css.homeNotice}>{notice}</p>}
   </section>
   return <section className={css.homeIntegration} data-state="ready">
-    <div className={css.homeTop}><div className={css.homeIntro}><CangzhiMark size={38}/><div><strong>你的藏知知识库</strong><small>{plugin?.mcpConfigured ? '已接入当前 DSH 对话' : '管理服务已连接，尚未启用模型检索'}</small></div></div><span className={css.homeConnection} data-ok={String(Boolean(plugin?.mcpConfigured))}>{plugin?.mcpConfigured ? '对话已连接' : '等待认证'}</span></div>
-    <div className={css.homeStats}><span><strong>{stats.documents}</strong> 份资料</span><span><strong>{stats.categories}</strong> 个分类</span><span><strong>{stats.processing}</strong> 项处理中</span></div>
+    <div className={css.homeTop}><div className={css.homeIntro}><CangzhiMark size={30}/><div><strong>知识范围</strong><small>决定模型从哪些藏知资料中检索和引用</small></div></div><span className={css.homeConnection} data-ok={String(Boolean(plugin?.mcpConfigured))}>{plugin?.mcpConfigured ? '模型检索已连接' : '等待连接'}</span></div>
+    <label className={css.homeWorkspace}><span>知识空间</span><div><CangzhiMark size={20}/><select value={workspace?.slug ?? 'default'} disabled={busy} onChange={event => void switchWorkspace(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select></div><small>只控制知识检索，不改变上方运行项目的本地文件与权限</small></label>
     <div className={css.homeActions}>
       {!plugin?.mcpConfigured && <button className={css.homePrimary} disabled={busy} onClick={() => void connect()}>{busy ? '连接中…' : '启用模型检索'}</button>}
       <input ref={fileInput} type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple hidden onChange={event => void upload(event.target.files)}/>
-      <button disabled={busy} onClick={() => fileInput.current?.click()}>上传知识</button><button onClick={openConsole}>管理知识库</button>
+      <button onClick={openKnowledge}>浏览资料</button><button disabled={busy} onClick={() => fileInput.current?.click()}>上传知识</button><button onClick={openConsole}>管理知识库</button>
     </div>
     {notice && <p className={css.homeNotice}>{notice}</p>}
   </section>
 }
 
-function KnowledgeDock({ openConsole }: HomeIntegrationProps) {
+type KnowledgeDockProps = PropsRuntime<'conversation.input.dock'> & InjectFace<ConsoleFace>
+
+function KnowledgeDock({ openKnowledge, inputActions }: KnowledgeDockProps) {
   const [status, setStatus] = useState<PluginStatus | null>(null)
-  useEffect(() => { void fetch('/_cangzhi-plugin/status', { cache: 'no-store' }).then(async response => { if (response.ok) setStatus(await response.json() as PluginStatus) }) }, [])
-  return <div className={css.knowledgeDock}>
-    <CangzhiMark size={22}/><span><strong>藏知</strong>{status?.mcpConfigured ? '已连接，可在对话中检索知识库' : '尚未认证，返回新对话首页完成连接'}</span><button onClick={openConsole}>知识库</button>
-  </div>
+  const [workspace, setWorkspace] = useState<Workspace | null>(null)
+  const [expanded, setExpanded] = useState(false)
+  const load = async () => {
+    const [statusResponse, workspaceResponse] = await Promise.all([
+      fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
+      fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+    ])
+    if (statusResponse.ok) setStatus(await statusResponse.json() as PluginStatus)
+    if (workspaceResponse.ok) setWorkspace(await workspaceResponse.json() as Workspace)
+  }
+  useEffect(() => {
+    void load()
+    const update = () => { void load() }
+    const useDocument = (event: Event) => {
+      const detail = (event as CustomEvent<{ prompt?: string }>).detail
+      if (typeof detail?.prompt === 'string') inputActions.setDraft(detail.prompt)
+    }
+    window.addEventListener('cangzhi-workspace-changed', update)
+    window.addEventListener('cangzhi-use-document', useDocument)
+    return () => {
+      window.removeEventListener('cangzhi-workspace-changed', update)
+      window.removeEventListener('cangzhi-use-document', useDocument)
+    }
+  }, [inputActions])
+  const suggestions = [
+    { label: '基于知识回答', prompt: '请优先检索当前藏知空间，基于找到的证据回答，并在关键结论后标注来源。\n\n' },
+    { label: '总结近期资料', prompt: '请列出当前藏知空间最近更新的资料，归纳核心主题，并附上来源。' },
+    { label: '对比多份资料', prompt: '请在当前藏知空间中寻找与以下主题相关的多份资料，对比它们的共同点、差异和依据：\n\n' },
+  ]
+  return <section className={css.knowledgeDock} data-expanded={String(expanded)}>
+    <div className={css.knowledgeDockTop}><CangzhiMark size={23}/><div className={css.knowledgeDockTitle}><span><strong>知识增强</strong><i data-ok={String(Boolean(status?.mcpConfigured))}/></span><small>{workspace?.name ?? status?.activeWorkspace ?? '默认空间'} · {status?.mcpConfigured ? '模型会主动检索并引用证据' : '尚未连接模型工具'}</small></div><button className={css.dockLibraryButton} onClick={openKnowledge}>搜资料</button><button className={css.dockToggle} aria-label={expanded ? '收起知识建议' : '展开知识建议'} onClick={() => setExpanded(value => !value)}>{expanded ? '⌃' : '⌄'}</button></div>
+    {expanded && <div className={css.knowledgePrompts}><span>试着这样问</span>{suggestions.map(item => <button key={item.label} disabled={!status?.mcpConfigured} onClick={() => inputActions.setDraft(item.prompt)}>{item.label}</button>)}</div>}
+  </section>
+}
+
+type ConversationKnowledgeHeaderProps = PropsRuntime<'conversation.session.header.actions'> & InjectFace<ConsoleFace>
+
+function ConversationKnowledgeHeader({ openKnowledge }: ConversationKnowledgeHeaderProps) {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [current, setCurrent] = useState<Workspace | null>(null)
+  const [configured, setConfigured] = useState(false)
+  const [activeSlug, setActiveSlug] = useState('default')
+  const [busy, setBusy] = useState(false)
+  const load = async () => {
+    const [statusResponse, listResponse, currentResponse] = await Promise.all([
+      fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
+      fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
+      fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+    ])
+    if (statusResponse.ok) {
+      const status = await statusResponse.json() as PluginStatus
+      setConfigured(status.mcpConfigured)
+      setActiveSlug(status.activeWorkspace ?? 'default')
+    }
+    if (listResponse.ok) setWorkspaces(await listResponse.json() as Workspace[])
+    if (currentResponse.ok) setCurrent(await currentResponse.json() as Workspace)
+  }
+  useEffect(() => {
+    void load()
+    const update = () => { void load() }
+    window.addEventListener('cangzhi-workspace-changed', update)
+    return () => window.removeEventListener('cangzhi-workspace-changed', update)
+  }, [])
+  const change = async (slug: string) => {
+    const next = workspaces.find(item => item.slug === slug)
+    if (next === undefined || next.slug === current?.slug) return
+    setBusy(true)
+    try { setWorkspaceCookie(slug); await syncModelWorkspace(slug); setCurrent(next) }
+    finally { setBusy(false) }
+  }
+  if (current === null) return <button className={css.conversationKnowledgeFallback} onClick={openKnowledge}><CangzhiMark size={18}/>{configured ? `藏知 · ${activeSlug}` : '连接藏知'}</button>
+  return <div className={css.conversationKnowledgeHeader} title="页面与模型工具会同步切换知识空间"><CangzhiMark size={18}/><i data-ok={String(configured)}/><span>知识空间</span><select value={current.slug} disabled={busy} onChange={event => void change(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select><button aria-label="搜索藏知资料" onClick={openKnowledge}>⌕</button></div>
 }
 
 type ConsoleActionProps = PropsRuntime<'sidebar.footer.action'>
@@ -269,6 +365,7 @@ function ConsoleAction({ wide, useCangzhiConsole, openConsole, t }: ConsoleActio
 }
 
 type AuthState = { authenticated: boolean; setup_required?: boolean; admin?: { username: string } | null }
+type Workspace = { id: number; slug: string; name: string; description?: string | null; is_default: boolean; status: 'active' | 'archived'; created_at?: string | null }
 type Category = { id: number; name: string; slug: string; description?: string | null; document_count: number; is_default: boolean }
 type DocumentItem = {
   id: number
@@ -280,8 +377,8 @@ type DocumentItem = {
   current_version?: { processing_status: string } | null
   pipeline?: { overall_status: string } | null
 }
-type PluginStatus = { mcpConfigured: boolean; toolCount: number }
-type Tab = 'overview' | 'search' | 'documents' | 'create' | 'upload' | 'categories' | 'connect'
+type PluginStatus = { mcpConfigured: boolean; toolCount: number; activeWorkspace?: string }
+type Tab = 'overview' | 'search' | 'documents' | 'create' | 'upload' | 'categories' | 'spaces' | 'connect'
 
 async function errorMessage(response: Response, fallback: string): Promise<string> {
   const value = await response.json().catch(() => null) as { detail?: string | { message?: string } } | null
@@ -325,6 +422,8 @@ function NativeWorkspace() {
   const [tab, setTab] = useState<Tab>('overview')
   const [documents, setDocuments] = useState<DocumentItem[]>([])
   const [categories, setCategories] = useState<Category[]>([])
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null)
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -338,55 +437,86 @@ function NativeWorkspace() {
       const pluginResponse = await fetch('/_cangzhi-plugin/status', { cache: 'no-store' })
       if (pluginResponse.ok) setPlugin(await pluginResponse.json() as PluginStatus)
       if (authValue.authenticated) {
-        const [documentResponse, categoryResponse] = await Promise.all([
+        const [documentResponse, categoryResponse, workspacesResponse, currentWorkspaceResponse] = await Promise.all([
           fetch(`${API}/documents/overview?limit=200&offset=0&include_processing=true`, { credentials: 'include', cache: 'no-store' }),
           fetch(`${API}/categories`, { credentials: 'include', cache: 'no-store' }),
+          fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
+          fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
         ])
-        if (!documentResponse.ok || !categoryResponse.ok) throw new Error('知识库读取失败')
+        if (!documentResponse.ok || !categoryResponse.ok || !workspacesResponse.ok || !currentWorkspaceResponse.ok) throw new Error('知识库读取失败')
         setDocuments(await documentResponse.json() as DocumentItem[])
         setTotal(Number(documentResponse.headers.get('x-total-count') ?? 0))
         setCategories(await categoryResponse.json() as Category[])
+        setWorkspaces(await workspacesResponse.json() as Workspace[])
+        const current = await currentWorkspaceResponse.json() as Workspace
+        setCurrentWorkspace(current)
+        await syncModelWorkspace(current.slug)
       }
     } catch (caught) { setError(caught instanceof Error ? caught.message : '藏知服务不可用') }
     finally { setLoading(false) }
   }
   useEffect(() => { void refresh() }, [])
   const logout = async () => { await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' }); setAuth({ authenticated: false, admin: null }) }
+  const switchWorkspace = async (slug: string) => {
+    const next = workspaces.find(item => item.slug === slug && item.status === 'active')
+    if (slug === currentWorkspace?.slug || (workspaces.some(item => item.slug === slug) && next === undefined)) return
+    setLoading(true); setError('')
+    try {
+      setWorkspaceCookie(next.slug)
+      await syncModelWorkspace(next.slug)
+      setCurrentWorkspace(next ?? null)
+      setTab('overview')
+      await refresh()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '知识空间切换失败')
+      setLoading(false)
+    }
+  }
   if (loading && auth === null) return <div className={css.centerState}>正在连接藏知…</div>
   if (auth !== null && !auth.authenticated) return <LoginPanel onAuthenticated={() => void refresh()} />
-  const visible = documents.filter(item => item.title.toLowerCase().includes(query.trim().toLowerCase()))
   return <div className={css.workspace}>
     <aside className={css.workspaceNav}>
       <div className={css.brand}><span>▤</span><div><strong>藏知</strong><small>Knowledge for DSH</small></div></div>
-      {([['overview', '总览'], ['search', '搜索知识'], ['documents', '知识库'], ['create', '链接与随手记'], ['upload', '上传资料'], ['categories', '分类管理'], ['connect', '对话接入']] as const).map(([key, label]) =>
-        <button key={key} data-active={String(tab === key)} onClick={() => setTab(key)}>{label}</button>)}
+      <label className={css.workspaceSelector}><span>当前知识空间</span><select value={currentWorkspace?.slug ?? 'default'} disabled={loading} onChange={event => void switchWorkspace(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option value={item.slug} key={item.id}>{item.name}</option>)}</select><small>{currentWorkspace?.description || '内容与模型检索在空间之间隔离'}</small></label>
+      <p className={css.navSection}>知识工作</p>
+      {([['overview', '⌂', '总览'], ['search', '⌕', '搜索知识'], ['documents', '▤', '资料库'], ['create', '✎', '快速收录'], ['upload', '⇧', '上传资料']] as const).map(([key, icon, label]) =>
+        <button key={key} data-active={String(tab === key)} onClick={() => setTab(key)}><span>{icon}</span>{label}</button>)}
+      <p className={css.navSection}>组织与连接</p>
+      {([['categories', '◇', '分类管理'], ['spaces', '▦', '知识空间'], ['connect', '↗', '对话接入']] as const).map(([key, icon, label]) =>
+        <button key={key} data-active={String(tab === key)} onClick={() => setTab(key)}><span>{icon}</span>{label}</button>)}
       <div className={css.connectionCard}>
         <span data-ok={String(Boolean(plugin?.mcpConfigured))} />
         <div><strong>{plugin?.mcpConfigured ? '对话检索已连接' : '管理已连接'}</strong><small>{plugin?.mcpConfigured ? `${plugin.toolCount} 个模型工具可用` : '配置 PAT 后启用模型工具'}</small></div>
       </div>
     </aside>
     <main className={css.workspaceMain}>
-      <div className={css.pageHeader}><div><h2>{tab === 'overview' ? '知识工作台' : tab === 'search' ? '搜索知识' : tab === 'documents' ? '知识库' : tab === 'create' ? '链接与随手记' : tab === 'upload' ? '上传资料' : tab === 'categories' ? '分类管理' : '对话接入'}</h2><p>你好，{auth?.admin?.username ?? '管理员'}</p></div><div className={css.headerActions}><button className={css.refreshButton} onClick={() => void refresh()}>刷新</button><button className={css.refreshButton} onClick={() => void logout()}>退出</button></div></div>
+      <div className={css.pageHeader}><div><span className={css.pageEyebrow}>{currentWorkspace?.name ?? '知识空间'}</span><h2>{tab === 'overview' ? '知识工作台' : tab === 'search' ? '搜索知识' : tab === 'documents' ? '资料库' : tab === 'create' ? '快速收录' : tab === 'upload' ? '上传资料' : tab === 'categories' ? '分类管理' : tab === 'spaces' ? '知识空间' : '对话接入'}</h2><p>{tab === 'overview' ? `你好，${auth?.admin?.username ?? '管理员'}。从这里开始沉淀、整理和使用知识。` : currentWorkspace?.description || '当前操作仅作用于所选知识空间'}</p></div><div className={css.headerActions}><button className={css.refreshButton} disabled={loading} onClick={() => void refresh()}>{loading ? '刷新中…' : '刷新'}</button><button className={css.refreshButton} onClick={() => void logout()}>退出</button></div></div>
       {error && <div className={css.errorBanner}>{error}</div>}
-      {tab === 'overview' && <Overview documents={documents} categories={categories} total={total} mcp={plugin?.mcpConfigured ?? false} go={setTab} />}
+      {tab === 'overview' && <Overview documents={documents} categories={categories} total={total} mcp={plugin?.mcpConfigured ?? false} workspace={currentWorkspace} go={setTab} />}
       {tab === 'search' && <KnowledgeSearch />}
-      {tab === 'documents' && <Documents documents={visible} query={query} setQuery={setQuery} refresh={refresh} />}
+      {tab === 'documents' && <Documents documents={documents} categories={categories} query={query} setQuery={setQuery} refresh={refresh} />}
       {tab === 'create' && <CreateKnowledge refresh={refresh} done={() => setTab('documents')} />}
       {tab === 'upload' && <Upload refresh={refresh} done={() => setTab('documents')} />}
       {tab === 'categories' && <Categories categories={categories} refresh={refresh} />}
+      {tab === 'spaces' && <Workspaces workspaces={workspaces} current={currentWorkspace} refresh={refresh} switchTo={switchWorkspace} />}
       {tab === 'connect' && <ConversationConnect configured={plugin?.mcpConfigured ?? false} refresh={refresh} />}
     </main>
   </div>
 }
 
-function Overview({ documents, categories, total, mcp, go }: { documents: DocumentItem[]; categories: Category[]; total: number; mcp: boolean; go(tab: Tab): void }) {
+function Overview({ documents, categories, total, mcp, workspace, go }: { documents: DocumentItem[]; categories: Category[]; total: number; mcp: boolean; workspace: Workspace | null; go(tab: Tab): void }) {
   const processing = documents.filter(item => ['processing', 'created', 'retry'].includes(item.pipeline?.overall_status ?? item.current_version?.processing_status ?? '')).length
   return <>
     <div className={css.stats}>
-      <article><small>知识资料</small><strong>{total}</strong><span>当前工作区</span></article>
+      <article><small>知识资料</small><strong>{total}</strong><span>{workspace?.name ?? '当前空间'}</span></article>
       <article><small>知识分类</small><strong>{categories.length}</strong><span>持续整理中</span></article>
       <article><small>处理队列</small><strong>{processing}</strong><span>{processing ? '后台正在处理' : '队列空闲'}</span></article>
       <article><small>模型能力</small><strong>{mcp ? '14' : '—'}</strong><span>{mcp ? '对话工具在线' : '等待 PAT 配置'}</span></article>
+    </div>
+    <div className={css.quickActions}>
+      <button onClick={() => go('upload')}><span>⇧</span><div><strong>上传资料</strong><small>批量添加文件并自动解析</small></div><b>→</b></button>
+      <button onClick={() => go('create')}><span>✎</span><div><strong>快速收录</strong><small>记录想法或收藏网页链接</small></div><b>→</b></button>
+      <button onClick={() => go('search')}><span>⌕</span><div><strong>验证知识</strong><small>搜索并检查可被模型召回的内容</small></div><b>→</b></button>
     </div>
     <section className={css.panel}><div className={css.panelTitle}><div><h3>最近资料</h3><p>上传后自动解析、切片并进入检索</p></div><button onClick={() => go('upload')}>＋ 上传资料</button></div><DocumentRows documents={documents.slice(0, 8)} refresh={() => Promise.resolve()} compact /></section>
   </>
@@ -395,24 +525,37 @@ function Overview({ documents, categories, total, mcp, go }: { documents: Docume
 function statusOf(item: DocumentItem): string { return item.pipeline?.overall_status ?? item.current_version?.processing_status ?? 'created' }
 const statusText: Record<string, string> = { completed: '已完成', ready: '已完成', processing: '处理中', created: '等待处理', retry: '等待重试', failed: '失败', unsupported: '未提取' }
 
-function DocumentRows({ documents, refresh, compact = false }: { documents: DocumentItem[]; refresh(): Promise<unknown>; compact?: boolean }) {
+function DocumentRows({ documents, refresh, categories = [], compact = false }: { documents: DocumentItem[]; refresh(): Promise<unknown>; categories?: Category[]; compact?: boolean }) {
   const act = async (item: DocumentItem, action: 'reprocess' | 'delete') => {
     if (action === 'delete' && !window.confirm(`将“${item.title}”移入回收站？`)) return
     const response = await fetch(`${API}/documents/${item.id}${action === 'reprocess' ? '/reprocess' : ''}`, { method: action === 'reprocess' ? 'POST' : 'DELETE', credentials: 'include' })
     if (!response.ok) window.alert(await errorMessage(response, '操作失败'))
     else await refresh()
   }
+  const organize = async (item: DocumentItem, categoryId: number) => {
+    const response = await fetch(`${API}/documents/${item.id}/category`, { method: 'PATCH', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ category_id: categoryId }) })
+    if (!response.ok) window.alert(await errorMessage(response, '分类调整失败')); else await refresh()
+  }
   if (!documents.length) return <div className={css.empty}>还没有资料，先上传第一份知识吧。</div>
   return <div className={css.documentRows}>{documents.map(item => <div className={css.documentRow} key={item.id}>
     <span className={css.fileIcon}>{item.content_kind === 'dataset' ? '▦' : '▤'}</span>
     <div className={css.documentName}><strong>{item.title}</strong><small>{item.primary_category?.name ?? '未分类'} · {new Date(item.updated_at).toLocaleString()}</small></div>
     <span className={css.status} data-status={statusOf(item)}>{statusText[statusOf(item)] ?? statusOf(item)}</span>
-    {!compact && <div className={css.rowActions}><button onClick={() => void act(item, 'reprocess')}>重新处理</button><button onClick={() => void act(item, 'delete')}>删除</button></div>}
+    {!compact && <div className={css.rowActions}>{categories.length > 0 && <select aria-label={`调整“${item.title}”的分类`} value={item.primary_category?.id ?? ''} onChange={event => { const id = Number(event.target.value); if (id > 0) void organize(item, id) }}><option value="" disabled>整理到…</option>{categories.map(category => <option value={category.id} key={category.id}>{category.name}</option>)}</select>}<button onClick={() => window.open(`${API}/documents/${item.id}/preview`, '_blank', 'noopener,noreferrer')}>预览</button><button onClick={() => void act(item, 'reprocess')}>重处理</button><button onClick={() => void act(item, 'delete')}>删除</button></div>}
   </div>)}</div>
 }
 
-function Documents({ documents, query, setQuery, refresh }: { documents: DocumentItem[]; query: string; setQuery(value: string): void; refresh(): Promise<unknown> }) {
-  return <section className={css.panel}><div className={css.libraryToolbar}><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索资料名称…"/><span>{documents.length} 条资料</span></div><DocumentRows documents={documents} refresh={refresh} /></section>
+function Documents({ documents, categories, query, setQuery, refresh }: { documents: DocumentItem[]; categories: Category[]; query: string; setQuery(value: string): void; refresh(): Promise<unknown> }) {
+  const [categoryId, setCategoryId] = useState('')
+  const [status, setStatus] = useState('')
+  const visible = documents.filter(item => {
+    const matchesQuery = item.title.toLowerCase().includes(query.trim().toLowerCase())
+    const matchesCategory = categoryId === '' || item.primary_category?.id === Number(categoryId)
+    const matchesStatus = status === '' || statusOf(item) === status || (status === 'completed' && statusOf(item) === 'ready')
+    return matchesQuery && matchesCategory && matchesStatus
+  })
+  const hasFilters = query.trim() !== '' || categoryId !== '' || status !== ''
+  return <section className={css.panel}><div className={css.libraryToolbar}><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索资料名称…"/><select value={categoryId} onChange={event => setCategoryId(event.target.value)}><option value="">全部分类</option>{categories.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><select value={status} onChange={event => setStatus(event.target.value)}><option value="">全部状态</option><option value="completed">已完成</option><option value="processing">处理中</option><option value="created">等待处理</option><option value="retry">等待重试</option><option value="failed">失败</option></select>{hasFilters && <button onClick={() => { setQuery(''); setCategoryId(''); setStatus('') }}>清除</button>}<span>{visible.length} / {documents.length} 条</span></div><DocumentRows documents={visible} categories={categories} refresh={refresh} /></section>
 }
 
 type SearchHit = { document_id: number; title: string; source_type: string; score: number; snippet: string; categories?: Array<{ name: string }> }
@@ -470,8 +613,10 @@ function Upload({ refresh, done }: { refresh(): Promise<unknown>; done(): void }
   const input = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
+  const [dragging, setDragging] = useState(false)
   const [progress, setProgress] = useState('')
   const supported = useMemo(() => '.pdf,.doc,.docx,.xlsx,.xls,.md,.txt', [])
+  const chooseFiles = (next: File[]) => { setFiles(next.slice(0, 50)); setProgress(next.length > 50 ? '单次最多保留前 50 个文件' : '') }
   const upload = async () => {
     setBusy(true)
     for (let index = 0; index < files.length; index += 1) {
@@ -483,9 +628,9 @@ function Upload({ refresh, done }: { refresh(): Promise<unknown>; done(): void }
     setProgress('上传完成，资料已进入处理队列'); setFiles([]); setBusy(false); await refresh(); window.setTimeout(done, 700)
   }
   return <section className={css.uploadPanel}>
-    <input ref={input} type="file" accept={supported} multiple hidden onChange={event => setFiles(Array.from(event.target.files ?? []))}/>
-    <button className={css.dropZone} onClick={() => input.current?.click()} disabled={busy}><span>⇧</span><strong>选择或拖入知识文件</strong><small>PDF、Word、Excel、Markdown、TXT，单次最多 50 个</small></button>
-    {files.length > 0 && <div className={css.uploadList}>{files.map(file => <div key={`${file.name}:${file.size}`}><span>▤</span><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB</small></div>)}</div>}
+    <input ref={input} type="file" accept={supported} multiple hidden onChange={event => chooseFiles(Array.from(event.target.files ?? []))}/>
+    <button className={css.dropZone} data-dragging={String(dragging)} onClick={() => input.current?.click()} onDragEnter={event => { event.preventDefault(); setDragging(true) }} onDragOver={event => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); chooseFiles(Array.from(event.dataTransfer.files)) }} disabled={busy}><span>⇧</span><strong>{dragging ? '松开即可添加文件' : '选择或拖入知识文件'}</strong><small>PDF、Word、Excel、Markdown、TXT，单次最多 50 个</small></button>
+    {files.length > 0 && <div className={css.uploadList}>{files.map((file, index) => <div key={`${file.name}:${file.size}`}><span>▤</span><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB</small><button aria-label={`移除 ${file.name}`} disabled={busy} onClick={() => setFiles(current => current.filter((_, position) => position !== index))}>×</button></div>)}</div>}
     {progress && <p className={css.progressText}>{progress}</p>}
     <button className={css.primaryButton} disabled={!files.length || busy} onClick={() => void upload()}>{busy ? '上传中…' : `上传 ${files.length || ''} 个文件`}</button>
   </section>
@@ -497,6 +642,55 @@ function Categories({ categories, refresh }: { categories: Category[]; refresh()
   const rename = async (item: Category) => { const next = window.prompt('新的分类名称', item.name)?.trim(); if (!next || next === item.name) return; const response = await fetch(`${API}/categories/${item.id}`, { method: 'PATCH', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: next }) }); if (!response.ok) window.alert(await errorMessage(response, '重命名失败')); else await refresh() }
   const remove = async (item: Category) => { if (!window.confirm(`删除分类“${item.name}”？`)) return; const response = await fetch(`${API}/categories/${item.id}`, { method: 'DELETE', credentials: 'include' }); if (!response.ok) window.alert(await errorMessage(response, '删除失败')); else await refresh() }
   return <><form className={css.categoryForm} onSubmit={create}><input value={name} onChange={event => setName(event.target.value)} placeholder="新分类名称" required/><button>新增分类</button></form><section className={css.categoryGrid}>{categories.map(item => <article key={item.id}><span>▤</span><div><strong>{item.name}</strong><small>{item.document_count} 条资料 · {item.slug}</small></div><button onClick={() => void rename(item)}>重命名</button>{!item.is_default && <button onClick={() => void remove(item)}>删除</button>}</article>)}</section></>
+}
+
+function Workspaces({ workspaces, current, refresh, switchTo }: { workspaces: Workspace[]; current: Workspace | null; refresh(): Promise<unknown>; switchTo(slug: string): Promise<void> }) {
+  const [creating, setCreating] = useState(false)
+  const [name, setName] = useState('')
+  const [slug, setSlug] = useState('')
+  const [description, setDescription] = useState('')
+  const [message, setMessage] = useState('')
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault(); setCreating(true); setMessage('')
+    const response = await fetch(`${API}/workspaces`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: name.trim(), slug: slug.trim().toLowerCase(), description: description.trim() || null }),
+    })
+    if (!response.ok) { setMessage(await errorMessage(response, '知识空间创建失败')); setCreating(false); return }
+    const created = await response.json() as Workspace
+    setName(''); setSlug(''); setDescription(''); setMessage(`“${created.name}”已创建，正在切换…`); setCreating(false)
+    await refresh(); await switchTo(created.slug)
+  }
+  const edit = async (item: Workspace) => {
+    const nextName = window.prompt('知识空间名称', item.name)?.trim()
+    if (!nextName) return
+    const nextDescription = window.prompt('空间说明（可留空）', item.description ?? '')
+    if (nextDescription === null) return
+    const response = await fetch(`${API}/workspaces/${encodeURIComponent(item.slug)}`, {
+      method: 'PATCH', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: nextName, description: nextDescription.trim() }),
+    })
+    if (!response.ok) setMessage(await errorMessage(response, '知识空间更新失败')); else await refresh()
+  }
+  const setArchived = async (item: Workspace, archived: boolean) => {
+    if (!archived && !window.confirm(`归档“${item.name}”？空间内资料不会删除，归档后不可检索。`)) return
+    const response = await fetch(`${API}/workspaces/${encodeURIComponent(item.slug)}/${archived ? 'restore' : 'archive'}`, { method: 'POST', credentials: 'include' })
+    if (!response.ok) setMessage(await errorMessage(response, archived ? '恢复失败' : '归档失败')); else await refresh()
+  }
+  const active = workspaces.filter(item => item.status === 'active')
+  const archived = workspaces.filter(item => item.status === 'archived')
+  return <div className={css.spacesLayout}>
+    <section className={css.spaceIntro}><div><span>▦</span><div><h3>用空间隔离不同领域的知识</h3><p>每个空间拥有独立的资料、分类和检索上下文。切换后，页面管理和 DSH 大模型会同步使用同一个空间。</p></div></div><ul><li>适合区分个人、团队或不同项目</li><li>分类用于空间内部整理，不替代空间</li><li>不需要隔离时，保留默认空间即可</li></ul></section>
+    <section className={css.spacePanel}>
+      <div className={css.panelTitle}><div><h3>空间列表</h3><p>{active.length} 个启用 · {archived.length} 个归档</p></div></div>
+      <div className={css.spaceGrid}>{workspaces.map(item => <article key={item.id} data-current={String(item.slug === current?.slug)} data-archived={String(item.status === 'archived')}>
+        <div className={css.spaceIcon}>{item.is_default ? '知' : item.name.slice(0, 1)}</div>
+        <div className={css.spaceBody}><div><strong>{item.name}</strong>{item.slug === current?.slug && <span>当前</span>}{item.status === 'archived' && <span>已归档</span>}</div><p>{item.description || '暂无空间说明'}</p><small>{item.slug}</small></div>
+        <div className={css.spaceActions}>{item.status === 'active' && item.slug !== current?.slug && <button onClick={() => void switchTo(item.slug)}>切换</button>}<button onClick={() => void edit(item)}>编辑</button>{!item.is_default && item.slug !== current?.slug && <button onClick={() => void setArchived(item, item.status === 'archived')}>{item.status === 'archived' ? '恢复' : '归档'}</button>}</div>
+      </article>)}</div>
+    </section>
+    <form className={css.spaceCreate} onSubmit={create}><div><h3>新建知识空间</h3><p>空间标识创建后保持不变，建议使用简短英文，例如 product、research。</p></div><div className={css.spaceFields}><label><span>空间名称</span><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：产品研发" required /></label><label><span>空间标识</span><input value={slug} onChange={event => setSlug(event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))} placeholder="product" pattern="[a-z0-9][a-z0-9-]{0,63}" required /></label></div><label><span>空间说明</span><textarea value={description} onChange={event => setDescription(event.target.value)} placeholder="说明这个空间收录什么内容，帮助使用者正确选择。" /></label><button className={css.primaryButton} disabled={creating}>{creating ? '创建中…' : '创建并切换'}</button>{message && <p className={css.progressText}>{message}</p>}</form>
+  </div>
 }
 
 function ConversationConnect({ configured, refresh }: { configured: boolean; refresh(): Promise<unknown> }) {
@@ -563,6 +757,160 @@ function ConsoleOverlay({ useCangzhiConsole, closeConsole, t }: ConsoleOverlayPr
   )
 }
 
+type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
+type WorkbenchDocument = { id: number; title: string; source_type: string; updated_at?: string; category?: string; snippet?: string }
+type WorkbenchTab = 'browse' | 'preview' | 'context'
+
+function openDocumentInWorkbench(id: number, title: string): void {
+  window.dispatchEvent(new CustomEvent('cangzhi-open-document', { detail: { id, title } }))
+}
+
+function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, openConsole }: KnowledgeWorkbenchProps) {
+  const state = useCangzhiConsole(value => value)
+  const [auth, setAuth] = useState<AuthState | null>(null)
+  const [workspace, setWorkspace] = useState<Workspace | null>(null)
+  const [documents, setDocuments] = useState<WorkbenchDocument[]>([])
+  const [results, setResults] = useState<WorkbenchDocument[]>([])
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<WorkbenchDocument | null>(null)
+  const [tab, setTab] = useState<WorkbenchTab>('browse')
+  const [pinned, setPinned] = useState<WorkbenchDocument[]>([])
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewState, setPreviewState] = useState('选择资料后可在这里预览原文')
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [width, setWidth] = useState(() => {
+    const saved = Number(window.localStorage.getItem('cangzhi-workbench-width'))
+    return Number.isFinite(saved) && saved >= 360 && saved <= 760 ? saved : 480
+  })
+  const uploadInput = useRef<HTMLInputElement>(null)
+  const resizeStart = useRef({ x: 0, width: 480 })
+  const widthRef = useRef(width)
+  const workspaceSlugRef = useRef<string | null>(null)
+  const load = async () => {
+    const authResponse = await fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' })
+    if (!authResponse.ok) throw new Error(await errorMessage(authResponse, '登录状态读取失败'))
+    const authValue = await authResponse.json() as AuthState
+    setAuth(authValue)
+    if (!authValue.authenticated) {
+      setWorkspace(null); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl('')
+      workspaceSlugRef.current = null
+      return
+    }
+    const [documentsResponse, workspaceResponse] = await Promise.all([
+      fetch(`${API}/documents/overview?limit=60&offset=0&include_processing=true`, { credentials: 'include', cache: 'no-store' }),
+      fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+    ])
+    if (!workspaceResponse.ok || !documentsResponse.ok) throw new Error('当前知识空间读取失败')
+    const nextWorkspace = await workspaceResponse.json() as Workspace
+    const workspaceChanged = workspaceSlugRef.current !== null && workspaceSlugRef.current !== nextWorkspace.slug
+    workspaceSlugRef.current = nextWorkspace.slug
+    setWorkspace(nextWorkspace)
+    const items = await documentsResponse.json() as DocumentItem[]
+    setDocuments(items.map(item => ({ id: item.id, title: item.title, source_type: item.source_type, updated_at: item.updated_at, category: item.primary_category?.name })))
+    if (workspaceChanged) {
+      setQuery(''); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setTab('browse')
+      setPreviewState('选择资料后可在这里预览原文')
+    }
+  }
+  useEffect(() => {
+    if (!state.knowledgeOpen) return
+    const refresh = () => { void load().catch(caught => setNotice(caught instanceof Error ? caught.message : '藏知服务不可用')) }
+    refresh()
+    window.addEventListener('cangzhi-workspace-changed', refresh)
+    return () => window.removeEventListener('cangzhi-workspace-changed', refresh)
+  }, [state.knowledgeOpen])
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl) }, [previewUrl])
+  useEffect(() => {
+    const frame = document.querySelector('[data-shell-overlay]')?.parentElement
+    if (frame === undefined || frame === null || !state.knowledgeOpen) return
+    frame.dataset.cangzhiWorkbench = 'true'
+    frame.style.setProperty('--cangzhi-workbench-width', `${width}px`)
+    return () => {
+      delete frame.dataset.cangzhiWorkbench
+      frame.style.removeProperty('--cangzhi-workbench-width')
+    }
+  }, [state.knowledgeOpen, width])
+  const search = async (event: React.FormEvent) => {
+    event.preventDefault(); setBusy(true); setNotice('')
+    const response = await fetch(`${API}/search`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: query.trim(), limit: 40, offset: 0 }) })
+    if (!response.ok) { setNotice(await errorMessage(response, '搜索失败')); setBusy(false); return }
+    const body = await response.json() as { hits: SearchHit[] }
+    setResults(body.hits.map(hit => ({ id: hit.document_id, title: hit.title, source_type: hit.source_type, category: hit.categories?.map(item => item.name).join('、'), snippet: hit.snippet })))
+    setTab('browse')
+    setBusy(false)
+  }
+  const preview = async (item: WorkbenchDocument) => {
+    setSelected(item); setTab('preview'); setPreviewState('正在生成安全预览…'); setBusy(true)
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
+    const response = await fetch(`${API}/documents/${item.id}/preview`, { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) { setPreviewState(await errorMessage(response, '这份资料暂时没有可用预览')); setBusy(false); return }
+    const blob = await response.blob()
+    setPreviewUrl(URL.createObjectURL(blob)); setPreviewState(''); setBusy(false)
+  }
+  useEffect(() => {
+    const open = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: number; title?: string }>).detail
+      if (typeof detail?.id !== 'number') return
+      const item = documents.find(document => document.id === detail.id) ?? {
+        id: detail.id,
+        title: detail.title?.trim() || `资料 #${detail.id}`,
+        source_type: 'file',
+      }
+      openKnowledge()
+      void preview(item)
+    }
+    window.addEventListener('cangzhi-open-document', open)
+    return () => window.removeEventListener('cangzhi-open-document', open)
+  }, [documents, openKnowledge, previewUrl])
+  const useDocument = (item: WorkbenchDocument) => {
+    setPinned(items => items.some(document => document.id === item.id) ? items : [...items, item])
+    window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: `请重点读取并基于藏知资料《${item.title}》（document_id: ${item.id}）回答：\n\n` } }))
+    setNotice(`已将《${item.title}》加入当前对话，问题草稿已经准备好`)
+  }
+  const upload = async (files: FileList | null) => {
+    if (!files?.length) return
+    setBusy(true); setNotice('')
+    for (const [index, file] of Array.from(files).entries()) {
+      setNotice(`正在上传 ${index + 1}/${files.length}：${file.name}`)
+      const body = new FormData(); body.append('file', file); body.append('title', '')
+      const response = await fetch(`${API}/files/upload`, { method: 'POST', credentials: 'include', body })
+      if (!response.ok) { setNotice(await errorMessage(response, `${file.name} 上传失败`)); setBusy(false); return }
+    }
+    setNotice('上传完成，资料正在处理'); setBusy(false); await load()
+    if (uploadInput.current) uploadInput.current.value = ''
+  }
+  const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    resizeStart.current = { x: event.clientX, width }
+  }
+  const resize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+    const next = Math.min(760, Math.max(360, resizeStart.current.width + resizeStart.current.x - event.clientX))
+    widthRef.current = next
+    setWidth(next)
+  }
+  const endResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+    event.currentTarget.releasePointerCapture(event.pointerId)
+    window.localStorage.setItem('cangzhi-workbench-width', String(widthRef.current))
+  }
+  if (!state.knowledgeOpen) return null
+  const visible = results.length > 0 || query.trim() ? results : documents
+  return <aside className={css.knowledgeWorkbench} aria-label="藏知工作台" style={{ width }}>
+    <div className={css.workbenchResize} role="separator" aria-orientation="vertical" aria-label="调整藏知工作台宽度" aria-valuemin={360} aria-valuemax={760} aria-valuenow={width} onPointerDown={beginResize} onPointerMove={resize} onPointerUp={endResize} onPointerCancel={endResize}/>
+    <header className={css.workbenchHeader}><div><CangzhiMark size={25}/><span><strong>藏知工作台</strong><small>{workspace?.name ?? '当前知识空间'}</small></span></div><div><button title="知识库管理" onClick={openConsole}>⚙</button><button title="关闭工作台" onClick={closeKnowledge}>×</button></div></header>
+    <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
+    {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
+      {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value.trim()) setResults([]) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy}>{busy ? '搜索中…' : '搜索'}</button></form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy}>＋</button></div><div className={css.drawerSectionTitle}><strong>{results.length > 0 || query.trim() ? '搜索结果' : '最近资料'}</strong><span>{visible.length} 项</span></div><div className={css.workbenchResults}>{visible.length === 0 ? <div className={css.drawerEmpty}>没有找到匹配的资料</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
+      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
+      {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>当前对话知识</strong><small>模型使用“{workspace?.name ?? '当前空间'}”，你还可以固定重点资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未固定资料。到“资料”中搜索并预览，然后点击“加入对话”。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请综合当前对话中固定的藏知资料，归纳共同结论、分歧与依据，并逐条标注来源。\n\n' } }))}>综合固定资料</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
+    </>}
+    {notice && <p className={css.workbenchNotice}>{notice}</p>}
+    <footer className={css.workbenchStatus}><span data-ok={String(auth?.authenticated ?? false)}/><strong>{auth?.authenticated ? '知识服务在线' : '等待登录'}</strong><small>{busy ? '正在处理…' : `${documents.length} 份资料 · ${pinned.length} 份已加入对话`}</small></footer>
+  </aside>
+}
+
 function argsRawOf(block: ToolCallViewProps['block']): string {
   return ('kind' in block ? block.call?.argsRaw : block.argsRaw) ?? ''
 }
@@ -620,22 +968,47 @@ function resultPreview(value: Record<string, unknown> | null): string | null {
   return null
 }
 
+function nestedRecord(value: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (value === null) return null
+  for (const key of ['structuredContent', 'result']) {
+    const candidate = value[key]
+    if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) return candidate as Record<string, unknown>
+  }
+  return value
+}
+
+function EvidencePreview({ tool, value }: { tool: string; value: Record<string, unknown> | null }) {
+  const payload = nestedRecord(value)
+  if (payload === null) return null
+  if (tool === 'knowledge_search' && Array.isArray(payload.hits)) {
+    const hits = payload.hits.slice(0, 3).filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    if (!hits.length) return <div className={css.evidenceEmpty}>当前知识空间没有找到相关证据</div>
+    return <div className={css.evidencePreview}><div className={css.evidenceHeading}><span>检索到 {String(payload.total ?? hits.length)} 条证据</span><small>{typeof payload.backend === 'string' ? payload.backend : 'knowledge'}</small></div>{hits.map((hit, index) => <article key={`${String(hit.document_id)}:${index}`}><span>{index + 1}</span><div><strong>{String(hit.title ?? '未命名资料')}</strong><p>{String(hit.snippet ?? hit.context ?? '').replace(/\s+/g, ' ').slice(0, 180)}</p></div>{typeof hit.document_id === 'number' && <button onClick={() => openDocumentInWorkbench(hit.document_id as number, String(hit.title ?? '未命名资料'))}>右侧预览</button>}</article>)}</div>
+  }
+  if (tool === 'knowledge_ask' && typeof payload.answer === 'string') {
+    const citations = Array.isArray(payload.citations) ? payload.citations.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null).slice(0, 5) : []
+    return <div className={css.answerPreview}><p>{payload.answer.slice(0, 520)}</p>{citations.length > 0 && <div><span>引用 {citations.length}</span>{citations.map((citation, index) => <button key={`${String(citation.document_id ?? citation.chunk_id)}:${index}`} onClick={() => { if (typeof citation.document_id === 'number') openDocumentInWorkbench(citation.document_id, String(citation.title ?? citation.document_title ?? '知识证据')) }}><b>{index + 1}</b>{String(citation.title ?? citation.document_title ?? '知识证据')}</button>)}</div>}</div>
+  }
+  const preview = resultPreview(payload)
+  return preview === null ? null : <p className={css.toolPreview}>{preview}</p>
+}
+
 type CangzhiToolProps = ToolCallViewProps & PropsLocale<typeof NS>
 
 function CangzhiToolCard({ toolName, block, inspect, t }: CangzhiToolProps) {
   const rawName = toolName.startsWith(TOOL_PREFIX) ? toolName.slice(TOOL_PREFIX.length) : toolName
   const output = resultTextOf(block)
   const value = output === null ? null : parseObject(output)
+  const payload = nestedRecord(value)
   const running = !('kind' in block)
   const failed = !running && block.isError
-  const count = value === null ? null : itemCount(value)
+  const count = payload === null ? null : itemCount(payload)
   const argument = argumentSummary(argsRawOf(block))
   const status = running
     ? t('running')
     : failed
       ? output?.split('\n', 1)[0] ?? t('failed')
       : count === null ? t('done') : t('items', { count })
-  const preview = failed ? null : resultPreview(value)
   const title = t(`tools.${rawName}` as never)
   return (
     <div className={css.toolCard} data-tool={toolName} data-state={failed ? 'error' : running ? 'running' : 'ok'}>
@@ -647,7 +1020,7 @@ function CangzhiToolCard({ toolName, block, inspect, t }: CangzhiToolProps) {
           <button type="button" className={css.inspectButton} onClick={inspect} title={t('inspect')}>↗</button>
         )}
       </div>
-      {preview !== null && <p className={css.toolPreview}>{preview}</p>}
+      {!failed && <EvidencePreview tool={rawName} value={value} />}
       {output !== null && (
         <details className={css.toolDetails}>
           <summary>{t('details')}</summary>
@@ -676,12 +1049,8 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.hero.brand.mark', id: 'cangzhi-hero-mark', order: 0,
   }, CangzhiMark))
 
-  ctx.slots.inject('conversation.hero.headline', () => ctx.slots.register({
-    name: 'conversation.hero.headline', id: 'cangzhi-headline', order: 0,
-  }, CangzhiHeadline))
-
-  ctx.slots.inject('conversation.hero.extension', () => ctx.slots.register({
-    name: 'conversation.hero.extension', id: 'cangzhi-home', order: 10,
+  ctx.slots.inject('conversation.hero.context', () => ctx.slots.register({
+    name: 'conversation.hero.context', id: 'cangzhi-home', order: 10,
     inject: () => consoleFace,
   }, HomeIntegration))
 
@@ -689,6 +1058,11 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.input.dock', id: 'cangzhi-context', order: -20,
     inject: () => consoleFace,
   }, KnowledgeDock))
+
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions', id: 'cangzhi-knowledge-space', order: 20,
+    inject: () => consoleFace,
+  }, ConversationKnowledgeHeader))
 
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
@@ -705,6 +1079,11 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: () => consoleFace,
   }, ConsoleOverlay))
+
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay', id: 'cangzhi-knowledge-workbench', order: 90,
+    inject: () => consoleFace,
+  }, KnowledgeWorkbench))
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay', id: 'cangzhi-document-title', order: -100,

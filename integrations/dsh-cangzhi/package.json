@@ -1,7 +1,7 @@
 {
   "name": "dsh-cangzhi",
-  "version": "0.3.0",
-  "description": "Native DeepSeek Harness workspace and model tools for Cangzhi",
+  "version": "0.8.0",
+  "description": "Native DeepSeek Harness knowledge spaces, management workspace and model tools for Cangzhi",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

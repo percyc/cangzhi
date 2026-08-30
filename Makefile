@@ -41,7 +41,7 @@ doctor: ## Check containers, schema revision, and HTTP health endpoints
 	@docker compose ps
 	@docker compose exec -T postgres sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Atc "SELECT '\''schema='\'' || version_num FROM alembic_version"'
 	@docker compose exec -T api python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/readiness').read().decode())"
-	@docker compose exec -T web node -e "require('http').get('http://localhost:3000/api/health', r => { let b=''; r.on('data', c => b += c); r.on('end', () => { console.log(b); process.exit(r.statusCode === 200 ? 0 : 1) }) }).on('error', () => process.exit(1))"
+	@docker compose exec -T web node -e "const raw = (process.env.CANGZHI_WEB_BASE_PATH || '/_cangzhi').trim(); const p = raw && raw !== '/' ? '/' + raw.replace(/^\/+|\/+$$/g, '') : ''; require('http').get('http://localhost:3000' + p + '/api/health', r => { let b=''; r.on('data', c => b += c); r.on('end', () => { console.log(b); process.exit(r.statusCode === 200 ? 0 : 1) }) }).on('error', () => process.exit(1))"
 
 backup: ## Create a database + storage backup
 	scripts/backup.sh

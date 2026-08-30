@@ -39,9 +39,11 @@ const GUIDANCE = `Cangzhi is connected as the read-only knowledge system named c
 Use its mcp__cangzhi__knowledge_* tools whenever the user asks to find, inspect, compare, cite, or answer from their knowledge base.
 Prefer knowledge_search for retrieval, knowledge_ask for a synthesized answer with citations, and the dataset schema/preview/query tools for structured data.
 Never invent document ids, chunk ids, dataset ids, scope names, evidence, or citations. Discover them with list/search tools first, preserve returned citation metadata, and say clearly when Cangzhi is unavailable or has no supporting result.
-The Cangzhi button in the DSH sidebar opens a native DSH knowledge workspace for uploads, documents, categories and processing maintenance.`
+The Cangzhi button in the DSH sidebar opens a native DSH knowledge workspace for uploads, documents, categories, spaces and processing maintenance.
+The active Cangzhi workspace selected in the UI is also the workspace used by every model tool. Never claim to search another workspace unless the user switches it in the Cangzhi workspace selector first.`
 
 export async function apply(ctx: Context, config: Config): Promise<void> {
+  let activeWorkspaceSlug = 'default'
   const webProxy = createProxyHandler(config.webUrl, { allowFrames: true })
   const apiProxy = createProxyHandler(config.apiUrl, {
     stripPrefix: config.apiRoutePrefix,
@@ -51,7 +53,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     headers: async () => {
       const resolved = await ctx.credentials.resolve(TOKEN_REF)
       if (resolved === undefined) throw new Error('CANGZHI_TOKEN is not configured')
-      return { authorization: `Bearer ${resolved.value}` }
+      return {
+        authorization: `Bearer ${resolved.value}`,
+        'x-cangzhi-workspace': activeWorkspaceSlug,
+      }
     },
   })
   const mcpServer = createServer((req, res) => {
@@ -121,9 +126,38 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         apiConnected: true,
         mcpConfigured: credential.configured,
         toolCount: 14,
+        activeWorkspace: activeWorkspaceSlug,
       }))
     },
   }), 'cangzhi plugin status')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/_cangzhi-plugin/workspace',
+    handler: async (req, res) => {
+      const rejection = ctx.connection.requestRejection(req)
+      if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+      try {
+        const body = await jsonBody(req)
+        const slug = typeof body.slug === 'string' ? body.slug.trim().toLowerCase() : ''
+        if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(slug)) throw new Error('知识空间标识格式无效')
+        const validationUrl = new URL(`/api/workspaces/${encodeURIComponent(slug)}`, config.apiUrl)
+        const cookie = req.headers.cookie
+        const validation = await fetch(validationUrl, {
+          headers: cookie === undefined ? {} : { cookie },
+        })
+        if (!validation.ok) throw new Error(`知识空间不可用（HTTP ${String(validation.status)}）`)
+        const workspace = await validation.json() as { status?: string }
+        if (workspace.status !== 'active') throw new Error('知识空间已归档')
+        activeWorkspaceSlug = slug
+        res.writeHead(204, { 'cache-control': 'no-store' })
+        res.end()
+      } catch (error) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+      }
+    },
+  }), 'cangzhi workspace selection')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/_cangzhi-plugin/token',
@@ -147,7 +181,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         const token = typeof body.token === 'string' ? body.token.trim() : ''
         if (token.length < 20 || token.length > 4096) throw new Error('访问令牌格式无效')
         const validationUrl = new URL('/api/v1/knowledge/scopes', config.apiUrl)
-        const validation = await fetch(validationUrl, { headers: { authorization: `Bearer ${token}` } })
+        const validation = await fetch(validationUrl, { headers: {
+          authorization: `Bearer ${token}`,
+          'x-cangzhi-workspace': activeWorkspaceSlug,
+        } })
         if (!validation.ok) throw new Error(`藏知拒绝了访问令牌（HTTP ${String(validation.status)}）`)
         await ctx.credentials.set(TOKEN_REF, token)
         res.writeHead(204, { 'cache-control': 'no-store' })

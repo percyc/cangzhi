@@ -233,7 +233,7 @@ make logs-web
 
 健康端点：
 
-- Web：`GET http://127.0.0.1:3000/api/health`
+- Web：`GET http://127.0.0.1:3000/_cangzhi/api/health`（自定义 `CANGZHI_WEB_BASE_PATH` 时替换 `/_cangzhi`；访问端口根路径会自动跳转到 Web 入口）
 - API 存活：`GET http://127.0.0.1:8000/api/liveness`
 - API 就绪：`GET http://127.0.0.1:8000/api/readiness`
 
