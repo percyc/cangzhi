@@ -7,6 +7,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 
+import { withApiBasePath } from '@/lib/paths';
+
 export type EvidenceCitation = {
   id: number;
   document_id: number;
@@ -145,11 +147,13 @@ export function EvidenceDrawer({
 
   const originalUrl = useMemo(() => {
     if (!context) return null;
-    const base =
+    const raw =
       context.document_type === 'pdf'
         ? context.original_url ?? context.preview_url
         : context.preview_url ?? context.original_url;
-    return base && context.page ? `${base}#page=${context.page}` : base;
+    if (!raw) return null;
+    const mounted = raw.startsWith('/api/') ? withApiBasePath(raw) : raw;
+    return mounted && context.page ? `${mounted}#page=${context.page}` : mounted;
   }, [context]);
 
   if (!citation) return null;

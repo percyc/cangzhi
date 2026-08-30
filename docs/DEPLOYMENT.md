@@ -123,6 +123,7 @@ MCP/Skill 调用藏知。
 | `DATASET_QUERY_THREADS` | `2` | 单次 DuckDB 查询线程数 |
 | `DATASET_QUERY_TIMEOUT_SECONDS` | `20` | 数据集执行超时 |
 | `CANGZHI_SECRET_KEY` | 空 | 可选 Fernet 主密钥；为空时写入 `storage/.secret_key` |
+| `CANGZHI_WEB_BASE_PATH` | 空 | 可选 Web 子路径；详见下方“子路径网关” |
 | `CORS_ALLOWED_ORIGINS` | 空 | 仅跨域直接调用 API 时配置，逗号分隔完整 Origin |
 
 Compose 内部数据库地址由 `POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB` 生成，
@@ -165,6 +166,30 @@ STORAGE_HOST_PATH=/mnt/data/cangzhi/storage
 
 外部平台也可以直接使用 Web 的同源入口 `https://你的域名/api/mcp` 和
 `https://你的域名/api/v1`，因此公网通常不必单独开放 8000 端口。
+
+### 4.3 子路径网关（可选）
+
+默认情况下 Web 部署在 `http://<host>:<WEB_PORT>/` 根路径。当需要把藏知挂到外部反向
+代理的子路径（例如 `https://example.com/_cangzhi/`）时，设置：
+
+```dotenv
+CANGZHI_WEB_BASE_PATH=/_cangzhi
+```
+
+注意：
+
+- 该变量在 Compose 中既作为 Docker 构建参数 `ARG` 传给 `apps/web/Dockerfile`，
+  也作为容器运行时 `ENV` 注入 Next.js。Next.js 会把它固化为 `basePath` 与
+  `NEXT_PUBLIC_CANGZHI_WEB_BASE_PATH`，浏览器侧的 `<Link>`、资源引用、
+  `withBasePath` / `withApiBasePath` 都依赖这个值。
+- 因此**该值在镜像构建时固化**。修改后必须重新构建 Web 镜像：
+  ```bash
+  docker compose build web
+  docker compose up -d web
+  ```
+- Web 容器的 `healthcheck` 与 `make doctor` 都会按当前 `CANGZHI_WEB_BASE_PATH`
+  拼出正确的健康地址（默认根路径：`/api/health`；设了子路径：`/_cangzhi/api/health`）。
+- 不配置或留空时 Web 始终是根路径部署，健康地址直接是 `/api/health`。
 
 ## 5. 公网 HTTPS
 
@@ -233,7 +258,7 @@ make logs-web
 
 健康端点：
 
-- Web：`GET http://127.0.0.1:3000/_cangzhi/api/health`（自定义 `CANGZHI_WEB_BASE_PATH` 时替换 `/_cangzhi`；访问端口根路径会自动跳转到 Web 入口）
+- Web：`GET http://127.0.0.1:3000/api/health`（默认根路径；自定义 `CANGZHI_WEB_BASE_PATH` 时把 `/_cangzhi` 替换为该子路径，例如 `http://127.0.0.1:3000/_cangzhi/api/health`）
 - API 存活：`GET http://127.0.0.1:8000/api/liveness`
 - API 就绪：`GET http://127.0.0.1:8000/api/readiness`
 

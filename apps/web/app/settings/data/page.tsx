@@ -3,6 +3,7 @@
 import { useState } from 'react';
 
 import { SettingsSectionNav } from '@/components/SettingsSectionNav';
+import { withApiBasePath } from '@/lib/paths';
 
 export default function DataSettingsPage() {
   const [includeTrashed, setIncludeTrashed] = useState(false);
@@ -41,7 +42,7 @@ export default function DataSettingsPage() {
             </p>
           </div>
           <a
-            href={`/api/exports/library?${query.toString()}`}
+            href={withApiBasePath(`/api/exports/library?${query.toString()}`)}
             className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800"
           >
             下载导出包

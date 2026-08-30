@@ -111,19 +111,19 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         API_URL: http://api:8000
-        CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-/_cangzhi}
+        CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-}
     container_name: cangzhi-web
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
     ports:
       - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
     environment:
       API_URL: http://api:8000
-      CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-/_cangzhi}
+      CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-}
     depends_on:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "const raw = (process.env.CANGZHI_WEB_BASE_PATH || '/_cangzhi').trim(); const p = raw && raw !== '/' ? '/' + raw.replace(/^\\/+|\\/+$/g, '') : ''; require('http').get('http://localhost:3000' + p + '/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      test: ["CMD", "node", "-e", "const raw = (process.env.CANGZHI_WEB_BASE_PATH || '').trim(); const p = raw && raw !== '/' ? '/' + raw.replace(/^\\/+|\\/+$/g, '') : ''; require('http').get('http://localhost:3000' + p + '/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 10

@@ -190,9 +190,29 @@ make install          # 安装本地开发依赖
 
 ### 健康检查
 
-- Web：`GET http://localhost:3000/_cangzhi/api/health`（自定义 `CANGZHI_WEB_BASE_PATH` 时替换 `/_cangzhi`；访问端口根路径会自动跳转到 Web 入口）
+- Web：`GET http://localhost:3000/api/health`（默认根路径部署；配置 `CANGZHI_WEB_BASE_PATH=/_cangzhi` 后为 `GET http://localhost:3000/_cangzhi/api/health`）
 - API liveness：`GET http://localhost:8000/api/liveness`
 - API readiness：`GET http://localhost:8000/api/readiness`
+
+### 子路径网关（可选）
+
+默认情况下 Web 部署在 `http://localhost:3000/` 根路径；如果要把它挂到外部网关的
+子路径（例如 `https://example.com/_cangzhi/`），在 `.env` 中设置：
+
+```dotenv
+CANGZHI_WEB_BASE_PATH=/_cangzhi
+```
+
+该变量在 `compose.yaml` 中既会作为 Docker 构建参数 `ARG` 传给 `apps/web/Dockerfile`，
+也会作为容器运行时 `ENV` 注入 Next.js。值会被 Next.js 固化为静态资源与 `basePath`，
+**修改后必须重新构建 Web 镜像**：
+
+```bash
+docker compose build web
+docker compose up -d web
+```
+
+不修改 `.env` 时 Web 始终是根路径部署，健康地址直接是 `/api/health`。
 
 ## 开源协议
 

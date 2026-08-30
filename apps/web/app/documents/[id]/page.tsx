@@ -7,6 +7,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 
+import { withApiBasePath } from '@/lib/paths';
+
 type DocumentCategory = {
   id: number;
   slug: string;
@@ -438,8 +440,8 @@ export default function DocumentDetailPage() {
   const hasConvertedPreview = Boolean(version?.preview_blob);
   const hasPaginatedPreview = isPdf || hasConvertedPreview;
   const previewUrl = isPdf
-    ? `/api/documents/${document.id}/original?inline=true`
-    : `/api/documents/${document.id}/preview`;
+    ? withApiBasePath(`/api/documents/${document.id}/original?inline=true`)
+    : withApiBasePath(`/api/documents/${document.id}/preview`);
   const knowledgeStatus =
     pipeline?.overall_status === 'completed'
       ? '知识库已就绪'
@@ -516,14 +518,14 @@ export default function DocumentDetailPage() {
           </a>
         )}
         {canDownload && (
-          <a href={`/api/documents/${document.id}/original`} className="rounded border border-blue-600 px-3 py-2 text-sm text-blue-700 hover:bg-blue-50">
+          <a href={withApiBasePath(`/api/documents/${document.id}/original`)} className="rounded border border-blue-600 px-3 py-2 text-sm text-blue-700 hover:bg-blue-50">
             {document.origin?.kind === 'webdav' ? '下载远端原文件' : '下载原文件'}
           </a>
         )}
-        <a href={`/api/exports/documents/${document.id}/markdown`} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+        <a href={withApiBasePath(`/api/exports/documents/${document.id}/markdown`)} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
           导出 Markdown
         </a>
-        <a href={`/api/exports/documents/${document.id}/json`} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+        <a href={withApiBasePath(`/api/exports/documents/${document.id}/json`)} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
           导出 JSON
         </a>
         {canRetry && (
