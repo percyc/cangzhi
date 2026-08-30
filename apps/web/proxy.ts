@@ -4,6 +4,18 @@ import { NextRequest, NextResponse } from 'next/server';
 // browser navigation; data requests are protected by the API.
 const PUBLIC_ROUTES = new Set(['/login', '/setup']);
 const PUBLIC_API_PREFIXES = ['/api/auth/', '/api/liveness', '/api/readiness', '/api/health'];
+const BASE_PATH = process.env.NEXT_PUBLIC_CANGZHI_WEB_BASE_PATH ?? '';
+
+function appPath(pathname: string): string {
+  if (BASE_PATH && (pathname === BASE_PATH || pathname.startsWith(`${BASE_PATH}/`))) {
+    return pathname.slice(BASE_PATH.length) || '/';
+  }
+  return pathname;
+}
+
+function mounted(pathname: string): string {
+  return `${BASE_PATH}${pathname}` || '/';
+}
 
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_ROUTES.has(pathname)) return true;
@@ -16,7 +28,7 @@ function wantsHtml(request: NextRequest): boolean {
 }
 
 export async function proxy(request: NextRequest) {
-  const { pathname } = request.nextUrl;
+  const pathname = appPath(request.nextUrl.pathname);
   if (isPublicPath(pathname)) {
     return NextResponse.next();
   }
@@ -29,7 +41,7 @@ export async function proxy(request: NextRequest) {
   // only chooses where to send the user.
   const cookieHeader = request.headers.get('cookie');
   try {
-    const apiUrl = new URL('/api/auth/status', request.url);
+    const apiUrl = new URL(mounted('/api/auth/status'), request.url);
     const response = await fetch(apiUrl, {
       headers: cookieHeader ? { cookie: cookieHeader } : undefined,
       cache: 'no-store',
@@ -40,7 +52,7 @@ export async function proxy(request: NextRequest) {
         setup_required: boolean;
       };
       if (data.setup_required) {
-        const target = new URL('/setup', request.url);
+        const target = new URL(mounted('/setup'), request.url);
         return NextResponse.redirect(target);
       }
       if (data.authenticated) {
@@ -52,7 +64,7 @@ export async function proxy(request: NextRequest) {
     // error instead of bouncing between redirects.
     return NextResponse.next();
   }
-  const target = new URL('/login', request.url);
+  const target = new URL(mounted('/login'), request.url);
   target.searchParams.set('next', `${request.nextUrl.pathname}${request.nextUrl.search}`);
   return NextResponse.redirect(target);
 }

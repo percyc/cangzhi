@@ -16,6 +16,8 @@ WORKDIR /app/apps/web
 # Use the Compose service name here; a runtime-only API_URL is too late.
 ARG API_URL=http://api:8000
 ENV API_URL=${API_URL}
+ARG CANGZHI_WEB_BASE_PATH=
+ENV CANGZHI_WEB_BASE_PATH=${CANGZHI_WEB_BASE_PATH}
 
 RUN npm run build
 

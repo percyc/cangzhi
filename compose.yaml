@@ -111,6 +111,7 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         API_URL: http://api:8000
+        CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-/_cangzhi}
     container_name: cangzhi-web
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
     ports:

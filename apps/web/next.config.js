@@ -6,9 +6,21 @@ const allowedDevOrigins = (
   .map((origin) => origin.trim())
   .filter(Boolean)
 
+const configuredBasePath = (process.env.CANGZHI_WEB_BASE_PATH || '').trim()
+const basePath = configuredBasePath && configuredBasePath !== '/'
+  ? `/${configuredBasePath.replace(/^\/+|\/+$/g, '')}`
+  : ''
+
 const nextConfig = {
   reactStrictMode: true,
   allowedDevOrigins,
+  // DSH exposes the complete Cangzhi console through a same-origin gateway.
+  // Next must know the mount point at build time so client navigation and
+  // static asset URLs remain inside that gateway.
+  basePath,
+  env: {
+    NEXT_PUBLIC_CANGZHI_WEB_BASE_PATH: basePath,
+  },
   async rewrites() {
     const apiUrl = process.env.API_URL || 'http://localhost:8000'
     return [

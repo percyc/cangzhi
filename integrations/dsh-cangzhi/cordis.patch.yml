@@ -1,0 +1,28 @@
+# Cangzhi's dual-face package contributes model guidance and the DSH Web UI.
+# The generic DSH MCP bridge owns transport, discovery, cancellation and
+# reconnect behavior. Keep secrets in the launch environment/credential
+# manager; this patch never persists the PAT.
+- insert:
+    - id: cangzhi
+      name: dsh-cangzhi
+      config:
+        webUrl: !!js process.env.CANGZHI_WEB_URL ?? 'http://127.0.0.1:3000'
+        routePrefix: /_cangzhi
+        apiUrl: !!js process.env.CANGZHI_API_URL ?? 'http://127.0.0.1:8000'
+        apiRoutePrefix: /_dsh-cangzhi-api
+        internalMcpPort: 3081
+
+    - id: cangzhi-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        transport: streamable-http
+        serverName: cangzhi
+        url: !!js process.env.CANGZHI_MCP_URL ?? 'http://127.0.0.1:3081/api/mcp'
+        headers: {}
+        toolCallTimeoutMs: 120000
+        failOnStartupError: false
+        reconnect:
+          enabled: true
+          initialDelayMs: 500
+          maxDelayMs: 30000
+          maxAttempts: 100000
