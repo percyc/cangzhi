@@ -327,6 +327,12 @@ curl -G -H "Authorization: Bearer $TOKEN" \
 本身没有记录时，按 `suggested_filter` 改用 `direct_child_of` 后继续验证和聚合，
 不应把首次零结果当作最终结论。
 
+响应除 `rows`、`matched_row_count`、`source_rows` 与执行后端外，还包含
+`document_id`、`document_version_id`、`title`、`artifact_version` 和服务端规范化
+后的 `query_plan`。外部客户端应保存这些字段，并以 `document_version_id +
+dataset_id + artifact_version + source_rows` 打开下方版本绑定证据接口；不要只保存
+文档标题或把普通数据表预览当作回答证据。
+
 ### 3.8 证据取证
 
 以下端点返回版本绑定的证据上下文，防止读取新版本冒充原始证据。

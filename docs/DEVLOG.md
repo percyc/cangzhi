@@ -207,3 +207,20 @@
 - 后续：每次完成任务后**先追加** `DEVLOG.md`，再视情况更新
   `PROJECT_STATUS.md`；`ROADMAP` / `BACKLOG` / `DECISIONS` 不混进开发
   日志。
+
+### 2026-08-31 数据集查询补齐外部证据身份（ADR-017 / 基线 E）
+
+- 背景：`knowledge_query_dataset` 虽返回 `dataset_id`、`document_id`、产物版本和
+  `source_rows`，但缺少 `document_version_id`、文档标题与规范化查询计划；外部
+  DSH 插件无法安全打开回答当时的贡献行，只能退回当前数据表预览。
+- 变更：`execute_dataset_query` 的 DuckDB 与 PostgreSQL fallback 响应均增加
+  `document_version_id`、`title` 和 `query_plan`。`query_plan` 来自服务端完成白名单
+  校验后的 `SafeDatasetQuery`，不返回内部 SQL；其余已有字段含义不变。
+- 理由：这是 ADR-017 v1 契约允许的可选字段追加，使外部客户端能够组合
+  `document_version_id + dataset_id + artifact_version + source_rows` 调用既有证据
+  接口，不引入第二套证据协议。
+- 测试：`apps/api/tests/test_dataset_execution.py` 增加 DuckDB 与 fallback 两条
+  身份契约断言；完整文件 9 项用例通过（另有 1 条依赖弃用警告）。
+- 部署：API / MCP 进程需使用新代码重启或重建镜像；无数据库迁移、无配置变化。
+- 后续：由 DSH 插件完成真实会话端到端点击验收；旧工具结果缺版本身份时不得冒用
+  当前最新版。

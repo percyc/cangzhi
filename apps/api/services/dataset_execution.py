@@ -73,6 +73,22 @@ class SafeDatasetQuery:
     offset: int = 0
 
 
+def _public_query_plan(query: SafeDatasetQuery) -> dict[str, Any]:
+    """Return the validated plan that produced a result, never generated SQL."""
+
+    return {
+        "filters": [dict(item) for item in query.filters],
+        "columns": list(query.columns),
+        "group_by": list(query.group_by),
+        "metric": query.metric,
+        "metric_column": query.metric_column,
+        "sort_by": query.sort_by,
+        "sort_order": query.sort_order,
+        "limit": query.limit,
+        "offset": query.offset,
+    }
+
+
 def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
@@ -778,6 +794,8 @@ async def execute_dataset_query(
     dataset = await get_visible_dataset(
         db, dataset_id, document_boundary=document_boundary
     )
+    document = await db.get(Document, dataset.document_id)
+    document_title = document.title if document is not None else dataset.name
     fields = list(
         (
             await db.scalars(
@@ -821,11 +839,10 @@ async def execute_dataset_query(
                 "artifact_unavailable",
                 "大型数据集列式产物尚未构建，不能返回可能不完整的结果",
             )
-        document = await db.get(Document, dataset.document_id)
         fallback_dataset = TableDataset(
             document_id=dataset.document_id,
             document_version_id=dataset.document_version_id,
-            title=document.title if document else dataset.name,
+            title=document_title,
             sheet_name=dataset.sheet_name,
             region_index=dataset.region_index,
             columns=tuple(field.name for field in fields),
@@ -862,7 +879,10 @@ async def execute_dataset_query(
         payload = {
             "dataset_id": dataset.id,
             "document_id": dataset.document_id,
+            "document_version_id": dataset.document_version_id,
+            "title": document_title,
             "artifact_version": None,
+            "query_plan": _public_query_plan(query),
             "backend": "postgresql_fallback",
             "rows": rows,
             "matched_row_count": fallback.matched_row_count,
@@ -897,7 +917,10 @@ async def execute_dataset_query(
     payload = {
         "dataset_id": dataset.id,
         "document_id": dataset.document_id,
+        "document_version_id": dataset.document_version_id,
+        "title": document_title,
         "artifact_version": artifact.version_number,
+        "query_plan": _public_query_plan(query),
         "warnings": [],
         **result,
     }

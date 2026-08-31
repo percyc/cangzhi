@@ -96,7 +96,7 @@ def _seed_and_build(path: Path) -> tuple[int, int]:
 
 
 def test_parquet_build_and_duckdb_pushdown(tmp_path: Path):
-    _document_id, dataset_id = _seed_and_build(tmp_path)
+    document_id, dataset_id = _seed_and_build(tmp_path)
 
     async def run():
         # Reuse the builder database through an async engine so the production
@@ -130,6 +130,14 @@ def test_parquet_build_and_duckdb_pushdown(tmp_path: Path):
 
     result, literals = asyncio.run(run())
     assert result["backend"] == "duckdb"
+    assert result["document_id"] == document_id
+    assert isinstance(result["document_version_id"], int)
+    assert result["title"] == "销售数据"
+    assert result["artifact_version"] == 1
+    assert result["query_plan"]["filters"] == [
+        {"column": "地区", "operator": "eq", "value": "华东"}
+    ]
+    assert result["query_plan"]["metric"] == "sum"
     assert result["matched_row_count"] == 2
     assert result["rows"] == [{"地区": "华东", "metric": 30.0, "matched_rows": 2}]
     assert ("日期", "2026-07-31") in literals
@@ -164,6 +172,43 @@ def test_dataset_query_accepts_op_alias(tmp_path: Path):
     result = asyncio.run(run())
     assert result["matched_row_count"] == 2
     assert {row["地区"] for row in result["rows"]} == {"华东"}
+
+
+def test_dataset_query_fallback_keeps_version_bound_evidence_identity(tmp_path: Path):
+    document_id, dataset_id = _seed_and_build(tmp_path)
+    engine = create_engine(f"sqlite:///{tmp_path / 'builder.db'}")
+    with Session(engine) as session:
+        artifact = session.scalar(
+            select(DatasetArtifact).where(DatasetArtifact.dataset_id == dataset_id)
+        )
+        assert artifact is not None
+        artifact.is_active = False
+        session.commit()
+
+    async def run():
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        async_engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'builder.db'}"
+        )
+        factory = async_sessionmaker(async_engine, expire_on_commit=False)
+        async with factory() as session:
+            result = await execute_dataset_query(
+                session,
+                dataset_id,
+                {"columns": ["地区", "金额"], "limit": 10},
+                storage_root=tmp_path / "storage",
+            )
+        await async_engine.dispose()
+        return result
+
+    result = asyncio.run(run())
+    assert result["backend"] == "postgresql_fallback"
+    assert result["document_id"] == document_id
+    assert isinstance(result["document_version_id"], int)
+    assert result["title"] == "销售数据"
+    assert result["artifact_version"] is None
+    assert result["query_plan"]["columns"] == ["地区", "金额"]
 
 
 def test_dataset_query_aggregates_only_direct_hierarchy_children(tmp_path: Path):
