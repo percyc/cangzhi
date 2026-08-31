@@ -404,7 +404,10 @@ async def load_pipeline_statuses(
             chunking["status"],
             embedding_stage["status"],
         ]
-        if "failed" in statuses:
+        # The version status is the authoritative ingestion outcome. A stale
+        # running stage record must not mask a terminal version failure (this
+        # can happen when a worker crashes after marking the version failed).
+        if version.processing_status == "failed" or "failed" in statuses:
             overall = "failed"
         elif any(
             status in RUNNING_JOB_STATUSES or status == "pending"

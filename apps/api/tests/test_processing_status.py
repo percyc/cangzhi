@@ -168,6 +168,52 @@ def test_compute_processing_status_reports_failed_embedding(client):
     assert body["stages"]["embedding"]["failed"] == 1
 
 
+def test_compute_processing_status_does_not_mask_failed_version_with_running_stage(client):
+    test_client, _ = client
+    created = test_client.post(
+        "/api/notes",
+        json={"title": "失败版本", "content": "版本已失败但残留处理中任务。"},
+    ).json()
+    document_id = created["id"]
+    version_id = created["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def seed():
+        dependency = db_dependency()
+        session = await _session(dependency)
+        try:
+            await _seed_base(session, document_id, version_id)
+            version = await session.get(DocumentVersion, version_id)
+            assert version is not None
+            version.processing_status = "failed"
+            session.add(
+                ProcessingJob(
+                    document_id=document_id,
+                    document_version_id=version_id,
+                    stage="parsing",
+                    status="processing",
+                    idempotency_key=f"status:{version_id}:parsing:stale-running",
+                    config_version="test",
+                )
+            )
+            await session.commit()
+        finally:
+            await dependency.aclose()
+
+    asyncio.run(seed())
+
+    async def run():
+        dependency = db_dependency()
+        session = await _session(dependency)
+        try:
+            return await compute_processing_status(session, document_id)
+        finally:
+            await dependency.aclose()
+
+    body = asyncio.run(run())
+    assert body["overall_status"] == "failed"
+
+
 def test_repair_active_vector_resets_only_failed_jobs_for_active_profile(client):
     test_client, _ = client
     created = test_client.post(
