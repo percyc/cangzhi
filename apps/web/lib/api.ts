@@ -19,6 +19,14 @@ export type AIConfig = {
   embedding_base_url: string | null;
   has_embedding_api_key: boolean;
   embedding_timeout_seconds: number;
+  ocr_provider: 'disabled' | 'openai';
+  ocr_base_url: string | null;
+  ocr_model: string | null;
+  has_ocr_api_key: boolean;
+  ocr_timeout_seconds: number;
+  ocr_confidence_threshold: number;
+  ocr_min_chars: number;
+  ocr_max_external_pages: number;
   updated_at: string | null;
 };
 
@@ -43,6 +51,29 @@ export type AIConfigPayload = {
   embedding_api_key_action?: 'keep' | 'replace' | 'clear';
   embedding_api_key?: string;
   embedding_timeout_seconds?: number;
+  ocr_provider?: 'disabled' | 'openai';
+  ocr_base_url?: string | null;
+  ocr_model?: string | null;
+  ocr_api_key_action?: 'keep' | 'replace' | 'clear';
+  ocr_api_key?: string;
+  ocr_timeout_seconds?: number;
+  ocr_confidence_threshold?: number;
+  ocr_min_chars?: number;
+  ocr_max_external_pages?: number;
+  ocr_reuse_chat?: boolean;
+};
+
+export type OcrConfigPayload = {
+  provider?: 'disabled' | 'openai';
+  base_url?: string | null;
+  model?: string | null;
+  api_key_action: 'keep' | 'replace' | 'clear';
+  api_key?: string;
+  timeout_seconds?: number;
+  confidence_threshold?: number;
+  min_chars?: number;
+  max_external_pages?: number;
+  reuse_chat?: boolean;
 };
 
 export type AITestResult = {
@@ -213,6 +244,44 @@ export async function testEmbeddingConfig(): Promise<AITestResult> {
     throw new Error(await extractErrorMessage(response, '测试 Embedding 连接失败'));
   }
   return parseJson<AITestResult>(response);
+}
+
+export async function testOcrConfig(): Promise<AITestResult> {
+  const response = await fetch('/api/settings/ai/ocr/test', {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '测试外部 OCR 连接失败'));
+  }
+  return parseJson<AITestResult>(response);
+}
+
+export async function fetchOcrModels(): Promise<AIModelsResponse> {
+  const response = await fetch('/api/settings/ai/ocr/models', {
+    cache: 'no-store',
+    credentials: 'include',
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '获取外部 OCR 模型列表失败'));
+  }
+  return parseJson<AIModelsResponse>(response);
+}
+
+export async function updateOcrConfig(
+  payload: OcrConfigPayload,
+): Promise<AIConfig> {
+  const response = await fetch('/api/settings/ai/ocr', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '保存外部 OCR 设置失败'));
+  }
+  const body = await parseJson<AIConfigResponse>(response);
+  return body.config;
 }
 
 export async function testEmbeddingCompatibility(): Promise<EmbeddingCompatibilityResult> {

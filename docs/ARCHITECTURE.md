@@ -143,6 +143,47 @@ OCR 关闭、依赖缺失或超过 `PDF_OCR_MAX_PAGES` 候选页时，按页记�
 展示原生文字页、OCR 完成、失败、跳过数量，失败不阻塞其余阶段。图片
 语义理解、图表识别与版面重建仍属后续阶段。
 
+### 5.1.2 外部视觉 OCR（OCR 第二阶段）
+
+本地 tesseract 是必选通道；当扫描页本地识别失败、识别字符数低于阈值或
+平均置信度低于阈值时，Worker 可选地把同一张渲染后的 PNG 发送给一个
+OpenAI 兼容的多模态模型，由模型返回归一化坐标中的行级文本与置信度。
+外部渠道是独立于对话和向量渠道的第三套配置：
+
+- 入口在 `/settings?section=ocr`，面板名为「图片文字识别」，与对话
+  面板并列；可勾选「复用对话渠道的地址和密钥」一键填充地址与密钥，
+  模型名仍独立指定。
+- 触发条件按以下顺序短路：本地结果 `local_chars ≥ ocr_min_chars` 且
+  `local_confidence ≥ ocr_confidence_threshold/1000` 时不调用；
+  `no_text` / `low_chars` / `low_confidence` 三类原因记入
+  `metadata.pdf_extraction.external_trigger_reasons`。
+- 每次外部调用对应一份 0..1000 顶左坐标的 bbox 响应；Parser 按页面
+  真实宽高还原为 PDF 点坐标并翻转 Y 轴后写入 `Block.extra.bbox`，与本地
+  tesseract 通道共用同一个坐标系。
+- 单文档外发页数受 `ocr_max_external_pages` 限制（0 表示关闭外部
+  渠道），超过后剩余候选页继续走本地识别并标记
+  `external_skipped_pages` 与触发原因 `max_external_pages_reached`。
+- 外部调用失败（`auth` / `network` / `timeout` / `upstream` / `invalid`
+  类别）一律保留本地非空结果，整份文档解析不会因此失败；
+  `Block.extra` 同时记录 `external_used: false` 与
+  `external_status` 以便文档详情页区分「本地命中」「外部完成」「外部
+  失败后回退」「外发超限」等情形。
+- `Block.extra` 保留历史 `source=ocr` 和 `ocr_engine`，并增加
+  `{ocr_source, engine, provider, model, bbox, confidence,
+  external_used, external_status}`；`ocr_source` 取值 `local` /
+  `external`，`engine` 取值 `tesseract` / `external-vision`，避免破坏
+  既有切片和检索消费方。
+- `metadata.pdf_extraction` 在保留全部旧字段的前提下增加
+  `external_provider { provider, model }`、`external_attempted_pages`、
+  `external_completed_pages`、`external_failed_pages`、
+  `external_skipped_pages` 与 `external_trigger_reasons`，全部
+  不含密钥与图片字节；Provider 也不会把它们写日志。
+- Provider 通过 `apps/api/ocr/` 中的抽象基类注入；首个内置实现是
+  `OpenAICompatibleOcrProvider`，它把 PNG 编码成 `data:image/png;
+  base64,...` 走 `/chat/completions`，提示词只取回严格 JSON 行列表
+  并对坐标做 0..1000 夹紧；后续可加入 `OllamaVisionOcrProvider` 等
+  同协议实现而无需修改 Worker 或 Parser。
+
 ### 5.2 数据集引擎
 
 XLS/XLSX 二维数据仍属于文档生命周期，但精确查询不依赖普通文本切片：
@@ -247,7 +288,7 @@ MCP / Skill ─────┘
 
 | 领域 | 当前表 |
 |---|---|
-| 身份、空间与模型 | `admins`、`auth_sessions`、`personal_access_tokens`、`workspaces`、`ai_runtime_configs` |
+| 身份、空间与模型 | `admins`、`auth_sessions`、`personal_access_tokens`、`workspaces`、`ai_runtime_configs`（含 `ocr_provider` / `ocr_base_url` / `ocr_model` / `ocr_api_key_cipher` / `ocr_confidence_threshold` / `ocr_min_chars` / `ocr_max_external_pages` 等外部 OCR 字段） |
 | 文档事实源 | `documents`、`document_versions`、`blobs` |
 | 处理与检索 | `processing_jobs`、`document_chunks`、`embedding_profiles`、`chunk_embeddings` |
 | 组织 | `categories`、`document_categories`、`tags`、`document_tags`、`document_summaries`、`tag_merge_records` |

@@ -49,9 +49,18 @@ router = APIRouter(prefix="/settings/ai", tags=["settings"])
 
 
 _PROVIDER_VALUES = ("disabled", "openai", "ollama")
+_OCR_PROVIDER_VALUES = ("disabled", "openai")
 _SINGLETON_KEY = "singleton"
 
 _URL_RE = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
+
+
+def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
 
 
 def _validate_url(value: str) -> str:
@@ -151,6 +160,25 @@ class AIConfigUpdate(BaseModel):
     embedding_api_key_action: str = Field(default="keep", max_length=16)
     embedding_api_key: str | None = Field(default=None, max_length=512)
     embedding_timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    # --- External OCR channel (OCR stage 2) ----------------------------
+    # The OCR side is independent of chat and embedding: the user
+    # can keep the chat model local while sending image pages to a
+    # remote vision model, or vice versa. ``ocr_reuse_chat`` is a
+    # convenience flag that means "copy the chat base URL and key
+    # into the OCR columns" and never appears in the public dict.
+    # The dedicated OCR routes (``/api/settings/ai/ocr/...``) are
+    # the recommended way to update the OCR channel; this field is
+    # kept for symmetry so the "save all" form keeps working.
+    ocr_provider: str | None = Field(default=None, max_length=16)
+    ocr_base_url: str | None = Field(default=None, max_length=512)
+    ocr_model: str | None = Field(default=None, max_length=255)
+    ocr_api_key_action: str = Field(default="keep", max_length=16)
+    ocr_api_key: str | None = Field(default=None, max_length=512)
+    ocr_timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    ocr_confidence_threshold: int | None = Field(default=None, ge=0, le=1000)
+    ocr_min_chars: int | None = Field(default=None, ge=0, le=1000)
+    ocr_max_external_pages: int | None = Field(default=None, ge=0, le=1000)
+    ocr_reuse_chat: bool | None = None
 
     @field_validator("provider")
     @classmethod
@@ -203,6 +231,43 @@ class AIConfigUpdate(BaseModel):
         cleaned = (value or "keep").strip().lower()
         if cleaned not in {"keep", "replace", "clear"}:
             raise ValueError("不支持的 Embedding 密钥操作")
+        return cleaned
+
+    @field_validator("ocr_provider")
+    @classmethod
+    def _ocr_provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = (value or "").strip().lower()
+        if cleaned not in _OCR_PROVIDER_VALUES:
+            raise ValueError("不支持的外部 OCR 模型来源")
+        return cleaned
+
+    @field_validator("ocr_base_url")
+    @classmethod
+    def _ocr_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_url(value)
+
+    @field_validator("ocr_model")
+    @classmethod
+    def _ocr_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > 200:
+            raise ValueError("外部 OCR 模型名称不能超过 200 个字符")
+        return cleaned
+
+    @field_validator("ocr_api_key_action")
+    @classmethod
+    def _ocr_api_key_action(cls, value: str) -> str:
+        cleaned = (value or "keep").strip().lower()
+        if cleaned not in {"keep", "replace", "clear"}:
+            raise ValueError("不支持的外部 OCR 密钥操作")
         return cleaned
 
 
@@ -488,6 +553,110 @@ async def update_settings(
         elif action == "clear":
             row.embedding_api_key_cipher = None
             row.has_embedding_api_key = False
+
+    # --- External OCR channel (OCR stage 2) ----------------------------
+    # The OCR side is intentionally decoupled: switching the chat
+    # provider, key or timeout never touches the OCR columns. The
+    # only field that crosses is the explicit ``ocr_reuse_chat``
+    # convenience flag, which copies the chat base URL and key
+    # into the OCR columns when the user does not want to type
+    # them twice. The dedicated ``/api/settings/ai/ocr/...`` routes
+    # always go through this same code path so the values stay in
+    # lock-step no matter which form the user submitted.
+    if "ocr_provider" in payload.model_fields_set:
+        provider_value = payload.ocr_provider or "disabled"
+        if provider_value == "openai":
+            url = payload.ocr_base_url
+            if not url:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "ocr_openai_missing",
+                        "message": "请填写外部 OCR 的 OpenAI 兼容地址",
+                    },
+                )
+            row.ocr_provider = "openai"
+            row.ocr_base_url = url
+        else:
+            row.ocr_provider = "disabled"
+    if "ocr_base_url" in payload.model_fields_set and (
+        payload.ocr_base_url
+    ):
+        row.ocr_base_url = payload.ocr_base_url
+    if "ocr_model" in payload.model_fields_set and payload.ocr_model is not None:
+        if payload.ocr_model.strip():
+            row.ocr_model = payload.ocr_model.strip()
+        else:
+            row.ocr_model = None
+    if "ocr_timeout_seconds" in payload.model_fields_set and (
+        payload.ocr_timeout_seconds is not None
+    ):
+        row.ocr_timeout_seconds = payload.ocr_timeout_seconds
+    if "ocr_confidence_threshold" in payload.model_fields_set and (
+        payload.ocr_confidence_threshold is not None
+    ):
+        row.ocr_confidence_threshold = _clamp_int(
+            payload.ocr_confidence_threshold, 0, 1000, 600
+        )
+    if "ocr_min_chars" in payload.model_fields_set and (
+        payload.ocr_min_chars is not None
+    ):
+        row.ocr_min_chars = _clamp_int(payload.ocr_min_chars, 0, 1000, 8)
+    if "ocr_max_external_pages" in payload.model_fields_set and (
+        payload.ocr_max_external_pages is not None
+    ):
+        row.ocr_max_external_pages = _clamp_int(
+            payload.ocr_max_external_pages, 0, 1000, 20
+        )
+    if payload.ocr_reuse_chat:
+        if not row.openai_base_url or not row.has_api_key or not row.openai_api_key_cipher:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ocr_reuse_requires_chat",
+                    "message": "复用对话渠道需要先配置并保存 OpenAI 兼容地址和密钥",
+                },
+            )
+        try:
+            chat_key = decrypt_secret(row.openai_api_key_cipher)
+        except (SecretStoreError, SecretDecryptError):
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "ocr_reuse_decrypt_failed",
+                    "message": "已保存的对话密钥无法读取，请重新保存",
+                },
+            ) from None
+        if not chat_key:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ocr_reuse_requires_chat",
+                    "message": "复用对话渠道需要先配置并保存 OpenAI 兼容地址和密钥",
+                },
+            )
+        row.ocr_provider = "openai"
+        row.ocr_base_url = row.openai_base_url
+        row.ocr_api_key_cipher = encrypt_secret(chat_key)
+        row.has_ocr_api_key = True
+    elif "ocr_api_key_action" in payload.model_fields_set and (
+        row.ocr_provider == "openai"
+    ):
+        action = payload.ocr_api_key_action
+        if action == "replace":
+            if not payload.ocr_api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "ocr_api_key_required",
+                        "message": "请输入要保存的外部 OCR 密钥",
+                    },
+                )
+            row.ocr_api_key_cipher = encrypt_secret(payload.ocr_api_key)
+            row.has_ocr_api_key = True
+        elif action == "clear":
+            row.ocr_api_key_cipher = None
+            row.has_ocr_api_key = False
 
     db.add(row)
     await db.commit()
@@ -1074,4 +1243,348 @@ async def list_embedding_models(
         "models": [{"id": model_id} for model_id in sorted_ids],
         "provider": row.embedding_provider,
         "current_model": (row.embedding_model or "").strip(),
+    }
+
+
+# --- External OCR (OCR stage 2) -----------------------------------------
+#
+# The OCR channel mirrors the chat / embedding surface: the front-end
+# gets a ``has_ocr_api_key`` boolean (never the cipher), the test
+# endpoint sanitises upstream errors, and the model list is served
+# from the encrypted, persisted configuration. The dedicated routes
+# exist so a user can iterate on the OCR model without re-saving the
+# chat / embedding settings.
+
+
+class OcrConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = Field(default=None, max_length=16)
+    base_url: str | None = Field(default=None, max_length=512)
+    model: str | None = Field(default=None, max_length=255)
+    api_key_action: str = Field(default="keep", max_length=16)
+    api_key: str | None = Field(default=None, max_length=512)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    confidence_threshold: int | None = Field(default=None, ge=0, le=1000)
+    min_chars: int | None = Field(default=None, ge=0, le=1000)
+    max_external_pages: int | None = Field(default=None, ge=0, le=1000)
+    reuse_chat: bool | None = None
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = (value or "").strip().lower()
+        if cleaned not in _OCR_PROVIDER_VALUES:
+            raise ValueError("不支持的外部 OCR 模型来源")
+        return cleaned
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_url(value)
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > 200:
+            raise ValueError("外部 OCR 模型名称不能超过 200 个字符")
+        return cleaned
+
+    @field_validator("api_key_action")
+    @classmethod
+    def _api_key_action(cls, value: str) -> str:
+        cleaned = (value or "keep").strip().lower()
+        if cleaned not in {"keep", "replace", "clear"}:
+            raise ValueError("不支持的外部 OCR 密钥操作")
+        return cleaned
+
+
+def _apply_ocr_payload(
+    row: AIRuntimeConfig,
+    payload: OcrConfigUpdate,
+) -> None:
+    """Mutate ``row`` according to the OCR patch payload."""
+
+    if payload.provider is not None:
+        provider_value = payload.provider or "disabled"
+        if provider_value == "openai":
+            if not payload.base_url:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "ocr_openai_missing",
+                        "message": "请填写外部 OCR 的 OpenAI 兼容地址",
+                    },
+                )
+            row.ocr_provider = "openai"
+            row.ocr_base_url = payload.base_url
+        else:
+            row.ocr_provider = "disabled"
+
+    if payload.base_url is not None and payload.base_url:
+        row.ocr_base_url = payload.base_url
+    if payload.model is not None:
+        row.ocr_model = payload.model.strip() or None
+    if payload.timeout_seconds is not None:
+        row.ocr_timeout_seconds = payload.timeout_seconds
+    if payload.confidence_threshold is not None:
+        row.ocr_confidence_threshold = _clamp_int(
+            payload.confidence_threshold, 0, 1000, 600
+        )
+    if payload.min_chars is not None:
+        row.ocr_min_chars = _clamp_int(payload.min_chars, 0, 1000, 8)
+    if payload.max_external_pages is not None:
+        row.ocr_max_external_pages = _clamp_int(
+            payload.max_external_pages, 0, 1000, 20
+        )
+
+    if payload.reuse_chat:
+        if (
+            not row.openai_base_url
+            or not row.has_api_key
+            or not row.openai_api_key_cipher
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ocr_reuse_requires_chat",
+                    "message": "复用对话渠道需要先配置并保存 OpenAI 兼容地址和密钥",
+                },
+            )
+        try:
+            chat_key = decrypt_secret(row.openai_api_key_cipher)
+        except (SecretStoreError, SecretDecryptError):
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "ocr_reuse_decrypt_failed",
+                    "message": "已保存的对话密钥无法读取，请重新保存",
+                },
+            ) from None
+        if not chat_key:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "ocr_reuse_requires_chat",
+                    "message": "复用对话渠道需要先配置并保存 OpenAI 兼容地址和密钥",
+                },
+            )
+        row.ocr_provider = "openai"
+        row.ocr_base_url = row.openai_base_url
+        row.ocr_api_key_cipher = encrypt_secret(chat_key)
+        row.has_ocr_api_key = True
+    elif payload.api_key_action in {"replace", "clear"}:
+        # ``clear`` is always accepted (even when the operator
+        # also flips the provider to ``disabled`` in the same
+        # patch) because the ciphertext is about to be discarded
+        # either way. ``replace`` is only honoured when the
+        # provider is currently openai, otherwise the API key
+        # would point at a configuration the user did not
+        # actually select.
+        if payload.api_key_action == "clear":
+            row.ocr_api_key_cipher = None
+            row.has_ocr_api_key = False
+        else:
+            if row.ocr_provider != "openai":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "ocr_provider_required",
+                        "message": "请先选择外部 OCR 模型来源",
+                    },
+                )
+            if not payload.api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "ocr_api_key_required",
+                        "message": "请输入要保存的外部 OCR 密钥",
+                    },
+                )
+            row.ocr_api_key_cipher = encrypt_secret(payload.api_key)
+            row.has_ocr_api_key = True
+
+
+@router.get("/ocr", response_model=dict[str, Any])
+async def get_ocr_settings(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return the external OCR configuration (never the cipher)."""
+
+    row = await _get_or_create_config(db)
+    return {"config": _to_public(row)}
+
+
+@router.patch("/ocr", response_model=dict[str, Any])
+async def update_ocr_settings(
+    payload: OcrConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """Apply an OCR-only patch to the active AI runtime config."""
+
+    row = await _get_or_create_config(db)
+    _apply_ocr_payload(row, payload)
+    row.updated_by = admin.id
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    logger.info(
+        "ocr_runtime_updated provider=%s model=%s admin=%s",
+        row.ocr_provider,
+        row.ocr_model,
+        admin.username,
+    )
+    return {"config": _to_public(row)}
+
+
+@router.post("/ocr/test", response_model=dict[str, Any])
+async def test_ocr_settings(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """Probe the active OCR provider without leaking secrets.
+
+    The probe is read-only: it loads the encrypted configuration,
+    decrypts the key on the fly, and calls ``/models`` on the
+    configured base URL. Any upstream error is sanitised through
+    :func:`_safe_failure` so an API key embedded in a verbose
+    response never reaches the front-end.
+    """
+
+    row = await _get_or_create_config(db)
+    if row.ocr_provider == "disabled":
+        return {"ok": False, "message": "当前未启用任何外部 OCR 模型"}
+    if row.ocr_provider != "openai":
+        return {"ok": False, "message": "不支持的外部 OCR 模型来源"}
+    if not row.ocr_base_url or not row.ocr_model:
+        return {"ok": False, "message": "尚未配置外部 OCR 的 OpenAI 兼容地址或模型"}
+    if not row.has_ocr_api_key or not row.ocr_api_key_cipher:
+        return {"ok": False, "message": "尚未保存外部 OCR 密钥"}
+    try:
+        api_key = decrypt_secret(row.ocr_api_key_cipher)
+    except (SecretStoreError, SecretDecryptError):
+        logger.warning("ocr_test_decrypt_failed admin=%s", admin.username)
+        return {"ok": False, "message": "主密钥不匹配或密文已损坏，请联系管理员"}
+    if not api_key:
+        return {"ok": False, "message": "尚未保存外部 OCR 密钥"}
+    timeout = float(row.ocr_timeout_seconds or 30)
+    return await _probe_ocr_openai(
+        base_url=row.ocr_base_url,
+        model=row.ocr_model,
+        api_key=api_key,
+        timeout=timeout,
+    )
+
+
+async def _probe_ocr_openai(
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    timeout: float,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/models"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        return _safe_failure("无法连接外部 OCR 服务", exc)
+
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "message": f"服务返回 HTTP {response.status_code}，请检查地址、密钥和模型权限",
+        }
+    try:
+        data = response.json()
+    except ValueError:
+        return {
+            "ok": False,
+            "message": "服务返回的不是模型列表，请检查 API 地址是否包含正确的版本路径",
+        }
+    try:
+        model_ids = _extract_model_ids(data, list_key="data")
+    except ValueError:
+        return {"ok": False, "message": "服务返回的模型列表格式不正确"}
+    if not model_ids:
+        return {"ok": False, "message": "服务没有返回任何可用模型"}
+    if model.strip() not in model_ids:
+        matching = [m for m in model_ids if model.strip().lower() in m.lower()]
+        if matching:
+            suggestions = ", ".join(m[:30] for m in matching[:3])
+            msg = f"配置的模型 '{model[:30]}...' 不在模型列表中，找到相似模型：{suggestions}"
+        else:
+            available = ", ".join(m[:20] for m in model_ids[:5])
+            if len(model_ids) > 5:
+                available += "..."
+            msg = f"配置的模型不在列表中，可用模型：{available}"
+        return {"ok": False, "message": msg}
+    return {"ok": True, "message": "连接正常，外部 OCR 模型已验证"}
+
+
+@router.get("/ocr/models", response_model=dict[str, Any])
+async def list_ocr_models(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """List models from the saved, independent OCR channel."""
+
+    row = await _get_or_create_config(db)
+    if row.ocr_provider != "openai":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ocr_disabled", "message": "外部 OCR 渠道尚未启用"},
+        )
+    if not row.ocr_base_url:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "missing_base_url", "message": "请先保存外部 OCR 服务地址"},
+        )
+    if not row.has_ocr_api_key or not row.ocr_api_key_cipher:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "missing_api_key", "message": "请先保存外部 OCR 密钥"},
+        )
+    try:
+        api_key = decrypt_secret(row.ocr_api_key_cipher)
+    except (SecretStoreError, SecretDecryptError):
+        logger.warning("ocr_models_decrypt_failed admin=%s", admin.username)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "decrypt_failed", "message": "已保存的密钥无法读取，请重新保存"},
+        ) from None
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "missing_api_key", "message": "请先保存外部 OCR 密钥"},
+        )
+    model_ids = await _request_model_ids(
+        url=f"{row.ocr_base_url.rstrip('/')}/models",
+        timeout=float(row.ocr_timeout_seconds or 30),
+        list_key="data",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+    )
+    sorted_ids = sorted(set(model_ids), key=_natural_model_key)[:500]
+    return {
+        "models": [{"id": model_id} for model_id in sorted_ids],
+        "provider": row.ocr_provider,
+        "current_model": (row.ocr_model or "").strip(),
     }

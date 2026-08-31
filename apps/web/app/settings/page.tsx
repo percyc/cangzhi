@@ -8,10 +8,13 @@ import {
   fetchAIModels,
   fetchEmbeddingModels,
   fetchEmbeddingStatus,
+  fetchOcrModels,
   runEmbeddingProfileAction,
   testAIConfig,
   testEmbeddingCompatibility,
+  testOcrConfig,
   updateAIConfig,
+  updateOcrConfig,
   type AIConfig,
   type AIModelsResponse,
   type AITestResult,
@@ -25,9 +28,10 @@ import {
 
 type Provider = AIConfig['provider'];
 type EmbeddingProvider = AIConfig['embedding_provider'];
+type OcrProvider = AIConfig['ocr_provider'];
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 type FetchState = 'idle' | 'fetching' | 'success' | 'error';
-type SettingsPanel = Extract<SettingsSection, 'chat' | 'embedding'>;
+type SettingsPanel = Extract<SettingsSection, 'chat' | 'embedding' | 'ocr'>;
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -71,6 +75,22 @@ export default function SettingsPage() {
     useState<FetchState>('idle');
   const [embeddingModelsError, setEmbeddingModelsError] =
     useState<string | null>(null);
+  // --- External visual OCR channel (OCR stage 2) -----------------------
+  const [ocrProvider, setOcrProvider] = useState<OcrProvider>('disabled');
+  const [ocrBaseUrl, setOcrBaseUrl] = useState('');
+  const [ocrModel, setOcrModel] = useState('');
+  const [ocrApiKey, setOcrApiKey] = useState('');
+  const [clearOcrApiKey, setClearOcrApiKey] = useState(false);
+  const [ocrTimeoutSeconds, setOcrTimeoutSeconds] = useState(30);
+  const [ocrConfidenceThreshold, setOcrConfidenceThreshold] = useState(600);
+  const [ocrMinChars, setOcrMinChars] = useState(8);
+  const [ocrMaxExternalPages, setOcrMaxExternalPages] = useState(20);
+  const [ocrReuseChat, setOcrReuseChat] = useState(false);
+  const [ocrTestResult, setOcrTestResult] = useState<AITestResult | null>(null);
+  const [ocrTesting, setOcrTesting] = useState(false);
+  const [ocrModels, setOcrModels] = useState<AIModelsResponse['models']>([]);
+  const [ocrModelsState, setOcrModelsState] = useState<FetchState>('idle');
+  const [ocrModelsError, setOcrModelsError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +110,16 @@ export default function SettingsPage() {
         );
         setEmbeddingModel(data.embedding_model ?? '');
         setEmbeddingTimeoutSeconds(data.embedding_timeout_seconds || 30);
+        setOcrProvider(data.ocr_provider);
+        setOcrBaseUrl(
+          data.ocr_base_url ?? data.openai_base_url ?? 'https://api.openai.com/v1',
+        );
+        setOcrModel(data.ocr_model ?? '');
+        setOcrTimeoutSeconds(data.ocr_timeout_seconds || 30);
+        setOcrConfidenceThreshold(data.ocr_confidence_threshold ?? 60);
+        setOcrMinChars(data.ocr_min_chars ?? 8);
+        setOcrMaxExternalPages(data.ocr_max_external_pages ?? 20);
+        setOcrReuseChat(false);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -110,11 +140,14 @@ export default function SettingsPage() {
   useEffect(() => {
     const syncPanelFromLocation = () => {
       const requested = new URLSearchParams(window.location.search).get('section');
-      setActivePanel(
-        requested === 'embedding' || window.location.hash === '#embedding'
-          ? 'embedding'
-          : 'chat',
-      );
+      const hash = window.location.hash.replace(/^#/, '');
+      if (requested === 'embedding' || hash === 'embedding') {
+        setActivePanel('embedding');
+      } else if (requested === 'ocr' || hash === 'ocr') {
+        setActivePanel('ocr');
+      } else {
+        setActivePanel('chat');
+      }
     };
     syncPanelFromLocation();
     window.addEventListener('popstate', syncPanelFromLocation);
@@ -178,7 +211,29 @@ export default function SettingsPage() {
     embeddingConnectionChanged ||
     embeddingModelChanged ||
     embeddingTimeoutChanged;
-  const dirtyPanelCount = Number(chatDirty) + Number(embeddingDirty);
+  // The OCR panel is tracked independently: a change to the chat
+  // model or to the embedding channel never invalidates the OCR
+  // test, and vice versa. The only field that touches both is
+  // ``ocr_reuse_chat`` which is only sent once on the OCR panel.
+  const ocrConnectionChanged =
+    ocrProvider !== config?.ocr_provider ||
+    (ocrProvider === 'openai' &&
+      ocrBaseUrl.trim() !== (config?.ocr_base_url ?? '')) ||
+    Boolean(ocrApiKey) ||
+    clearOcrApiKey;
+  const ocrModelChanged =
+    ocrProvider === 'openai' &&
+    ocrModel.trim() !== (config?.ocr_model ?? '');
+  const ocrParamsChanged =
+    ocrTimeoutSeconds !== (config?.ocr_timeout_seconds || 30) ||
+    ocrConfidenceThreshold !== (config?.ocr_confidence_threshold ?? 600) ||
+    ocrMinChars !== (config?.ocr_min_chars ?? 8) ||
+    ocrMaxExternalPages !== (config?.ocr_max_external_pages ?? 20) ||
+    ocrReuseChat;
+  const ocrDirty =
+    ocrConnectionChanged || ocrModelChanged || ocrParamsChanged;
+  const dirtyPanelCount =
+    Number(chatDirty) + Number(embeddingDirty) + Number(ocrDirty);
   const anyDirty = dirtyPanelCount > 0;
 
   const handleFetchModels = async () => {
@@ -204,6 +259,10 @@ export default function SettingsPage() {
   const handleSave = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!config) return;
+    if (activePanel === 'ocr') {
+      await handleOcrSave();
+      return;
+    }
     setSaveState('saving');
     setSaveMessage(null);
     setTestResult(null);
@@ -361,6 +420,82 @@ export default function SettingsPage() {
     }
   };
 
+  const handleFetchOcrModels = async () => {
+    if (
+      ocrConnectionChanged ||
+      ocrProvider === 'disabled'
+    ) {
+      setOcrModelsState('error');
+      setOcrModelsError('请先保存外部 OCR 的地址和密钥');
+      return;
+    }
+    setOcrModelsState('fetching');
+    setOcrModelsError(null);
+    try {
+      const result = await fetchOcrModels();
+      setOcrModels(result.models);
+      setOcrModelsState('success');
+    } catch (err) {
+      setOcrModelsState('error');
+      setOcrModelsError(
+        err instanceof Error ? err.message : '获取外部 OCR 模型列表失败',
+      );
+    }
+  };
+
+  const handleOcrTest = async () => {
+    setOcrTesting(true);
+    setOcrTestResult(null);
+    try {
+      const result = await testOcrConfig();
+      setOcrTestResult(result);
+    } catch (err) {
+      setOcrTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : '测试外部 OCR 连接失败',
+      });
+    } finally {
+      setOcrTesting(false);
+    }
+  };
+
+  const handleOcrSave = async () => {
+    if (!config) return;
+    setSaveState('saving');
+    setSaveMessage(null);
+    setOcrTestResult(null);
+    try {
+      const next = await updateOcrConfig({
+        provider: ocrProvider,
+        base_url: ocrProvider === 'openai' ? ocrBaseUrl.trim() : null,
+        model: ocrProvider === 'openai' ? ocrModel.trim() : null,
+        api_key_action: (clearOcrApiKey
+          ? 'clear'
+          : ocrApiKey
+            ? 'replace'
+            : 'keep') as 'keep' | 'replace' | 'clear',
+        api_key: clearOcrApiKey ? undefined : ocrApiKey || undefined,
+        timeout_seconds: ocrTimeoutSeconds,
+        confidence_threshold: ocrConfidenceThreshold,
+        min_chars: ocrMinChars,
+        max_external_pages: ocrMaxExternalPages,
+        reuse_chat: ocrReuseChat || undefined,
+      });
+      setConfig(next);
+      setOcrApiKey('');
+      setClearOcrApiKey(false);
+      setOcrReuseChat(false);
+      setOcrModels([]);
+      setOcrModelsState('idle');
+      setSaveState('saved');
+      setSaveMessage('外部 OCR 设置已保存');
+      router.refresh();
+    } catch (err) {
+      setSaveState('error');
+      setSaveMessage(err instanceof Error ? err.message : '保存失败');
+    }
+  };
+
   if (loadError) {
     return (
       <main className="mx-auto max-w-3xl px-6 py-12">
@@ -386,12 +521,18 @@ export default function SettingsPage() {
         系统设置
       </p>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-        {activePanel === 'chat' ? '对话模型' : '向量与索引'}
+        {activePanel === 'chat'
+          ? '对话模型'
+          : activePanel === 'embedding'
+            ? '向量与索引'
+            : '图片文字识别'}
       </h1>
       <p className="mt-2 text-sm leading-6 text-slate-500">
         {activePanel === 'chat'
           ? '配置用于分类、摘要、整理和知识问答的大模型。'
-          : '配置语义向量渠道，并管理全库索引版本与切换。'}
+          : activePanel === 'embedding'
+            ? '配置语义向量渠道，并管理全库索引版本与切换。'
+            : '为扫描 PDF 中的图片页配置外部视觉识别模型。'}
       </p>
       <SettingsSectionNav
         active={activePanel}
@@ -403,17 +544,27 @@ export default function SettingsPage() {
           embedding: embeddingStatus?.active_profile.id
             ? `${embeddingStatus.active_profile.model} · ${embeddingStatus.active_profile.dim} 维`
             : '当前未启用',
+          ocr:
+            ocrProvider === 'disabled'
+              ? '当前未启用'
+              : `外部 OCR · ${ocrModel || '未选模型'}`,
         }}
-        dirty={{ chat: chatDirty, embedding: embeddingDirty }}
+        dirty={{ chat: chatDirty, embedding: embeddingDirty, ocr: ocrDirty }}
         onSelect={(section) => {
-          if (section === 'chat' || section === 'embedding') {
+          if (
+            section === 'chat' ||
+            section === 'embedding' ||
+            section === 'ocr'
+          ) {
             setActivePanel(section);
           }
         }}
         beforeNavigate={(section) =>
-          section === activePanel ||
-          !anyDirty ||
-          window.confirm('模型设置还有未保存的修改，确定离开当前页面吗？')
+          ['chat', 'embedding', 'ocr'].includes(section) && section === activePanel
+            ? true
+            : section === activePanel ||
+              !anyDirty ||
+              window.confirm('模型设置还有未保存的修改，确定离开当前页面吗？')
         }
       />
 
@@ -880,14 +1031,251 @@ export default function SettingsPage() {
         </section>
         )}
 
+        {activePanel === 'ocr' && (
+        <section className="space-y-5 rounded-2xl border-2 border-emerald-200 bg-white p-5 shadow-sm">
+          <header className="border-b border-emerald-100 pb-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600">
+              扫描 PDF 的图片文字兜底
+            </p>
+            <h2 className="mt-1 text-xl font-semibold text-slate-900">
+              图片文字识别
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              保留 tesseract 本地识别作为第一通道；只有本地识别失败、字符数过少
+              或平均置信度低于阈值时，才把页面渲染成 PNG 发送给外部视觉模型。
+            </p>
+          </header>
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+            <p className="font-semibold">隐私与成本提示</p>
+            <p className="mt-1">
+              外部 OCR 启用后，扫描 PDF 中被识别为图片的页面会按
+              <code className="mx-1 rounded bg-amber-100 px-1">OCR_MAX_EXTERNAL_PAGES</code>
+              上限发送到所选 OpenAI 兼容服务。
+              每页只会发送渲染后的位图和 OCR 请求提示词；模型回答与
+              <code className="mx-1 rounded bg-amber-100 px-1">pdf_extraction</code>
+              元数据保留在藏知本地，不会写入日志。密钥使用 Fernet 加密保存，原始 PNG 与上游响应不会写入日志。
+              处理过程中如需关闭，直接选择“不使用”并保存即可，Worker 会立即回到纯本地模式。
+            </p>
+          </div>
+
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">
+              1. 选择外部 OCR 模型来源
+            </h3>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              {(['disabled', 'openai'] as const).map((value) => {
+                const labels: Record<OcrProvider, { title: string; hint: string }> = {
+                  disabled: {
+                    title: '不使用',
+                    hint: '只使用本地 tesseract，不再外发图片',
+                  },
+                  openai: {
+                    title: 'OpenAI 兼容',
+                    hint: '需要支持视觉问答的多模态模型',
+                  },
+                };
+                const label = labels[value];
+                const active = ocrProvider === value;
+                const style = active
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50';
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setOcrProvider(value)}
+                    className={`rounded-xl border p-4 text-left ${style}`}
+                  >
+                    <p className="text-sm font-semibold">{label.title}</p>
+                    <p
+                      className={`mt-1 text-xs ${active ? 'text-slate-200' : 'text-slate-500'}`}
+                    >
+                      {label.hint}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {ocrProvider === 'openai' && (
+            <section className="space-y-4 rounded-xl bg-slate-50 p-4">
+              <h3 className="text-sm font-semibold text-slate-800">
+                2. 填写外部 OCR 参数
+              </h3>
+              <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={ocrReuseChat}
+                    onChange={(event) => setOcrReuseChat(event.target.checked)}
+                  />
+                  <span>
+                    复用对话渠道的地址和已保存密钥
+                    <span className="mt-0.5 block text-[11px] text-slate-500">
+                      勾选后保存时会用对话渠道的 OpenAI 兼容地址和密钥填充外部 OCR。
+                      OCR 模型名称仍然独立，可以单独指定多模态模型。
+                    </span>
+                  </span>
+                </label>
+              </div>
+              <Field
+                id="ocr-base-url"
+                label="OpenAI 兼容服务地址"
+                help="形如 https://api.openai.com/v1"
+                value={ocrBaseUrl}
+                onChange={setOcrBaseUrl}
+              />
+              <FieldWithList
+                id="ocr-model"
+                label="视觉模型名称"
+                help="需要支持图片问答，例如 gpt-4o-mini、qwen-vl-max 等；可手动输入或从保存后的模型列表中选择。"
+                value={ocrModel}
+                onChange={setOcrModel}
+                models={ocrModels}
+                allowEmpty
+                emptyOptionLabel="（不填写，留待以后再选）"
+              />
+              <div>
+                <label
+                  htmlFor="ocr-api-key"
+                  className="block text-sm text-slate-700"
+                >
+                  外部 OCR 密钥
+                </label>
+                <input
+                  id="ocr-api-key"
+                  name="ocr-api-key"
+                  type="password"
+                  value={ocrApiKey}
+                  onChange={(event) => {
+                    setOcrApiKey(event.target.value);
+                    if (event.target.value) setClearOcrApiKey(false);
+                  }}
+                  placeholder={
+                    config?.has_ocr_api_key
+                      ? '已保存（输入新值以替换）'
+                      : ocrReuseChat
+                        ? '勾选“复用对话渠道”后无需再次输入'
+                        : '请输入密钥'
+                  }
+                  autoComplete="off"
+                  className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none"
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  {config?.has_ocr_api_key
+                    ? '已保存一份外部 OCR 密钥。输入新值会替换，留空则保持原密钥。'
+                    : '尚未保存外部 OCR 密钥。'}
+                </p>
+                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={clearOcrApiKey}
+                    onChange={(event) => {
+                      setClearOcrApiKey(event.target.checked);
+                      if (event.target.checked) setOcrApiKey('');
+                    }}
+                  />
+                  明确清除已保存的外部 OCR 密钥
+                </label>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field
+                  id="ocr-timeout"
+                  label="外部 OCR 请求超时（秒）"
+                  value={String(ocrTimeoutSeconds)}
+                  onChange={(value) =>
+                    setOcrTimeoutSeconds(Number(value) || 30)
+                  }
+                  type="number"
+                />
+                <Field
+                  id="ocr-confidence-threshold"
+                  label="本地置信度触发阈值（0–1000）"
+                  help="tesseract 平均置信度低于此值时再调用外部模型。设为 0 即关闭该触发条件。"
+                  value={String(ocrConfidenceThreshold)}
+                  onChange={(value) =>
+                    setOcrConfidenceThreshold(Math.max(0, Math.min(1000, Number(value) || 0)))
+                  }
+                  type="number"
+                />
+                <Field
+                  id="ocr-min-chars"
+                  label="本地最少识别字符数"
+                  help="tesseract 识别字符数低于此值时再调用外部模型。设为 0 即关闭该触发条件。"
+                  value={String(ocrMinChars)}
+                  onChange={(value) =>
+                    setOcrMinChars(Math.max(0, Math.min(1000, Number(value) || 0)))
+                  }
+                  type="number"
+                />
+                <Field
+                  id="ocr-max-external-pages"
+                  label="单文档最多外发页数"
+                  help="0 表示不调用外部模型；超过后该文档剩余页继续使用本地识别。"
+                  value={String(ocrMaxExternalPages)}
+                  onChange={(value) =>
+                    setOcrMaxExternalPages(Math.max(0, Math.min(1000, Number(value) || 0)))
+                  }
+                  type="number"
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleFetchOcrModels}
+                  disabled={
+                    ocrModelsState === 'fetching' || ocrConnectionChanged
+                  }
+                  className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {ocrModelsState === 'fetching'
+                    ? '正在获取外部 OCR 模型…'
+                    : ocrModels.length
+                      ? '刷新外部 OCR 模型列表'
+                      : '获取外部 OCR 模型列表'}
+                </button>
+              </div>
+              {ocrConnectionChanged && (
+                <p className="text-sm text-amber-700">
+                  请先保存外部 OCR 的地址或密钥
+                </p>
+              )}
+              {ocrModelsError && (
+                <p className="text-sm text-red-700">
+                  获取外部 OCR 模型失败：{ocrModelsError}
+                </p>
+              )}
+              {ocrModelsState === 'success' && (
+                <p className="text-sm text-emerald-700">
+                  已获取 {ocrModels.length} 个外部 OCR 模型，可在视觉模型名称中选择
+                </p>
+              )}
+            </section>
+          )}
+        </section>
+        )}
+
         <div className="sticky bottom-2 z-20 rounded-2xl border border-slate-200 bg-white/95 p-2.5 shadow-xl shadow-slate-950/10 backdrop-blur sm:bottom-4 sm:p-4">
           <div className="flex flex-wrap items-center justify-end gap-3 sm:justify-between">
             <div className="hidden sm:block">
               <p className="text-sm font-medium text-slate-800">
-                {activePanel === 'chat' ? '对话模型操作' : '向量模型操作'}
+                {activePanel === 'chat'
+                  ? '对话模型操作'
+                  : activePanel === 'embedding'
+                    ? '向量模型操作'
+                    : '外部 OCR 操作'}
               </p>
               <p className="mt-0.5 text-xs text-slate-500">
-                {(activePanel === 'chat' ? chatDirty : embeddingDirty)
+                {(
+                  activePanel === 'chat'
+                    ? chatDirty
+                    : activePanel === 'embedding'
+                      ? embeddingDirty
+                      : ocrDirty
+                )
                   ? '有尚未保存的修改，保存后才能测试当前配置。'
                   : anyDirty
                     ? '另一个设置分区有尚未保存的修改。'
@@ -911,9 +1299,13 @@ export default function SettingsPage() {
                     ? '保存对话模型'
                     : embeddingDirty
                       ? '保存向量模型'
-                      : activePanel === 'chat'
-                        ? '保存对话模型'
-                        : '保存向量模型'}
+                      : ocrDirty
+                        ? '保存外部 OCR'
+                        : activePanel === 'chat'
+                          ? '保存对话模型'
+                          : activePanel === 'embedding'
+                            ? '保存向量模型'
+                            : '保存外部 OCR'}
             </button>
             {activePanel === 'chat' ? (
               <button
@@ -924,7 +1316,7 @@ export default function SettingsPage() {
               >
                 {testing ? '正在测试…' : '测试对话连接'}
               </button>
-            ) : (
+            ) : activePanel === 'embedding' ? (
               <button
                 type="button"
                 onClick={handleEmbeddingTest}
@@ -937,6 +1329,19 @@ export default function SettingsPage() {
                 className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40 sm:flex-none"
               >
                 {embeddingTesting ? '正在测试…' : '测试向量兼容性'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleOcrTest}
+                disabled={
+                  ocrTesting ||
+                  ocrDirty ||
+                  ocrProvider === 'disabled'
+                }
+                className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40 sm:flex-none"
+              >
+                {ocrTesting ? '正在测试…' : '测试外部 OCR 连接'}
               </button>
             )}
             </div>
@@ -967,6 +1372,11 @@ export default function SettingsPage() {
                         ? '首次使用：连接正常，后续需要创建首个向量索引'
                         : `需要重建：${embeddingTestResult.reason}`
                   : `测试失败：${embeddingTestResult.reason}`}
+              </p>
+            )}
+            {activePanel === 'ocr' && ocrTestResult && (
+              <p className={`text-sm ${ocrTestResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>
+                {ocrTestResult.ok ? '外部 OCR 连接正常' : `外部 OCR 连接失败：${ocrTestResult.message}`}
               </p>
             )}
           </div>

@@ -1481,3 +1481,264 @@ def test_embedding_test_openai_connection_failure_is_sanitized(client, monkeypat
     assert body["ok"] is False
     assert "sk-embed-netfail-aaaaaaaaaaaaa" not in body["message"]
     assert "无法连接" in body["message"]
+
+
+# --- External OCR channel (OCR stage 2) ---------------------------------
+
+
+def test_ocr_config_defaults_are_disabled_and_visible(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.get("/api/settings/ai/ocr")
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["ocr_provider"] == "disabled"
+    assert config["ocr_base_url"] is None
+    assert config["ocr_model"] is None
+    assert config["has_ocr_api_key"] is False
+    assert config["ocr_timeout_seconds"] == 30
+    assert config["ocr_confidence_threshold"] == 600
+    assert config["ocr_min_chars"] == 8
+    assert config["ocr_max_external_pages"] == 20
+    # The public dict must never expose the ciphertext.
+    assert "ocr_api_key_cipher" not in config
+
+
+def test_ocr_update_persists_and_keeps_ciphertext_hidden(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={
+            "provider": "openai",
+            "base_url": "https://ocr.example.com/v1",
+            "model": "vision-1",
+            "api_key_action": "replace",
+            "api_key": "sk-ocr-persist-aaaaaaaaaaaa",
+            "timeout_seconds": 45,
+            "confidence_threshold": 750,
+            "min_chars": 12,
+            "max_external_pages": 7,
+        },
+    )
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["ocr_provider"] == "openai"
+    assert config["ocr_base_url"] == "https://ocr.example.com/v1"
+    assert config["ocr_model"] == "vision-1"
+    assert config["has_ocr_api_key"] is True
+    assert config["ocr_timeout_seconds"] == 45
+    assert config["ocr_confidence_threshold"] == 750
+    assert config["ocr_min_chars"] == 12
+    assert config["ocr_max_external_pages"] == 7
+
+    async def _fetch():
+        async for db in app.dependency_overrides[get_db]():
+            return (await db.execute(select(AIRuntimeConfig))).scalars().first()
+
+    row = __import__("asyncio").run(_fetch())
+    assert row.ocr_provider == "openai"
+    assert row.ocr_model == "vision-1"
+    assert row.has_ocr_api_key is True
+    assert row.ocr_api_key_cipher is not None
+    assert "sk-ocr-persist-aaaaaaaaaaaa" not in str(row.ocr_api_key_cipher)
+    assert decrypt_secret(row.ocr_api_key_cipher) == "sk-ocr-persist-aaaaaaaaaaaa"
+
+    # An older client that does not include the new fields must
+    # not wipe the saved OCR configuration.
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={"api_key_action": "keep"},
+    )
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["ocr_model"] == "vision-1"
+    assert config["has_ocr_api_key"] is True
+
+
+def test_ocr_update_can_clear_provider_and_key(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai/ocr",
+        json={
+            "provider": "openai",
+            "base_url": "https://ocr.example.com/v1",
+            "model": "vision-1",
+            "api_key_action": "replace",
+            "api_key": "sk-ocr-clear-aaaaaaaaaaaaa",
+        },
+    )
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={"provider": "disabled", "api_key_action": "clear"},
+    )
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["ocr_provider"] == "disabled"
+    assert config["has_ocr_api_key"] is False
+
+
+def test_ocr_update_rejects_openai_without_url(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={"provider": "openai"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "ocr_openai_missing"
+
+
+def test_ocr_update_can_reuse_chat_url_and_key(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    # Configure the chat channel first.
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "gpt-x"},
+            "api_key_action": "replace",
+            "api_key": "sk-chat-share-aaaaaaaaaaa",
+        },
+    )
+    # Reuse it for OCR.
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={"reuse_chat": True, "model": "vision-2"},
+    )
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["ocr_provider"] == "openai"
+    assert config["ocr_base_url"] == "https://api.example.com/v1"
+    assert config["ocr_model"] == "vision-2"
+    assert config["has_ocr_api_key"] is True
+
+
+def test_ocr_test_reports_disabled_when_no_provider(client):
+    test_client, _ = client
+    _setup_admin(test_client)
+    body = test_client.post("/api/settings/ai/ocr/test").json()
+    assert body == {"ok": False, "message": "当前未启用任何外部 OCR 模型"}
+
+
+def test_ocr_test_succeeds_when_model_is_listed(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai/ocr",
+        json={
+            "provider": "openai",
+            "base_url": "https://ocr.example.com/v1",
+            "model": "vision-listed",
+            "api_key_action": "replace",
+            "api_key": "sk-ocr-listed-aaaaaaaaaaa",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "vision-listed"}, {"id": "vision-other"}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    body = test_client.post("/api/settings/ai/ocr/test").json()
+    assert body == {"ok": True, "message": "连接正常，外部 OCR 模型已验证"}
+
+
+def test_ocr_test_failure_message_does_not_leak_key(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    secret = "sk-ocr-leak-aaaaaaaaaaaaaaaa"
+    test_client.patch(
+        "/api/settings/ai/ocr",
+        json={
+            "provider": "openai",
+            "base_url": "https://ocr.example.com/v1",
+            "model": "vision-1",
+            "api_key_action": "replace",
+            "api_key": secret,
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            text=json.dumps({"error": f"upstream failed because {secret}"}),
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    body = test_client.post("/api/settings/ai/ocr/test").json()
+    assert body["ok"] is False
+    assert secret not in body["message"]
+
+
+def test_ocr_models_endpoint_lists_provider_models(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    test_client.patch(
+        "/api/settings/ai/ocr",
+        json={
+            "provider": "openai",
+            "base_url": "https://ocr.example.com/v1",
+            "model": "vision-x",
+            "api_key_action": "replace",
+            "api_key": "sk-ocr-models-aaaaaaaaaaaa",
+        },
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "vision-2"}, {"id": "vision-1"}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    response = test_client.get("/api/settings/ai/ocr/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"] == "openai"
+    assert body["current_model"] == "vision-x"
+    # Natural sort: vision-1 before vision-2.
+    assert [m["id"] for m in body["models"]] == ["vision-1", "vision-2"]
+
+
+def test_ocr_settings_back_compatible_with_legacy_config(client):
+    """A row that pre-dates the OCR migration must still load
+    without errors and expose the new keys as their default
+    values, so a stale database survives the upgrade.
+    """
+
+    test_client, _ = client
+    _setup_admin(test_client)
+    # Seed a legacy row without OCR columns by creating it via
+    # the public API and then reading it back.
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "openai",
+            "openai": {"base_url": "https://api.example.com/v1", "model": "gpt-x"},
+            "api_key_action": "replace",
+            "api_key": "sk-chat-legacy-aaaaaaaaaaa",
+        },
+    )
+    response = test_client.get("/api/settings/ai/ocr")
+    assert response.status_code == 200
+    config = response.json()["config"]
+    assert config["ocr_provider"] == "disabled"
+    assert config["has_ocr_api_key"] is False
+    assert config["ocr_max_external_pages"] == 20

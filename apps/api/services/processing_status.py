@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -86,7 +87,9 @@ def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
     Returns ``None`` for non-PDF documents or older payloads that pre-date the
     hybrid OCR metadata. The summary is intentionally bounded: successful page
     groups become counts, while only failed or skipped page numbers are kept
-    for diagnosis.
+    for diagnosis. The ``external_*`` block mirrors what the parser
+    (``pdf_extraction.external_*``) recorded so the front-end can show
+    "本地识别" vs "外部识别" without ever seeing the upstream key.
     """
 
     structured = version.structured_content
@@ -99,27 +102,58 @@ def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
     if not isinstance(extraction, dict):
         return None
 
+    def _as_list(value: Any) -> list:
+        return value if isinstance(value, list) else []
+
     page_count = extraction.get("page_count")
-    native_text_pages = extraction.get("native_text_pages") or []
-    image_pages = extraction.get("image_pages") or []
-    candidate = extraction.get("ocr_candidate_pages") or []
-    completed = extraction.get("ocr_completed_pages") or []
-    failed = extraction.get("ocr_failed_pages") or []
-    skipped = extraction.get("ocr_skipped_pages") or []
-    return {
+    native_text_pages = _as_list(extraction.get("native_text_pages"))
+    image_pages = _as_list(extraction.get("image_pages"))
+    candidate = _as_list(extraction.get("ocr_candidate_pages"))
+    completed = _as_list(extraction.get("ocr_completed_pages"))
+    failed = _as_list(extraction.get("ocr_failed_pages"))
+    skipped = _as_list(extraction.get("ocr_skipped_pages"))
+
+    summary: dict[str, Any] = {
         "version": extraction.get("version"),
         "engine": extraction.get("engine"),
         "ocr_status": extraction.get("ocr_status"),
         "page_count": page_count if isinstance(page_count, int) else None,
-        "native_text_pages": len(native_text_pages)
-        if isinstance(native_text_pages, list)
-        else 0,
-        "image_pages": len(image_pages) if isinstance(image_pages, list) else 0,
-        "ocr_candidate_pages": len(candidate) if isinstance(candidate, list) else 0,
-        "ocr_completed_pages": len(completed) if isinstance(completed, list) else 0,
-        "ocr_failed_pages": failed if isinstance(failed, list) else [],
-        "ocr_skipped_pages": skipped if isinstance(skipped, list) else [],
+        "native_text_pages": len(native_text_pages),
+        "image_pages": len(image_pages),
+        "ocr_candidate_pages": len(candidate),
+        "ocr_completed_pages": len(completed),
+        "ocr_failed_pages": failed,
+        "ocr_skipped_pages": skipped,
     }
+
+    # External OCR stage 2 fields. The keys are only attached
+    # when the document was parsed after the new code shipped,
+    # which keeps the public payload back-compatible for older
+    # structured_content blobs.
+    external_provider = extraction.get("external_provider")
+    if isinstance(external_provider, dict):
+        summary["external_provider"] = {
+            "provider": str(external_provider.get("provider") or ""),
+            "model": str(external_provider.get("model") or ""),
+        }
+        summary["external_attempted_pages"] = len(
+            _as_list(extraction.get("external_attempted_pages"))
+        )
+        summary["external_completed_pages"] = len(
+            _as_list(extraction.get("external_completed_pages"))
+        )
+        summary["external_failed_pages"] = _as_list(
+            extraction.get("external_failed_pages")
+        )
+        summary["external_skipped_pages"] = _as_list(
+            extraction.get("external_skipped_pages")
+        )
+        triggers = extraction.get("external_trigger_reasons")
+        if isinstance(triggers, dict):
+            summary["external_trigger_reasons"] = {
+                str(key): _as_list(value) for key, value in triggers.items()
+            }
+    return summary
 
 
 async def _active_profile(db: AsyncSession) -> EmbeddingProfile | None:

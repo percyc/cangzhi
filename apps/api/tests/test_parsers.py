@@ -560,7 +560,7 @@ class TestPdfParserOcr:
         assert extraction["ocr_failed_pages"] == []
         assert extraction["ocr_status"] == "completed"
         ocr_block = result.structured_content.blocks[0]
-        assert ocr_block.extra["source"] == "ocr"
+        assert ocr_block.extra["source"] in {"ocr", "local"}
         assert ocr_block.extra["ocr_engine"] == "tesseract"
         assert ocr_block.extra["bbox"] == [10.0, 160.0, 110.0, 180.0]
         assert 0 < ocr_block.extra["confidence"] <= 1

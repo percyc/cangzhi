@@ -27,6 +27,7 @@ from apps.api.documents import (
 )
 from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.extractors import extract_xinhua_html
+from apps.api.models.auth import AIRuntimeConfig
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.datasets import DatasetField, KnowledgeDataset
@@ -46,6 +47,7 @@ from apps.api.models.taxonomy import (
     Tag,
 )
 from apps.api.models.webdav import WebDAVEntry, WebDAVSource
+from apps.api.ocr import build_external_ocr_provider
 from apps.api.parsers import get_parser_for_content
 from apps.api.parsers.base import StructuredContent
 from apps.api.parsers.pdf import PdfOcrOptions
@@ -96,8 +98,35 @@ MIN_USEFUL_URL_TEXT_LENGTH = 20
 TERMINAL_PARSE_FAILURE_REASONS = frozenset({"spreadsheet_limit_exceeded"})
 
 
-def _build_pdf_ocr_options() -> PdfOcrOptions:
+def _build_pdf_ocr_options(
+    session: Session | None = None,
+) -> PdfOcrOptions:
+    """Compose the per-job PDF OCR options.
+
+    Local settings (DPI, language, page cap, …) always come
+    from the worker environment so the resource footprint is
+    predictable; the external provider and its gating
+    parameters are read from the database on every call so a
+    fresh ``AIRuntimeConfig`` update is picked up without
+    restarting the worker. Passing ``session=None`` falls back
+    to the tesseract-only behaviour, which keeps unit tests and
+    CLI/import paths free of database dependencies.
+    """
+
     summary = pdf_ocr_options_summary()
+    row = None
+    external_provider = None
+    if session is not None:
+        try:
+            row = session.execute(
+                select(AIRuntimeConfig)
+                .order_by(AIRuntimeConfig.id.desc())
+                .limit(1)
+            ).scalars().first()
+        except Exception:  # noqa: BLE001 — table missing on older deployments
+            row = None
+        if row is not None:
+            external_provider = build_external_ocr_provider(row)
     return PdfOcrOptions(
         enabled=summary["enabled"],
         language=summary["language"],
@@ -105,6 +134,18 @@ def _build_pdf_ocr_options() -> PdfOcrOptions:
         min_native_chars=summary["min_native_chars"],
         max_pages=summary["max_pages"],
         timeout_seconds=summary["timeout_seconds"],
+        external_provider=external_provider,
+        external_min_chars=int(
+            getattr(row, "ocr_min_chars", 8) if row is not None else 8
+        ),
+        external_confidence_threshold=int(
+            getattr(row, "ocr_confidence_threshold", 600)
+            if row is not None
+            else 600
+        ),
+        external_max_pages=int(
+            getattr(row, "ocr_max_external_pages", 20) if row is not None else 20
+        ),
     )
 
 
@@ -1743,7 +1784,7 @@ def _process_parsing(
             content_bytes, content_type, filename = loaded
 
         try:
-            pdf_ocr_options = _build_pdf_ocr_options()
+            pdf_ocr_options = _build_pdf_ocr_options(session)
             parser = get_parser_for_content(
                 content_type,
                 filename,
@@ -1921,6 +1962,17 @@ def _log_pdf_ocr_summary(
         ocr_failed_pages=summary.get("ocr_failed_pages"),
         ocr_skipped_pages=summary.get("ocr_skipped_pages"),
         ocr_status=summary.get("ocr_status"),
+        external_provider=(
+            (summary.get("external_provider") or {}).get("provider")
+        ),
+        external_model=(
+            (summary.get("external_provider") or {}).get("model")
+        ),
+        external_attempted_pages=_count_pages("external_attempted_pages"),
+        external_completed_pages=_count_pages("external_completed_pages"),
+        external_failed_pages=summary.get("external_failed_pages"),
+        external_skipped_pages=summary.get("external_skipped_pages"),
+        external_trigger_reasons=summary.get("external_trigger_reasons"),
     )
 
 

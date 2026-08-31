@@ -27,6 +27,14 @@ from .base import BaseModel
 # ``Enum`` so the same migration runs unchanged on PostgreSQL and
 # SQLite (the test backend).
 _AI_PROVIDER_VALUES = ("disabled", "openai", "ollama")
+# External visual OCR (ADR-015 phase 2 / OCR stage 2) is an
+# independent channel that lives alongside the chat and embedding
+# configurations. It is never a side-effect of either one: a user
+# may keep the chat model local (Ollama) while sending image
+# pages to a remote vision model, or vice versa. Keeping the OCR
+# values as plain strings mirrors the chat/embedding providers so
+# the same migration runs unchanged on PostgreSQL and SQLite.
+_OCR_PROVIDER_VALUES = ("disabled", "openai")
 
 # A fixed singleton key so the ``admins`` and ``ai_runtime_configs``
 # tables can enforce "exactly one row" through a UNIQUE index. Any
@@ -104,6 +112,41 @@ class AIRuntimeConfig(BaseModel):
         ),
         nullable=True,
     )
+    # --- External visual OCR channel (OCR stage 2) ------------------------
+    # A separate, pluggable provider that runs *after* the local
+    # tesseract pass on PDF pages that look like scans. The OCR
+    # channel carries its own provider, base URL, API key and
+    # timeout so it can stay open even when the chat side is
+    # disabled (e.g. local-only chat + remote vision). The
+    # confidence threshold and per-document external page cap
+    # gate how aggressively the remote model is invoked. All
+    # columns are additive: an installation that never sets
+    # ``ocr_provider`` keeps the previous behaviour with tesseract
+    # alone, and ``has_ocr_api_key`` makes the front-end never see
+    # the ciphertext.
+    ocr_provider = Column(
+        String(16),
+        nullable=False,
+        server_default=text("'disabled'"),
+    )
+    ocr_base_url = Column(String(512), nullable=True)
+    ocr_model = Column(String(255), nullable=True)
+    ocr_api_key_cipher = Column(Text, nullable=True)
+    has_ocr_api_key = Column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    ocr_timeout_seconds = Column(
+        Integer, nullable=False, server_default=text("30")
+    )
+    ocr_confidence_threshold = Column(
+        Integer, nullable=False, server_default=text("600")
+    )
+    ocr_min_chars = Column(
+        Integer, nullable=False, server_default=text("8")
+    )
+    ocr_max_external_pages = Column(
+        Integer, nullable=False, server_default=text("20")
+    )
     updated_by = Column(
         Integer,
         ForeignKey(
@@ -132,6 +175,26 @@ class AIRuntimeConfig(BaseModel):
             "timeout_seconds >= 1 AND timeout_seconds <= 600",
             name="ck_ai_runtime_configs_timeout",
         ),
+        CheckConstraint(
+            f"ocr_provider in {_OCR_PROVIDER_VALUES}",
+            name="ck_ai_runtime_configs_ocr_provider",
+        ),
+        CheckConstraint(
+            "ocr_timeout_seconds >= 1 AND ocr_timeout_seconds <= 600",
+            name="ck_ai_runtime_configs_ocr_timeout",
+        ),
+        CheckConstraint(
+            "ocr_confidence_threshold >= 0 AND ocr_confidence_threshold <= 1000",
+            name="ck_ai_runtime_configs_ocr_confidence",
+        ),
+        CheckConstraint(
+            "ocr_min_chars >= 0 AND ocr_min_chars <= 1000",
+            name="ck_ai_runtime_configs_ocr_min_chars",
+        ),
+        CheckConstraint(
+            "ocr_max_external_pages >= 0 AND ocr_max_external_pages <= 1000",
+            name="ck_ai_runtime_configs_ocr_max_external_pages",
+        ),
     )
 
     def to_public_dict(self) -> dict:
@@ -152,6 +215,14 @@ class AIRuntimeConfig(BaseModel):
             "has_embedding_api_key": bool(self.has_embedding_api_key),
             "embedding_timeout_seconds": self.embedding_timeout_seconds,
             "active_embedding_profile_id": self.active_embedding_profile_id,
+            "ocr_provider": self.ocr_provider,
+            "ocr_base_url": self.ocr_base_url,
+            "ocr_model": self.ocr_model,
+            "has_ocr_api_key": bool(self.has_ocr_api_key),
+            "ocr_timeout_seconds": self.ocr_timeout_seconds,
+            "ocr_confidence_threshold": self.ocr_confidence_threshold,
+            "ocr_min_chars": self.ocr_min_chars,
+            "ocr_max_external_pages": self.ocr_max_external_pages,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 

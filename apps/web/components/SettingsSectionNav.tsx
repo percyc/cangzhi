@@ -5,6 +5,7 @@ import Link from 'next/link';
 export type SettingsSection =
   | 'chat'
   | 'embedding'
+  | 'ocr'
   | 'sources'
   | 'data'
   | 'access'
@@ -29,6 +30,12 @@ const ITEMS: Item[] = [
     href: '/settings?section=embedding',
     title: '向量与索引',
     defaultHint: '语义检索与索引版本',
+  },
+  {
+    id: 'ocr',
+    href: '/settings?section=ocr',
+    title: '图片文字识别',
+    defaultHint: '扫描 PDF 外挂视觉识别',
   },
   {
     id: 'sources',
@@ -72,7 +79,7 @@ export function SettingsSectionNav({
   return (
     <nav
       aria-label="设置分类"
-      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 sm:grid-cols-3 lg:grid-cols-6"
+      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 sm:grid-cols-3 lg:grid-cols-7"
     >
       {ITEMS.map((item) => {
         const selected = active === item.id;

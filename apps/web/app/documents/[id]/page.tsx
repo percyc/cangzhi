@@ -85,6 +85,12 @@ type PipelineStage = {
     ocr_completed_pages: number;
     ocr_failed_pages: number[];
     ocr_skipped_pages: number[];
+    external_provider?: { provider: string; model: string; version?: string } | null;
+    external_attempted_pages?: number;
+    external_completed_pages?: number;
+    external_failed_pages?: number[];
+    external_skipped_pages?: number[];
+    external_trigger_reasons?: Record<string, number[]>;
   };
 };
 
@@ -1061,6 +1067,14 @@ function PdfExtractionSummary({
     ? statusLabel[extraction.ocr_status] ?? extraction.ocr_status
     : '无需 OCR';
 
+  const externalAttempted = extraction.external_attempted_pages ?? 0;
+  const externalCompleted = extraction.external_completed_pages ?? 0;
+  const externalFailed = extraction.external_failed_pages ?? [];
+  const externalSkipped = extraction.external_skipped_pages ?? [];
+  const externalProvider = extraction.external_provider;
+  const externalTriggers = extraction.external_trigger_reasons ?? {};
+  const triggerEntries = Object.entries(externalTriggers);
+
   return (
     <div className="mt-4 rounded-lg border border-slate-200 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1094,8 +1108,47 @@ function PdfExtractionSummary({
           但不影响其他页面继续处理。
         </p>
       )}
+      {externalProvider?.provider && externalAttempted > 0 && (
+        <div className="mt-3 rounded border border-emerald-100 bg-emerald-50/40 p-3 text-xs text-emerald-900">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="font-medium">
+              外部视觉识别
+              {externalProvider.model ? ` · ${externalProvider.model}` : ''}
+            </p>
+            <span className="text-emerald-700">
+              触发 {externalAttempted} 页 · 完成 {externalCompleted} 页
+            </span>
+          </div>
+          {triggerEntries.length > 0 && (
+            <ul className="mt-2 list-disc pl-4 text-emerald-800">
+              {triggerEntries.map(([reason, pages]) => (
+                <li key={reason}>
+                  {triggerLabel(reason)}：{pages.length} 页
+                </li>
+              ))}
+            </ul>
+          )}
+          {(externalFailed.length > 0 || externalSkipped.length > 0) && (
+            <p className="mt-2 text-emerald-800">
+              外部失败 {externalFailed.length} 页 · 降级本地 {externalSkipped.length} 页。
+              本地识别仍会保留可读结果。
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
+}
+
+function triggerLabel(reason: string): string {
+  const labels: Record<string, string> = {
+    no_text: '本地未识别到文字',
+    low_chars: '本地识别字符过少',
+    low_confidence: '本地置信度不足',
+    max_external_pages_reached: '已达单文档外发页数上限',
+    manual: '手动触发',
+  };
+  return labels[reason] ?? reason;
 }
 
 function StageIndicator({ status }: { status: string }) {
