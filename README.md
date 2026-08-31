@@ -113,6 +113,9 @@ OCR 深度增强和领域解析按[路线图](docs/ROADMAP.md)逐步推进。文
 
 ## 文档导航
 
+- [协作者约定：开工前必读与协作约束](AGENTS.md)
+- [项目状态：当前阶段、进行中、风险与下一步](docs/PROJECT_STATUS.md)
+- [开发日志：按时间追加的变更记录](docs/DEVLOG.md)
 - [产品定位：解决的问题、用户闭环与产品边界](docs/PRODUCT.md)
 - [技术架构：事实源、处理管线、检索和安全边界](docs/ARCHITECTURE.md)
 - [部署与首次使用：Docker Compose、升级、HTTPS 和排障](docs/DEPLOYMENT.md)
