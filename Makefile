@@ -1,4 +1,5 @@
 SHELL := /bin/bash
+DOCKER_CLASSIC_BUILD_ENV := COMPOSE_BAKE=false DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0
 .PHONY: up upgrade build down down-volumes logs logs-api logs-web logs-worker ps doctor backup verify-backup migrate migrate-up migrate-create install-python install-node install test-api test-worker test-web test lint-api lint-worker lint typecheck-api typecheck-worker typecheck clean help
 
 # Default target
@@ -11,10 +12,10 @@ up: ## Start all services with Docker Compose (migrate runs automatically)
 	docker compose up -d
 
 upgrade: ## Build current code, run migrations, and recreate changed services
-	docker compose up -d --build
+	$(DOCKER_CLASSIC_BUILD_ENV) docker compose up -d --build --pull never
 
 build: ## Build all services
-	docker compose build
+	$(DOCKER_CLASSIC_BUILD_ENV) docker compose build --pull=false
 
 down: ## Stop all services
 	docker compose down
