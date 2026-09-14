@@ -32,3 +32,16 @@ typecheck 与生产构建通过。构建前补齐 `.dockerignore` 的 `backups/`
 然后运行 `node scripts/review-pages.cjs`。需可用 Playwright；可用
 `PLAYWRIGHT_MODULE` 和 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定本机安装。
 每次重跑前重启隔离 API，以创建空白数据库。截图和 JSON 报告输出到临时目录。
+
+## 部署后复核
+
+运行代码 `0519319` 已部署并推送 origin/main。API/Web/Worker 与本地源码关键
+文件 SHA-256 一致；所有长期服务 healthy，迁移 `0031`，迁移容器正常退出。
+API readiness 返回 200（约 5 ms），Web health 返回 200（约 17 ms）；
+未登录请求收件箱 API 返回 401，真实 Web 登录页正常，受保护页面正确转登录。
+
+实际 API 容器中的只读服务层复测：环评空间 402 份资料，首 25 条约 2.128 秒，
+响应 21,163 字节。此数值不包含浏览器渲染，不是完整页面延迟保证。
+
+仍有 44367/44368 两条发布前遗留向量任务，未手动重置；Worker 平稳退出，
+本次发布没有新增被强制中断的已领取批次。该问题由 CZ-Q05 后续处理。
