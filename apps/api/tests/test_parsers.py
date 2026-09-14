@@ -303,10 +303,9 @@ class TestOfficeParsers:
         assert result.success is True
         assert result.structured_content.document_type == "doc"
         assert result.structured_content.full_text() == "旧版合同\n转换后的正文"
-        assert result.structured_content.metadata == {
-            "source_format": "doc",
-            "converted_format": "docx",
-        }
+        assert result.structured_content.metadata["source_format"] == "doc"
+        assert result.structured_content.metadata["converted_format"] == "docx"
+        assert "docx_extraction" in result.structured_content.metadata
 
     def test_parse_docx_heading_paragraph_and_table(self):
         from docx import Document

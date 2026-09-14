@@ -7,6 +7,14 @@ _HEADING_STYLE_PATTERN = re.compile(
     r"(?:heading|titlelevel|标题)[\s_-]*(\d+)$", re.IGNORECASE
 )
 
+_DOCX_PARSER_VERSION = "1"
+_DOCX_INDEX_SEMANTICS = (
+    "paragraph_index 与 Block.extra.docx_body_index 相同，记录块在 DOCX 正文 "
+    "(w:body) 直接子节点中按出现顺序的零基位置；仅统计 w:p 与 w:tbl 节点，"
+    "w:sectPr 不计数。空白段落计入索引但不输出块。嵌套表格与修订包装元素 "
+    "(w:sdt / w:ins / w:del / w:customXml 等) 当前不展开，复杂结构请回到原文核对。"
+)
+
 
 def _safe_style_name(paragraph) -> str:
     """Read a paragraph style without rejecting vendor-specific DOCX styles."""
@@ -31,9 +39,30 @@ def _heading_level(style_name: str) -> int | None:
 
 
 class DocxParser(BaseParser):
+    """Parse DOCX bodies preserving the original paragraph/table order.
+
+    CZ-Q06: paragraphs and tables are emitted in the order they appear
+    among the document body's direct ``w:p``/``w:tbl`` children so
+    heading attribution, parent-section grouping and table
+    interleaving all match the source. Each emitted block records its
+    zero-based body position both as ``paragraph_index`` and under
+    ``Block.extra.docx_body_index``; the trailing ``w:sectPr`` is not
+    counted and blank paragraphs are counted but never emitted.
+
+    The parser walks only direct body children. Nested tables and
+    revision wrappers (``w:sdt``, ``w:ins``, ``w:del``,
+    ``w:customXml`` ...) are intentionally not expanded; complex
+    structures remain readable in the original file but their inner
+    blocks are not turned into separate ``Block`` records. Full
+    table metadata is deferred to a later CZ-N step.
+    """
+
     def parse(self, content: bytes, content_type: str | None = None) -> ParserResult:
         try:
             from docx import Document
+            from docx.oxml.ns import qn
+            from docx.table import Table
+            from docx.text.paragraph import Paragraph
         except ImportError:
             return ParserResult(
                 success=False,
@@ -42,56 +71,82 @@ class DocxParser(BaseParser):
             )
 
         try:
-            blocks = []
-            heading_path = []
+            blocks: list[Block] = []
+            heading_path: list[str] = []
             doc = Document(BytesIO(content))
-            paragraph_index = 0
-            for para_idx, para in enumerate(doc.paragraphs):
-                text = para.text.strip()
-                if not text:
-                    continue
+            w_p = qn("w:p")
+            w_tbl = qn("w:tbl")
+            body_index = 0
 
-                style_name = _safe_style_name(para)
-                level = _heading_level(style_name)
+            for child in doc.element.body.iterchildren():
+                tag = child.tag
+                if tag == w_p:
+                    current_index = body_index
+                    body_index += 1
+                    para = Paragraph(child, doc)
+                    text = para.text.strip()
+                    if not text:
+                        # Blank paragraphs still occupy a body index slot
+                        # so subsequent blocks keep the right offset, but
+                        # they are not emitted to the consumer.
+                        continue
 
-                if level is not None:
-                    while len(heading_path) >= level:
-                        heading_path.pop()
-                    heading_path.append(text)
+                    style_name = _safe_style_name(para)
+                    level = _heading_level(style_name)
 
+                    if level is not None:
+                        while len(heading_path) >= level:
+                            heading_path.pop()
+                        heading_path.append(text)
+
+                        blocks.append(Block(
+                            type="heading",
+                            text=text,
+                            heading_path=heading_path.copy(),
+                            level=level,
+                            paragraph_index=current_index,
+                            extra={"docx_body_index": current_index},
+                        ))
+                    else:
+                        blocks.append(Block(
+                            type="paragraph",
+                            text=para.text,
+                            heading_path=heading_path.copy(),
+                            paragraph_index=current_index,
+                            extra={"docx_body_index": current_index},
+                        ))
+                elif tag == w_tbl:
+                    current_index = body_index
+                    body_index += 1
+                    table = Table(child, doc)
+                    lines = []
+                    for row in table.rows:
+                        cells = [cell.text.strip() for cell in row.cells]
+                        lines.append("\t".join(cells))
+                    table_text = "\n".join(lines)
                     blocks.append(Block(
-                        type="heading",
-                        text=text,
+                        type="table",
+                        text=table_text,
                         heading_path=heading_path.copy(),
-                        level=level,
-                        paragraph_index=para_idx,
+                        paragraph_index=current_index,
+                        extra={"docx_body_index": current_index},
                     ))
-                else:
-                    blocks.append(Block(
-                        type="paragraph",
-                        text=para.text,
-                        heading_path=heading_path.copy(),
-                        paragraph_index=para_idx,
-                    ))
-                paragraph_index += 1
-
-            for table in doc.tables:
-                lines = []
-                for row in table.rows:
-                    cells = [cell.text.strip() for cell in row.cells]
-                    lines.append("\t".join(cells))
-                table_text = "\n".join(lines)
-                blocks.append(Block(
-                    type="table",
-                    text=table_text,
-                    heading_path=heading_path.copy(),
-                    paragraph_index=paragraph_index,
-                ))
-                paragraph_index += 1
+                # w:sectPr, w:sdt, w:ins, w:del, w:customXml and other
+                # body wrappers are intentionally skipped without
+                # contributing to body_index. See the class docstring.
 
             structured_content = StructuredContent(
                 document_type="docx",
                 blocks=blocks,
+                metadata={
+                    "docx_extraction": {
+                        "parser_version": _DOCX_PARSER_VERSION,
+                        "index_semantics": _DOCX_INDEX_SEMANTICS,
+                        "nested_tables_supported": False,
+                        "revision_tracking_supported": False,
+                        "body_indexed_children": body_index,
+                    },
+                },
             )
 
             return ParserResult(
