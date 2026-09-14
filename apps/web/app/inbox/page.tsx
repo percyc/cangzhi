@@ -412,81 +412,208 @@ export default function InboxPage() {
       )}
       {feedback && <p className="mt-4 text-sm text-violet-700">{feedback}</p>}
       {!error && (
-        <div className="mt-5 overflow-x-auto rounded-xl border border-slate-200 bg-white">
-          <table className="min-w-full text-left text-sm">
-            <thead className="bg-slate-50 text-xs text-slate-500">
-              <tr>
-                <th className="px-4 py-3">资料</th>
-                <th className="px-3 py-3">正文</th>
-                <th className="px-3 py-3">AI 整理</th>
-                <th className="px-3 py-3">切片</th>
-                <th className="px-3 py-3">向量</th>
-                <th className="px-3 py-3">可用状态</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {items.map((document) => {
-                const pipeline = document.pipeline;
-                const embedding = pipeline.stages.embedding;
-                return (
-                  <tr key={document.id}>
-                    <td className="max-w-xs px-4 py-3">
-                      <Link
-                        href={`/documents/${document.id}`}
-                        className="font-medium text-slate-900 hover:underline"
-                      >
-                        {document.title}
-                      </Link>
-                    </td>
-                    <StatusCell stage={pipeline.stages.parsing} />
-                    <StatusCell stage={pipeline.stages.understanding} />
-                    <StatusCell
-                      stage={pipeline.stages.chunking}
-                      suffix={`${pipeline.stages.chunking.child_chunks} 个`}
-                    />
-                    <StatusCell
-                      stage={embedding}
-                      suffix={
-                        embedding.status === 'disabled'
-                          ? '未启用'
-                          : `${embedding.completed}/${embedding.total}${
-                              embedding.missing > 0
-                                ? ` · 缺 ${embedding.missing}`
-                                : ''
-                            }`
+        <>
+          <div className="mt-5 hidden overflow-x-auto rounded-xl border border-slate-200 bg-white sm:block">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">资料</th>
+                  <th className="px-3 py-3">正文</th>
+                  <th className="px-3 py-3">AI 整理</th>
+                  <th className="px-3 py-3">切片</th>
+                  <th className="px-3 py-3">向量</th>
+                  <th className="px-3 py-3">可用状态</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {items.map((document) => {
+                  const pipeline = document.pipeline;
+                  const embedding = pipeline.stages.embedding;
+                  return (
+                    <tr key={document.id}>
+                      <td className="max-w-xs px-4 py-3">
+                        <Link
+                          href={`/documents/${document.id}`}
+                          className="font-medium text-slate-900 hover:underline"
+                        >
+                          {document.title}
+                        </Link>
+                      </td>
+                      <StatusCell stage={pipeline.stages.parsing} />
+                      <StatusCell stage={pipeline.stages.understanding} />
+                      <StatusCell
+                        stage={pipeline.stages.chunking}
+                        suffix={`${pipeline.stages.chunking.child_chunks} 个`}
+                      />
+                      <StatusCell
+                        stage={embedding}
+                        suffix={
+                          embedding.status === 'disabled'
+                            ? '未启用'
+                            : `${embedding.completed}/${embedding.total}${
+                                embedding.missing > 0
+                                  ? ` · 缺 ${embedding.missing}`
+                                  : ''
+                              }`
+                        }
+                      />
+                      <td className="px-3 py-3 text-xs">
+                        <p
+                          className={
+                            pipeline.keyword_searchable
+                              ? 'text-emerald-700'
+                              : 'text-slate-400'
+                          }
+                        >
+                          {pipeline.keyword_searchable ? '可关键词检索' : '不可检索'}
+                        </p>
+                        <p
+                          className={
+                            pipeline.vector_searchable
+                              ? 'text-violet-700'
+                              : 'text-slate-400'
+                          }
+                        >
+                          {pipeline.vector_searchable ? '可语义检索' : '语义未就绪'}
+                        </p>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {items.length === 0 && !loading && (
+              <p className="p-8 text-center text-sm text-slate-500">
+                当前筛选下没有资料。
+              </p>
+            )}
+          </div>
+          <ul className="mt-5 flex flex-col gap-3 sm:hidden">
+            {items.map((document) => {
+              const pipeline = document.pipeline;
+              const embedding = pipeline.stages.embedding;
+              const progress =
+                embedding.status !== 'disabled' && embedding.total > 0
+                  ? Math.min(
+                      100,
+                      Math.max(0, (embedding.completed / embedding.total) * 100),
+                    )
+                  : null;
+              const embeddingSuffix =
+                embedding.status === 'disabled'
+                  ? '未启用'
+                  : `${embedding.completed}/${embedding.total}${
+                      embedding.missing > 0 ? ` · 缺 ${embedding.missing}` : ''
+                    }`;
+              return (
+                <li
+                  key={document.id}
+                  className="rounded-xl border border-slate-200 bg-white p-4"
+                >
+                  <Link
+                    href={`/documents/${document.id}`}
+                    className="block break-words text-sm font-medium text-slate-900 hover:underline"
+                  >
+                    {document.title}
+                  </Link>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                    <div
+                      title={
+                        pipeline.stages.parsing.last_error ??
+                        pipeline.stages.parsing.message
                       }
-                    />
-                    <td className="px-3 py-3 text-xs">
-                      <p
-                        className={
-                          pipeline.keyword_searchable
-                            ? 'text-emerald-700'
-                            : 'text-slate-400'
-                        }
+                    >
+                      <dt className="text-slate-400">正文</dt>
+                      <dd
+                        className={`mt-0.5 ${statusColor(pipeline.stages.parsing.status)}`}
                       >
-                        {pipeline.keyword_searchable ? '可关键词检索' : '不可检索'}
-                      </p>
-                      <p
-                        className={
-                          pipeline.vector_searchable
-                            ? 'text-violet-700'
-                            : 'text-slate-400'
-                        }
+                        {pipeline.stages.parsing.message}
+                      </dd>
+                    </div>
+                    <div
+                      title={
+                        pipeline.stages.understanding.last_error ??
+                        pipeline.stages.understanding.message
+                      }
+                    >
+                      <dt className="text-slate-400">AI 整理</dt>
+                      <dd
+                        className={`mt-0.5 ${statusColor(pipeline.stages.understanding.status)}`}
                       >
-                        {pipeline.vector_searchable ? '可语义检索' : '语义未就绪'}
+                        {pipeline.stages.understanding.message}
+                      </dd>
+                    </div>
+                    <div
+                      title={
+                        pipeline.stages.chunking.last_error ??
+                        pipeline.stages.chunking.message
+                      }
+                    >
+                      <dt className="text-slate-400">切片</dt>
+                      <dd
+                        className={`mt-0.5 ${statusColor(pipeline.stages.chunking.status)}`}
+                      >
+                        {pipeline.stages.chunking.message}
+                      </dd>
+                      <p className="mt-0.5 text-slate-400">
+                        {`${pipeline.stages.chunking.child_chunks} 个`}
                       </p>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {items.length === 0 && !loading && (
-            <p className="p-8 text-center text-sm text-slate-500">
-              当前筛选下没有资料。
-            </p>
-          )}
-        </div>
+                    </div>
+                    <div
+                      title={embedding.last_error ?? embedding.message}
+                    >
+                      <dt className="text-slate-400">向量</dt>
+                      <dd className={`mt-0.5 ${statusColor(embedding.status)}`}>
+                        {embedding.message}
+                      </dd>
+                      <p className="mt-0.5 text-slate-400">{embeddingSuffix}</p>
+                    </div>
+                  </dl>
+                  {progress !== null && (
+                    <div
+                      className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-200"
+                      role="progressbar"
+                      aria-valuenow={Math.round(progress)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label="向量建索引进度"
+                    >
+                      <div
+                        className="h-1.5 rounded-full bg-violet-600 transition-[width]"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                  )}
+                  <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                    <span
+                      className={
+                        pipeline.keyword_searchable
+                          ? 'text-emerald-700'
+                          : 'text-slate-400'
+                      }
+                    >
+                      {pipeline.keyword_searchable ? '可关键词检索' : '不可检索'}
+                    </span>
+                    <span
+                      className={
+                        pipeline.vector_searchable
+                          ? 'text-violet-700'
+                          : 'text-slate-400'
+                      }
+                    >
+                      {pipeline.vector_searchable ? '可语义检索' : '语义未就绪'}
+                    </span>
+                  </div>
+                </li>
+              );
+            })}
+            {items.length === 0 && !loading && (
+              <li className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
+                当前筛选下没有资料。
+              </li>
+            )}
+          </ul>
+        </>
       )}
       {!error && total > 0 && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
@@ -517,17 +644,22 @@ export default function InboxPage() {
   );
 }
 
+function statusColor(status: string): string {
+  return status === 'completed'
+    ? 'text-emerald-700'
+    : status === 'failed'
+      ? 'text-red-700'
+      : ['processing', 'created', 'retry'].includes(status)
+        ? 'text-blue-700'
+        : 'text-slate-500';
+}
+
 function StatusCell({ stage, suffix }: { stage: Stage; suffix?: string }) {
-  const color =
-    stage.status === 'completed'
-      ? 'text-emerald-700'
-      : stage.status === 'failed'
-        ? 'text-red-700'
-        : ['processing', 'created', 'retry'].includes(stage.status)
-          ? 'text-blue-700'
-          : 'text-slate-500';
   return (
-    <td className={`px-3 py-3 text-xs ${color}`} title={stage.last_error ?? stage.message}>
+    <td
+      className={`px-3 py-3 text-xs ${statusColor(stage.status)}`}
+      title={stage.last_error ?? stage.message}
+    >
       <p>{stage.message}</p>
       {suffix && <p className="mt-0.5 text-slate-400">{suffix}</p>}
     </td>

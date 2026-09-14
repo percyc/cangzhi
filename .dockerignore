@@ -17,6 +17,7 @@ __pycache__
 # Data
 storage
 postgres_data
+backups/
 
 # Build artifacts
 .next/

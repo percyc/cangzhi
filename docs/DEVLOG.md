@@ -320,3 +320,19 @@
   16 项、Web lint/typecheck、隔离 Chromium 交互测试全部通过。合并前工作区
   干净，主线未发生分叉，`git diff --check main...HEAD` 通过；无需重复执行未变更测试。
 - 本次仅本地合并与协作记录更新，未推送远端、未部署。
+
+### 2026-09-14 全页面验收与发布准备（CZ-Q08）
+
+- 维护者明确要求“检查所有页面情况，并部署推送”，本次按该授权执行发布，
+  不修改 AGENTS.md 中供后续协作者遵循的默认禁止部署约定。
+- 隔离 Chromium + SQLite API 完成 52 个桌面/手机页面与状态检查；补充首次
+  初始化、已有管理员重定向和真实登录提交，未调用生产模型或修改生产资料。
+  验收范围、边界和复现脚本见 `docs/PAGE_REVIEW.md`。
+- OpenCode MiniMax M3 按评审结果修改手机收件箱为卡片，保留桌面表格与既有
+  业务逻辑；人工复核截图，Web lint/typecheck 通过。生产 API 镜像内完整
+  API/Worker 测试 656 项通过；Next.js 生产构建通过。
+- `.dockerignore` 新增 `backups/`，防止备份进入构建镜像。部署前创建并校验
+  `backups/cangzhi-20260914-145242`，约 583 MB；保留 API/Worker/Web 的
+  `rollback-20260914` 本地镜像标签。数据库与代码迁移 head 均为 `0031`。
+- Worker 收到 SIGTERM 后完成当前批次并以 0 退出。任务 44367/44368 从
+  14:05 UTC 起已停留 processing，早于本次发布；未重置，后续由 CZ-Q05 处理。
