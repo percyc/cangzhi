@@ -441,6 +441,307 @@ class TestJobProcessing:
         assert version.meta["ai_status"] == "not_configured"
 
 
+class TestParseUnicodeSanitization:
+    """The worker must normalise every derived string before persisting.
+
+    PDF, docx and web parsers can produce blocks with NUL bytes
+    or lone UTF-16 surrogates when the source is malformed. The
+    worker sanitises the result so the chunker, search index and
+    JSON column never see the raw bytes. This suite covers the
+    end-to-end behaviour of :func:`process_single_job` plus the
+    helpers it calls.
+    """
+
+    def test_note_with_unicode_dirty_text_is_sanitised_on_persist(
+        self, session, monkeypatch
+    ):
+        from apps.api.parsers.base import Block, StructuredContent
+        from apps.api.parsers import get_parser_for_content
+
+        dirty = StructuredContent(
+            document_type="note",
+            blocks=[
+                Block(
+                    type="paragraph",
+                    text="hello\ud83d world",  # lone high surrogate
+                    heading_path=["中文\ud83d\ude00"],  # valid pair + repair
+                    extra={"ocr_source": "local\ud83d"},
+                ),
+                Block(
+                    type="paragraph",
+                    text="valid\ud83d\ude00\ud83d",  # pair + lone
+                    heading_path=[],
+                    extra={"nested": {"k": "a\x00b"}},
+                ),
+            ],
+            metadata={
+                "title": "Title\ud83d",
+                "regions": [
+                    {"sheet_name": "Sheet\x00", "row_start": 1},
+                ],
+            },
+        )
+
+        class _DirtyNoteParser:
+            def parse(self, _content, _content_type=None):
+                from apps.api.parsers.base import ParserResult
+
+                return ParserResult(success=True, structured_content=dirty)
+
+        monkeypatch.setattr(
+            get_parser_for_content,
+            "__call__",
+            lambda *args, **kwargs: _DirtyNoteParser(),
+        )
+        # The worker imports the symbol locally; re-patch the
+        # module reference so the dispatch picks up the dirty
+        # parser.
+        monkeypatch.setattr(
+            "apps.worker.services.processor.get_parser_for_content",
+            lambda *args, **kwargs: _DirtyNoteParser(),
+        )
+
+        doc = Document(title="dirty", source_type=DocumentSourceType.note)
+        session.add(doc)
+        session.flush()
+        version = DocumentVersion(
+            document_id=doc.id,
+            version_number=1,
+            content_hash="dirty",
+            raw_content="placeholder",
+            processing_status="created",
+        )
+        session.add(version)
+        session.flush()
+        job = ProcessingJob(
+            document_id=doc.id,
+            document_version_id=version.id,
+            stage="parsing",
+            idempotency_key=f"{doc.id}:{version.id}:parsing:dirty-unicode",
+            config_version="1",
+        )
+        session.add(job)
+        session.commit()
+
+        assert process_single_job(session, job.id) is True
+        session.refresh(version)
+        session.refresh(job)
+
+        assert job.status == "completed"
+        assert version.processing_status == "ready"
+
+        # Derived text uses the sanitised representation.
+        assert "\ud83d" not in (version.raw_content or "")
+        assert "\ude00" not in (version.raw_content or "")
+        assert "\U0001f600" in (version.raw_content or "")
+        assert "hello\ufffd world" in (version.raw_content or "")
+        assert "a\ufffdb" not in (version.raw_content or "")  # NUL gone
+
+        # The persisted structured payload is clean too.
+        payload = version.structured_content
+        assert payload is not None
+        for block in payload["blocks"]:
+            assert "\ud83d" not in block["text"]
+            assert "\ude00" not in block["text"]
+            assert "\x00" not in block["text"]
+        for heading in payload["blocks"][0]["heading_path"]:
+            assert "\ud83d" not in heading
+            assert "\ude00" not in heading
+
+        # The aggregate sanitisation report is recorded in
+        # metadata. No content is included; only counts.
+        meta = payload["metadata"]
+        sanitisation = meta.get("sanitization", {}).get("unicode")
+        assert sanitisation is not None
+        assert sanitisation["nul_removed"] >= 1
+        assert sanitisation["surrogate_pairs_repaired"] >= 1
+        assert sanitisation["lone_surrogates_replaced"] >= 1
+        assert sanitisation["strings_visited"] >= 1
+        # ``Title\ud83d`` was used as the document title, so it
+        # is also clean.
+        assert "\ud83d" not in (doc.title or "")
+
+    def test_apply_parse_result_stamps_report_when_report_provided(
+        self, session
+    ):
+        from apps.api.parsers.base import Block, StructuredContent
+        from apps.api.parsers.text_sanitize import UnicodeSanitizationReport
+        from apps.worker.services.processor import _apply_parse_result
+
+        structured = StructuredContent(
+            document_type="txt",
+            blocks=[
+                Block(
+                    type="paragraph",
+                    text="hello",
+                    heading_path=[],
+                )
+            ],
+            metadata={"title": "T"},
+        )
+        doc = Document(title="stale", source_type=DocumentSourceType.file)
+        session.add(doc)
+        session.flush()
+        version = DocumentVersion(
+            document_id=doc.id,
+            version_number=1,
+            content_hash="x",
+            raw_content="",
+            processing_status="created",
+        )
+        session.add(version)
+        session.flush()
+
+        report = UnicodeSanitizationReport(
+            nul_removed=2,
+            surrogate_pairs_repaired=1,
+            lone_surrogates_replaced=3,
+            strings_visited=10,
+        )
+        _apply_parse_result(
+            session,
+            doc,
+            version,
+            structured,
+            sanitization_report=report,
+        )
+        session.commit()
+        session.refresh(version)
+
+        stored = version.structured_content
+        assert stored["metadata"]["sanitization"]["unicode"] == report.as_dict()
+        assert version.processing_status == "ready"
+        assert doc.title == "T"
+
+    def test_apply_parse_result_omits_block_when_report_is_none(
+        self, session
+    ):
+        from apps.api.parsers.base import Block, StructuredContent
+        from apps.worker.services.processor import _apply_parse_result
+
+        structured = StructuredContent(
+            document_type="txt",
+            blocks=[Block(type="paragraph", text="hi", heading_path=[])],
+            metadata={"title": "Untouched"},
+        )
+        doc = Document(title="stale", source_type=DocumentSourceType.file)
+        session.add(doc)
+        session.flush()
+        version = DocumentVersion(
+            document_id=doc.id,
+            version_number=1,
+            content_hash="x",
+            raw_content="",
+            processing_status="created",
+        )
+        session.add(version)
+        session.flush()
+
+        _apply_parse_result(session, doc, version, structured)
+        session.commit()
+        session.refresh(version)
+
+        stored = version.structured_content
+        assert "sanitization" not in (stored.get("metadata") or {})
+
+
+class TestWordPreviewRollbackIsolation:
+    def test_parse_failure_rolls_back_before_recording_diagnostic(self, session, monkeypatch):
+        from apps.worker.services import processor as proc
+
+        document = Document(title="note", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(document_id=document.id, version_number=1,
+                                  content_hash="source", raw_content="original note")
+        session.add(version)
+        session.flush()
+        job = ProcessingJob(document_id=document.id, document_version_id=version.id,
+                            stage="parsing", idempotency_key="rollback-test", config_version="1")
+        session.add(job)
+        session.commit()
+
+        def fail_body(session, document, version, structured, **kwargs):
+            version.content_hash = None
+            session.flush()
+
+        monkeypatch.setattr(proc, "_apply_parse_result", fail_body)
+        assert not process_single_job(session, job.id)
+        session.refresh(job)
+        session.refresh(version)
+        assert job.status == "retry"
+        assert job.error_details == {"exception_class": "IntegrityError"}
+        assert version.raw_content == "original note"
+        assert version.content_hash == "source"
+
+    def test_real_constraint_failure_keeps_body_and_cleans_preview(
+        self, session, tmp_path, monkeypatch
+    ):
+        from sqlalchemy import event
+        from subprocess import CompletedProcess
+        from apps.worker.services import processor as proc
+
+        document = Document(title="preview", source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(document_id=document.id, version_number=1,
+                                  content_hash="original-source", processing_status="ready")
+        session.add(version)
+        session.commit()
+        version.raw_content = "parsed body"
+
+        def fake_run(args, **kwargs):
+            (Path(args[args.index("--outdir") + 1]) / "source.pdf").write_bytes(b"%PDF-test")
+            return CompletedProcess(args, 0, b"", b"")
+
+        def fail_new_blob(session, context, instances):
+            for obj in session.new:
+                if isinstance(obj, Blob):
+                    obj.sha256 = None  # Real NOT NULL violation inside the savepoint.
+
+        monkeypatch.setattr(proc.settings, "storage_path", str(tmp_path))
+        monkeypatch.setattr(proc.shutil, "which", lambda name: "/test/soffice")
+        monkeypatch.setattr(proc.subprocess, "run", fake_run)
+        event.listen(session, "before_flush", fail_new_blob)
+        try:
+            assert not proc._ensure_word_pdf_preview(
+                session, version, b"source bytes", "application/msword", "source.doc"
+            )
+            assert session.is_active
+            session.commit()
+            session.refresh(version)
+            assert version.raw_content == "parsed body"
+            assert version.content_hash == "original-source"
+            assert version.preview_blob_id is None
+            assert version.meta["preview"]["reason"] == "IntegrityError"
+            assert "INSERT" not in version.meta["preview"]["message"]
+            assert session.query(Blob).count() == 0
+            assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+        finally:
+            event.remove(session, "before_flush", fail_new_blob)
+
+    def test_pending_body_failure_propagates_before_savepoint(self, session, monkeypatch):
+        from sqlalchemy.exc import IntegrityError
+        from apps.worker.services import processor as proc
+
+        document = Document(title="preview", source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(document_id=document.id, version_number=1,
+                                  content_hash="source", processing_status="ready")
+        session.add(version)
+        session.commit()
+        version_id = version.id
+        version.content_hash = None
+        monkeypatch.setattr(proc.shutil, "which", lambda name: "/test/soffice")
+        with pytest.raises(IntegrityError):
+            proc._ensure_word_pdf_preview(
+                session, version, b"source", "application/msword", "source.doc"
+            )
+        session.rollback()
+        assert session.get(DocumentVersion, version_id).content_hash == "source"
+
+
 # --- _enqueue_embedding_jobs_for_new_chunks -----------------------------
 
 

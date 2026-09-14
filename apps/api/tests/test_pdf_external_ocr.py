@@ -102,6 +102,29 @@ def _external_lines(external: _RecordingExternalProvider):
 # --- the actual tests --------------------------------------------------
 
 
+def test_empty_local_and_failed_or_capped_external_never_count_as_completed():
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_page(PdfReader(BytesIO(_make_pdf_with_image())).pages[0])
+    stream = BytesIO()
+    writer.write(stream)
+    external = _RecordingExternalProvider(raise_value=RuntimeError("unavailable"))
+    parser = PdfParser(
+        options=PdfOcrOptions(enabled=True, external_provider=external, external_max_pages=1),
+        renderer_factory=_renderer_factory,
+        tesseract_runner=lambda *_: CompletedProcess([], 0, _empty_tsv(), b""),
+        tesseract_lookup=lambda: "/test/tesseract",
+        external_ocr_runner=_external_lines(external),
+    )
+    result = parser.parse(stream.getvalue())
+    extraction = result.structured_content.metadata["pdf_extraction"]
+    assert extraction["ocr_completed_pages"] == []
+    assert extraction["ocr_failed_pages"] == [1, 2]
+    assert extraction["external_failed_pages"] == [1]
+    assert extraction["external_skipped_pages"] == [2]
+    assert extraction["ocr_status"] == "failed"
+
+
 def test_high_quality_local_result_skips_external_provider():
     pdf_bytes = _make_pdf_with_image()
 

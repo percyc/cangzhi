@@ -314,7 +314,16 @@ class PdfParser(BaseParser):
                     external_used=False,
                     external_status="skipped_max",
                 )
-                ocr_completed_pages.append(page_number)
+                if local_chars > 0:
+                    # Local produced a usable result; the page is
+                    # completed even though we did not call the
+                    # external model. The cap is recorded on the
+                    # external_* counters so the audit trail still
+                    # explains why the external channel was
+                    # skipped.
+                    ocr_completed_pages.append(page_number)
+                else:
+                    ocr_failed_pages.append(page_number)
                 external_skipped_pages.append(page_number)
                 _record_trigger("max_external_pages_reached", page_number)
                 continue
@@ -350,7 +359,18 @@ class PdfParser(BaseParser):
                     external_used=False,
                     external_status=external_result.error or "upstream_error",
                 )
-                ocr_completed_pages.append(page_number)
+                if local_chars > 0:
+                    # Both channels tried; the local fallback
+                    # carries usable text so the page is still
+                    # considered completed.
+                    ocr_completed_pages.append(page_number)
+                else:
+                    # Local produced nothing usable and the
+                    # external call also failed; the page has
+                    # no output and must not be counted as
+                    # completed even though the local fallback
+                    # block was written to ``blocks``.
+                    ocr_failed_pages.append(page_number)
                 continue
 
             external_completed_pages.append(page_number)

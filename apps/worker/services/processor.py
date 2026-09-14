@@ -51,6 +51,12 @@ from apps.api.ocr import build_external_ocr_provider
 from apps.api.parsers import get_parser_for_content
 from apps.api.parsers.base import StructuredContent
 from apps.api.parsers.pdf import PdfOcrOptions
+from apps.api.parsers.text_sanitize import (
+    UnicodeKeyCollisionError,
+    UnicodeSanitizationReport,
+    sanitize_unicode_payload,
+    sanitize_unicode_text,
+)
 from apps.api.security import (
     URLFetchError,
     URLSecurityError,
@@ -96,6 +102,64 @@ CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
 TERMINAL_PARSE_FAILURE_REASONS = frozenset({"spreadsheet_limit_exceeded"})
+
+def _sanitize_structured_content(
+    structured: StructuredContent,
+) -> UnicodeSanitizationReport:
+    """Normalize every derived string in a parser result before persistence.
+
+    The text extraction path (PDF, docx, html, …) may emit
+    malformed UTF-16 sequences — lone surrogates or well-formed
+    surrogate pairs that were never collapsed to their scalar
+    code point — and the PDF tesseract pipeline can occasionally
+    drop a NUL byte. The chunker, the full-text index and the
+    JSON column for ``structured_content`` all assume a valid
+    Unicode string; without normalization a single rogue
+    surrogate breaks :func:`json.dumps`, the search index and
+    any downstream consumer that asks for ``str(block.text)``.
+
+    We mutate the parser result in place so the rest of the
+    pipeline (derivation of ``raw_content`` and ``title``,
+    chunking, metadata) reads the same clean text. Original
+    blob bytes and source hashes are untouched, so the source
+    of truth stays the immutable blob.
+    """
+
+    aggregate = UnicodeSanitizationReport()
+    for block in structured.blocks:
+        if isinstance(block.text, str):
+            new_text, report = sanitize_unicode_text(block.text)
+            block.text = new_text
+            aggregate = _merge_sanitization_reports(aggregate, report)
+        if isinstance(block.heading_path, list):
+            new_path, report = sanitize_unicode_payload(block.heading_path)
+            block.heading_path = new_path
+            aggregate = _merge_sanitization_reports(aggregate, report)
+        if isinstance(block.extra, dict):
+            new_extra, report = sanitize_unicode_payload(block.extra)
+            block.extra = new_extra
+            aggregate = _merge_sanitization_reports(aggregate, report)
+    if isinstance(structured.metadata, dict):
+        new_meta, report = sanitize_unicode_payload(structured.metadata)
+        structured.metadata = new_meta
+        aggregate = _merge_sanitization_reports(aggregate, report)
+    return aggregate
+
+
+def _merge_sanitization_reports(
+    left: UnicodeSanitizationReport,
+    right: UnicodeSanitizationReport,
+) -> UnicodeSanitizationReport:
+    return UnicodeSanitizationReport(
+        nul_removed=left.nul_removed + right.nul_removed,
+        surrogate_pairs_repaired=(
+            left.surrogate_pairs_repaired + right.surrogate_pairs_repaired
+        ),
+        lone_surrogates_replaced=(
+            left.lone_surrogates_replaced + right.lone_surrogates_replaced
+        ),
+        strings_visited=left.strings_visited + right.strings_visited,
+    )
 
 
 def _build_pdf_ocr_options(
@@ -343,7 +407,18 @@ def _ensure_word_pdf_preview(
     content_type: str,
     filename: str | None,
 ) -> bool:
-    """Create a version-scoped PDF view without changing the source document."""
+    """Create a version-scoped PDF view without changing the source document.
+
+    The conversion writes a fresh blob row and stamps
+    ``version.preview_blob_id`` + ``version.meta.preview``. To make
+    sure a flush error (constraint violation, connection drop,
+    etc.) does not poison the outer transaction or mask the real
+    failure, the database side effects are isolated in a nested
+    savepoint via :meth:`Session.begin_nested`. On any failure the
+    savepoint is rolled back first, the original exception class
+    is captured before the session is touched again. Diagnostics
+    exclude SQL parameters and converter output.
+    """
 
     if version.preview_blob_id is not None or not _is_word_document(
         content_type, filename
@@ -361,6 +436,12 @@ def _ensure_word_pdf_preview(
         session.add(version)
         return False
 
+    # begin_nested flushes pending outer writes before creating its savepoint.
+    # Let a body persistence failure reach the parsing rollback.
+    session.flush()
+    storage_key_to_cleanup: str | None = None
+    preview_blob_id: int | None = None
+    document_version_id = getattr(version, "id", None)
     try:
         with tempfile.TemporaryDirectory(prefix="cangzhi-preview-") as directory:
             workdir = Path(directory)
@@ -399,47 +480,79 @@ def _ensure_word_pdf_preview(
             stored = storage.save(
                 BytesIO(output_path.read_bytes()), max_bytes=PDF_PREVIEW_MAX_BYTES
             )
-            preview_blob = (
-                session.query(Blob).filter(Blob.sha256 == stored.sha256).one_or_none()
-            )
-            if preview_blob is None:
-                source_stem = Path(filename or "document").stem or "document"
-                preview_blob = Blob(
-                    sha256=stored.sha256,
-                    storage_key=stored.storage_key,
-                    content_type="application/pdf",
-                    file_size=stored.size,
-                    original_filename=f"{source_stem}.pdf",
-                )
-                session.add(preview_blob)
-                session.flush()
-            else:
-                storage.delete(stored.storage_key)
+            storage_key_to_cleanup = stored.storage_key
 
-            version.preview_blob_id = preview_blob.id
-            version.meta = {
-                **(version.meta or {}),
-                "preview": {
-                    "status": "ready",
-                    "format": "pdf",
-                    "config_version": PDF_PREVIEW_CONFIG,
-                },
-            }
-            session.add(version)
+            try:
+                with session.begin_nested():
+                    preview_blob = (
+                        session.query(Blob)
+                        .filter(Blob.sha256 == stored.sha256)
+                        .one_or_none()
+                    )
+                    if preview_blob is None:
+                        source_stem = Path(filename or "document").stem or "document"
+                        preview_blob = Blob(
+                            sha256=stored.sha256,
+                            storage_key=stored.storage_key,
+                            content_type="application/pdf",
+                            file_size=stored.size,
+                            original_filename=f"{source_stem}.pdf",
+                        )
+                        session.add(preview_blob)
+                        session.flush()
+                        preview_blob_id = preview_blob.id
+                    else:
+                        # Storage was just written but is unreferenced; clean
+                        # it up before we lose track of the key. The
+                        # already-persisted blob row stays.
+                        storage.delete(stored.storage_key)
+                        storage_key_to_cleanup = None
+                        preview_blob_id = preview_blob.id
+
+                    version.preview_blob_id = preview_blob_id
+                    version.meta = {
+                        **(version.meta or {}),
+                        "preview": {
+                            "status": "ready",
+                            "format": "pdf",
+                            "config_version": PDF_PREVIEW_CONFIG,
+                        },
+                    }
+                    session.add(version)
+            except Exception:
+                # Drop any orphan storage entry written before the
+                # savepoint failed. ``storage_key_to_cleanup`` is reset
+                # when we already cleaned it up inside the savepoint.
+                if storage_key_to_cleanup is not None:
+                    try:
+                        LocalBlobStorage(settings.storage_path).delete(
+                            storage_key_to_cleanup
+                        )
+                    except Exception:
+                        logger.warning(
+                            "word_preview_orphan_cleanup_failed",
+                            document_version_id=document_version_id,
+                        )
+                storage_key_to_cleanup = None
+                raise
+
+            storage_key_to_cleanup = None
             return True
     except Exception as exc:  # noqa: BLE001
+        # SQL parameters and converter output may contain document content.
+        reason = type(exc).__name__
+        message = "PDF 预览生成失败，正文解析结果已保留"
         logger.warning(
             "word_preview_failed",
-            document_version_id=version.id,
-            error=str(exc),
+            document_version_id=document_version_id,
+            reason=reason,
+            error=message,
         )
+        if not session.is_active:
+            raise
         version.meta = {
             **(version.meta or {}),
-            "preview": {
-                "status": "failed",
-                "reason": type(exc).__name__,
-                "message": str(exc)[:1000],
-            },
+            "preview": {"status": "failed", "reason": reason, "message": message},
         }
         session.add(version)
         return False
@@ -1745,6 +1858,7 @@ def _process_parsing(
     document: Document,
     version: DocumentVersion,
 ) -> bool:
+    job_id = job.id
     version.processing_status = "processing"
     session.add(version)
     session.commit()
@@ -1819,6 +1933,7 @@ def _process_parsing(
             )
 
         structured_content = result.structured_content
+        sanitization_report = _sanitize_structured_content(structured_content)
         _log_pdf_ocr_summary(document, version, structured_content)
         if (
             document.source_type == DocumentSourceType.url
@@ -1836,6 +1951,12 @@ def _process_parsing(
                     ).parse(adapted_html, "text/html")
                     if adapted.success and adapted.structured_content is not None:
                         structured_content = adapted.structured_content
+                        adapted_report = _sanitize_structured_content(
+                            structured_content
+                        )
+                        sanitization_report = _merge_sanitization_reports(
+                            sanitization_report, adapted_report
+                        )
             except (URLFetchError, URLSecurityError) as exc:
                 logger.warning(
                     "url_adapter_failed",
@@ -1843,7 +1964,13 @@ def _process_parsing(
                     error=str(exc),
                 )
 
-        _apply_parse_result(session, document, version, structured_content)
+        _apply_parse_result(
+            session,
+            document,
+            version,
+            structured_content,
+            sanitization_report=sanitization_report,
+        )
         _ensure_word_pdf_preview(
             session, version, content_bytes, content_type, filename
         )
@@ -1890,10 +2017,17 @@ def _process_parsing(
         )
         return True
     except Exception as exc:
-        logger.exception("parse_unexpected_error", job_id=job.id)
+        exception_class = type(getattr(exc, "orig", exc)).__name__
+        logger.warning("parse_unexpected_error", job_id=job_id, reason=exception_class)
         session.rollback()
+        if isinstance(exc, UnicodeKeyCollisionError):
+            return _mark_terminal_failure(
+                session, job, version, "规范化后的元数据字段名冲突",
+                details={"exception_class": exception_class},
+            )
         return _mark_parse_failure(
-            session, job, version, "处理任务发生异常", {"exception": str(exc)}
+            session, job, version, "处理任务发生异常",
+            {"exception_class": exception_class},
         )
 
 
@@ -1981,8 +2115,24 @@ def _apply_parse_result(
     document: Document,
     version: DocumentVersion,
     structured: StructuredContent,
+    *,
+    sanitization_report: UnicodeSanitizationReport | None = None,
 ) -> None:
+    if sanitization_report is None:
+        report = _sanitize_structured_content(structured)
+        if report.nul_removed or report.surrogate_pairs_repaired or report.lone_surrogates_replaced:
+            sanitization_report = report
     payload = structured.to_dict()
+    if sanitization_report is not None:
+        metadata_block = payload.get("metadata")
+        if not isinstance(metadata_block, dict):
+            metadata_block = {}
+            payload["metadata"] = metadata_block
+        sanitization_meta = metadata_block.get("sanitization")
+        if not isinstance(sanitization_meta, dict):
+            sanitization_meta = {}
+            metadata_block["sanitization"] = sanitization_meta
+        sanitization_meta["unicode"] = sanitization_report.as_dict()
     version.structured_content = payload
     full_text = structured.full_text()
     version.raw_content = full_text
@@ -2018,6 +2168,21 @@ def _apply_parse_result(
     )
     session.add(version)
     session.add(document)
+
+    if sanitization_report is not None and (
+        sanitization_report.nul_removed
+        or sanitization_report.surrogate_pairs_repaired
+        or sanitization_report.lone_surrogates_replaced
+    ):
+        logger.info(
+            "parse_unicode_sanitized",
+            document_id=document.id,
+            version_id=version.id,
+            nul_removed=sanitization_report.nul_removed,
+            surrogate_pairs_repaired=sanitization_report.surrogate_pairs_repaired,
+            lone_surrogates_replaced=sanitization_report.lone_surrogates_replaced,
+            strings_visited=sanitization_report.strings_visited,
+        )
 
 
 def claim_pending_jobs(session: Session, limit: int = BATCH_SIZE) -> list[int]:

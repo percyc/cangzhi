@@ -251,3 +251,25 @@
 - 验证：人工核对两份 README 的章节、命令、端口、路径和文档链接；Markdown 链接
   执行本地存在性检查。
 - 部署：n/a（纯文档）；发布时以同一提交同步到项目已配置的 Git 远程。
+
+### 2026-09-14 解析可靠性第一批：Unicode、事务恢复与 OCR 状态
+
+- 背景：解析结果中的 NUL 和孤立 UTF-16 代理字符无法写入 PostgreSQL；Word
+  预览捕获 flush 异常后继续访问 ORM，可能用 PendingRollbackError 掩盖原始错误。
+  本地 OCR 无文本且外部识别失败或达到页数上限时，页面还可能被计为识别完成。
+- 变更：统一规范化派生正文、标题路径和嵌套元数据，移除 NUL、修复有效代理对、
+  用替换字符保留无法还原字符的位置；仅记录汇总计数。规范化字段名冲突显式终止，
+  避免静默覆盖字段；原始文件与已有来源哈希不变。
+- 变更：预览保存点之前显式 flush 正文，正文写入错误交给解析任务 rollback；
+  预览自身数据库错误只回滚保存点并清理新建孤立文件。异常日志和持久化诊断保留
+  类型，不输出 SQL 参数或转换器原始输出。OCR 回退无有效文本的页面计入失败。
+- 协作：OpenCode MiniMax M3 完成初稿；Codex 审阅后补齐字段冲突、事务边界、
+  错误脱敏与真实数据库约束回归测试。
+- 验证：`pytest` 运行 `test_text_sanitize.py`、`test_parsers.py`、
+  `test_pdf_external_ocr.py`、`test_processing_status.py` 与完整 `apps/worker/tests`
+  共 155 项通过；另以合成异常字符在 PostgreSQL 只读事务中验证规范化后 JSONB
+  转换成功。`git diff --check` 通过；现有 Starlette/httpx 弃用警告不影响结果。
+- 边界：本批修复 OCR 页级完成状态，尚未将所有空正文 PDF 改为任务级失败；
+  未修改公共 API 契约，无迁移。未部署、未自动重处理历史资料。
+- 后续：Worker 心跳/租约与超时恢复、DOCX 段落表格原序分别登记为 CZ-Q05/Q06；
+  大型 Excel 限额及混合 PDF 页内图片识别仍需后续评估。
