@@ -38,7 +38,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 | 主题 | 关联 ID | 状态 | 备注 |
 |---|---|---|---|
-| 文档理解演进第一批 | `CZ-Q06` | 已验证，待合并 | 负责人 Codex / OpenCode；分支 `codex/CZ-Q06-document-structure`；DOCX 原序与章节归属修复，新增 18 项回归，完整 API/Worker 674 项通过；未部署、不重建生产索引 |
+| 文档理解演进第一批 | `CZ-Q06` | 发布前完善 | 负责人 Codex / OpenCode；分支 `codex/CZ-Q06-document-structure`；原序修复 674 项已通过，继续补标题跳级回归；维护者授权验证后合并部署，不自动重建历史索引 |
 | 外部视觉 OCR（基线 H 第二阶段） | `CZ-D01b` | 收尾 | 解析、Provider、触发条件、外发页数限制、`metadata.pdf_extraction` 与 `Block.extra` 扩展已交付；剩下黄金集评测与处理中心可视化 |
 | 处理状态与可观察性 | `CZ-Q03` / `CZ-Q04` | 进行中 | 实时全局队列统计、处理中心阶段口径和当前 profile 向量覆盖已交付；剩下 DSH 自动刷新验收、耗时、失败类型、模型调用与大文档回归集 |
 | 检索质量评测 | `CZ-R01`–`CZ-R05` | 进行中 | Reranker 暂不引入；黄金集与分路 Top-K 评测待补 |

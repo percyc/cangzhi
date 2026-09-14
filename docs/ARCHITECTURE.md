@@ -126,10 +126,11 @@ PDF、Word、Markdown、网页和随手记按章节、条款、段落、列表�
 原文件始终可下载。浏览时优先使用原生 PDF；Word 等格式可生成一次性 PDF 预览，
 预览不是事实源。Markdown 使用安全渲染；引用通过文档版本和切片位置回到原文。
 
-DOCX 在 `v1.0` 后的 CZ-Q06 分支改为按正文直接子节点 `w:p` / `w:tbl` 原序
+DOCX 在 `v1.0` 后的 CZ-Q06 改为按正文直接子节点 `w:p` / `w:tbl` 原序
 解析，而非先段落后表格；`paragraph_index` 与 `Block.extra.docx_body_index`
 均记录两类节点合计的零基位置（空段落计数但不输出，`w:sectPr` 不计数）。
 `metadata.docx_extraction` 标记解析器版本、索引语义与能力限制。
+标题路径按真实标题级别维护栈，支持跳级、同级替换与从二/三级开始，不虚构缺失祖先。
 DOC 转换为 DOCX 后复用相同逻辑。此位置不是 PDF 页码或 Word 的段落专用序号。
 嵌套表格、内容控件/修订包装、合并单元格的完整结构仍未支持；不自动重跑历史版本。
 分层 AI 理解与文档地图仍为[后续计划](DOCUMENT_UNDERSTANDING_PLAN.md)，不是本批能力。

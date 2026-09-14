@@ -72,7 +72,7 @@ class DocxParser(BaseParser):
 
         try:
             blocks: list[Block] = []
-            heading_path: list[str] = []
+            heading_stack: list[tuple[int, str]] = []
             doc = Document(BytesIO(content))
             w_p = qn("w:p")
             w_tbl = qn("w:tbl")
@@ -95,23 +95,25 @@ class DocxParser(BaseParser):
                     level = _heading_level(style_name)
 
                     if level is not None:
-                        while len(heading_path) >= level:
-                            heading_path.pop()
-                        heading_path.append(text)
+                        while heading_stack and heading_stack[-1][0] >= level:
+                            heading_stack.pop()
+                        heading_stack.append((level, text))
+                        heading_path = [title for _, title in heading_stack]
 
                         blocks.append(Block(
                             type="heading",
                             text=text,
-                            heading_path=heading_path.copy(),
+                            heading_path=heading_path,
                             level=level,
                             paragraph_index=current_index,
                             extra={"docx_body_index": current_index},
                         ))
                     else:
+                        heading_path = [title for _, title in heading_stack]
                         blocks.append(Block(
                             type="paragraph",
                             text=para.text,
-                            heading_path=heading_path.copy(),
+                            heading_path=heading_path,
                             paragraph_index=current_index,
                             extra={"docx_body_index": current_index},
                         ))
@@ -124,10 +126,11 @@ class DocxParser(BaseParser):
                         cells = [cell.text.strip() for cell in row.cells]
                         lines.append("\t".join(cells))
                     table_text = "\n".join(lines)
+                    heading_path = [title for _, title in heading_stack]
                     blocks.append(Block(
                         type="table",
                         text=table_text,
-                        heading_path=heading_path.copy(),
+                        heading_path=heading_path,
                         paragraph_index=current_index,
                         extra={"docx_body_index": current_index},
                     ))

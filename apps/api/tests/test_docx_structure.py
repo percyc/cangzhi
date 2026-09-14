@@ -25,6 +25,7 @@ from __future__ import annotations
 import io
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import pytest
 from docx import Document
 
 from apps.api.parsers import DocxParser
@@ -313,6 +314,95 @@ class TestDocxExtractionMetadata:
 
         extraction = result.structured_content.metadata["docx_extraction"]
         assert "嵌套表格" in extraction["index_semantics"] or "nested" in extraction["index_semantics"].lower()
+
+
+class TestDocxHeadingLevelSkipping:
+    """Regression for heading_path built from actual (level, title) stack.
+
+    The old implementation compared ``len(heading_path)`` to the incoming
+    heading level, which is wrong when levels are skipped or the document
+    starts above level 1. Paths are now driven by the real heading levels,
+    so jumps like 1->3->2 or a document starting at level 2 cannot fabricate
+    missing ancestors.
+    """
+
+    @pytest.mark.parametrize(
+        ("levels", "expected_paths"),
+        [
+            # 1 -> 3 -> 2: level 2 pops the level-3 entry and keeps level 1.
+            ([1, 3, 2], [["h0"], ["h0", "h1"], ["h0", "h2"]]),
+            # 3 -> 3: level 3 pops a same-level sibling.
+            ([3, 3], [["h0"], ["h1"]]),
+            # 2 -> 1: level 1 pops everything.
+            ([2, 1], [["h0"], ["h1"]]),
+            # 1 -> 2 -> 3 -> 2: level 2 pops the level-3 child.
+            ([1, 2, 3, 2], [["h0"], ["h0", "h1"], ["h0", "h1", "h2"], ["h0", "h3"]]),
+            # Starting at level 2 must not push an empty/fabricated level 1.
+            ([2], [["h0"]]),
+        ],
+    )
+    def test_heading_path_tracks_actual_levels(self, levels, expected_paths):
+        document = Document()
+        for index, level in enumerate(levels):
+            document.add_heading(f"h{index}", level=level)
+            document.add_paragraph(f"p{index}")
+        raw = _save(document)
+
+        result = DocxParser().parse(raw)
+
+        assert result.success is True
+        # Every heading is followed by its paragraph, preserving order.
+        assert [block.type for block in result.structured_content.blocks] == [
+            kind
+            for level in levels
+            for kind in ("heading", "paragraph")
+        ]
+        heading_blocks = [
+            block for block in result.structured_content.blocks if block.type == "heading"
+        ]
+        path_map = {block.text: block.heading_path for block in heading_blocks}
+        texts = [f"h{index}" for index in range(len(levels))]
+        assert [path_map[text] for text in texts] == expected_paths
+        paragraphs = [b for b in result.structured_content.blocks if b.type == "paragraph"]
+        assert [b.heading_path for b in paragraphs] == expected_paths
+        assert [b.paragraph_index for b in result.structured_content.blocks] == list(
+            range(2 * len(levels))
+        )
+
+    def test_tables_inherit_parametrized_heading_path(self):
+        document = Document()
+        document.add_heading("跳过", level=2)
+        _add_table(document, ("乙表",))
+        document.add_heading("再跨", level=4)
+        _add_table(document, ("丁表",))
+        document.add_heading("回落", level=3)
+        _add_table(document, ("丙表",))
+        raw = _save(document)
+
+        result = DocxParser().parse(raw)
+
+        assert result.success is True
+        assert [block.type for block in result.structured_content.blocks] == [
+            "heading",
+            "table",
+            "heading",
+            "table",
+            "heading",
+            "table",
+        ]
+        # Zero-based body index: heading0, t0, heading1, t1, heading2, t2.
+        assert [block.paragraph_index for block in result.structured_content.blocks] == [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+        ]
+        tables = [b for b in result.structured_content.blocks if b.type == "table"]
+        assert tables[0].heading_path == ["跳过"]
+        assert tables[1].heading_path == ["跳过", "再跨"]
+        assert tables[2].heading_path == ["跳过", "回落"]
 
 
 class TestDocxParentSectionAssociation:
