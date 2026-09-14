@@ -576,3 +576,17 @@ python -m apps.cli ask "统计各状态缺陷数量" --scope project_x
 5. 按场景选择 REST / CLI / MCP 发起检索或问答。
 6. 需要带引用回答时授予 `knowledge:ask` 并调用 `ask`（REST/CLI）或
    `knowledge_ask`（MCP）。
+
+## 9. 浏览器管理接口：收件箱
+
+`GET /api/documents/inbox?filter=attention&offset=0&limit=25` 使用管理员登录会话，
+并沿用当前工作空间解析规则；不是面向外部 Agent 的 REST v1/MCP 接口。
+
+- `filter`：`attention`（默认）、`all`、`processing`、`failed`、
+  `needs_organization`、`source_issue`、`not_vectorized`、`completed`。
+- `offset`：从 0 起；`limit`：默认 25，范围 1–100。
+- 响应：`items` 为当前页，`total` 为当前筛选总数，`counts` 为当前空间各筛选
+  总数，`has_processing` 表示空间内是否仍有处理中的资料。
+- 状态与文档详情共用计算口径；收件箱省略 OCR 页级摘要，不返回原文或向量。
+  各筛选可能重叠，例如已完成但待整理的资料仍在“需要关注”中。
+- 页面上的批量重试和向量补建仅作用于本页；翻页后可继续处理下一页。

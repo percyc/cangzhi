@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 type DocumentItem = {
   id: number;
@@ -53,15 +53,48 @@ type Filter =
   | 'not_vectorized'
   | 'completed';
 
+type InboxCounts = {
+  attention: number;
+  all: number;
+  processing: number;
+  failed: number;
+  needs_organization: number;
+  source_issue: number;
+  not_vectorized: number;
+  completed: number;
+};
+
+type InboxResponse = {
+  items: DocumentItem[];
+  total: number;
+  counts: InboxCounts;
+  has_processing: boolean;
+};
+
 type RepairResult = {
   enqueued?: number;
   reset?: number;
 };
 
 const PAGE_SIZE = 25;
+const POLL_INTERVAL = 3000;
+const REQUEST_TIMEOUT = 20000;
+
+const EMPTY_COUNTS: InboxCounts = {
+  attention: 0,
+  all: 0,
+  processing: 0,
+  failed: 0,
+  needs_organization: 0,
+  source_issue: 0,
+  not_vectorized: 0,
+  completed: 0,
+};
 
 export default function InboxPage() {
-  const [documents, setDocuments] = useState<DocumentItem[]>([]);
+  const [items, setItems] = useState<DocumentItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [counts, setCounts] = useState<InboxCounts>(EMPTY_COUNTS);
   const [filter, setFilter] = useState<Filter>('attention');
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -70,188 +103,208 @@ export default function InboxPage() {
   const [retrying, setRetrying] = useState(false);
   const [repairing, setRepairing] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      const fetchPage = async (offset: number) => {
-        const response = await fetch(
-          `/api/documents/overview?limit=200&offset=${offset}&include_processing=true`,
-          { cache: 'no-store' },
-        );
-        if (!response.ok) throw new Error('资料列表读取失败');
-        return {
-          rows: (await response.json()) as DocumentItem[],
-          total: Number(response.headers.get('X-Total-Count') || '0'),
-        };
-      };
-      const first = await fetchPage(0);
-      const offsets = Array.from(
-        { length: Math.max(0, Math.ceil(first.total / 200) - 1) },
-        (_, index) => (index + 1) * 200,
-      );
-      const remaining = await Promise.all(offsets.map(fetchPage));
-      setDocuments([
-        ...first.rows,
-        ...remaining.flatMap((result) => result.rows),
-      ]);
-      setError('');
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '读取处理中心失败');
-    } finally {
-      setLoading(false);
+  const mountedRef = useRef(false);
+  const visibleRef = useRef(true);
+  const hasProcessingRef = useRef(false);
+  const aborterRef = useRef<AbortController | null>(null);
+  const generationRef = useRef(0);
+  const pollTimerRef = useRef<number | null>(null);
+  const mutationRef = useRef(false);
+  const performLoadRef = useRef<() => Promise<void>>(async () => {});
+  const stateRef = useRef({ filter, page });
+  useEffect(() => {
+    stateRef.current = { filter, page };
+  }, [filter, page]);
+
+  const clearPollTimer = useCallback(() => {
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
     }
   }, []);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 0);
-    return () => window.clearTimeout(timer);
-  }, [load]);
+  const cancelLoad = useCallback(() => {
+    ++generationRef.current;
+    aborterRef.current?.abort();
+    aborterRef.current = null;
+  }, []);
+
+  const performLoad = useCallback(async () => {
+    if (!mountedRef.current || mutationRef.current) return;
+    clearPollTimer();
+    if (aborterRef.current) aborterRef.current.abort();
+    const controller = new AbortController();
+    aborterRef.current = controller;
+    const gen = ++generationRef.current;
+    setLoading(true);
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, REQUEST_TIMEOUT);
+    try {
+      const { filter: f, page: p } = stateRef.current;
+      const offset = Math.max(0, (p - 1) * PAGE_SIZE);
+      const url =
+        `/api/documents/inbox?filter=${encodeURIComponent(f)}` +
+        `&offset=${offset}&limit=${PAGE_SIZE}`;
+      const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
+      if (gen !== generationRef.current) return;
+      if (!res.ok) throw new Error('收件箱读取失败');
+      const data = (await res.json()) as InboxResponse;
+      if (gen !== generationRef.current) return;
+      const newTotal = Number(data?.total) || 0;
+      setItems(Array.isArray(data?.items) ? data.items : []);
+      setTotal(newTotal);
+      setCounts({ ...EMPTY_COUNTS, ...(data?.counts ?? {}) });
+      hasProcessingRef.current = Boolean(data?.has_processing);
+      setError('');
+      const totalPages = Math.max(1, Math.ceil(newTotal / PAGE_SIZE));
+      if (stateRef.current.page > totalPages) {
+        setPage(totalPages);
+      }
+    } catch (reason) {
+      if (gen !== generationRef.current) return;
+      const isAbort = reason instanceof DOMException && reason.name === 'AbortError';
+      if (isAbort && !timedOut) {
+        // aborted by navigation / filter / page change / unmount — silent
+      } else if (isAbort && timedOut) {
+        setError('收件箱请求超过 20 秒未返回，请重试。');
+      } else {
+        setError(reason instanceof Error ? reason.message : '收件箱读取失败');
+      }
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (gen === generationRef.current) {
+        setLoading(false);
+        aborterRef.current = null;
+        if (mountedRef.current && visibleRef.current && hasProcessingRef.current && !mutationRef.current) {
+          clearPollTimer();
+          pollTimerRef.current = window.setTimeout(() => {
+            pollTimerRef.current = null;
+            if (!mountedRef.current) return;
+            if (!visibleRef.current) return;
+            if (!hasProcessingRef.current) return;
+            void performLoadRef.current();
+          }, POLL_INTERVAL);
+        }
+      }
+    }
+  }, [clearPollTimer]);
 
   useEffect(() => {
-    if (
-      !documents.some(
-        (document) => document.pipeline.overall_status === 'processing',
-      )
-    )
-      return;
-    const timer = window.setInterval(() => void load(), 3000);
-    return () => window.clearInterval(timer);
-  }, [load, documents]);
+    performLoadRef.current = performLoad;
+  }, [performLoad]);
 
-  const counts = useMemo(
-    () => ({
-      attention: documents.filter(
-        (document) =>
-          document.pipeline.overall_status !== 'completed' ||
-          !document.pipeline.vector_searchable ||
-          document.primary_category?.slug === 'inbox' ||
-          Boolean(
-            document.origin &&
-              (!document.origin.connector_available ||
-                ['failed', 'missing'].includes(
-                  document.origin.source_status ?? '',
-                )),
-          ),
-      ).length,
-      all: documents.length,
-      processing: documents.filter(
-        (document) => document.pipeline.overall_status === 'processing',
-      ).length,
-      failed: documents.filter(
-        (document) => document.pipeline.overall_status === 'failed',
-      ).length,
-      needs_organization: documents.filter(
-        (document) => document.primary_category?.slug === 'inbox',
-      ).length,
-      source_issue: documents.filter(
-        (document) =>
-          Boolean(
-            document.origin &&
-              (!document.origin.connector_available ||
-                ['failed', 'missing'].includes(
-                  document.origin.source_status ?? '',
-                )),
-          ),
-      ).length,
-      not_vectorized: documents.filter(
-        (document) => !document.pipeline.vector_searchable,
-      ).length,
-      completed: documents.filter(
-        (document) => document.pipeline.overall_status === 'completed',
-      ).length,
-    }),
-    [documents],
-  );
+  useEffect(() => {
+    mountedRef.current = true;
+    visibleRef.current = document.visibilityState === 'visible';
+    return () => {
+      mountedRef.current = false;
+      cancelLoad();
+      clearPollTimer();
+    };
+  }, [clearPollTimer, cancelLoad]);
 
-  const visibleDocuments = documents.filter((document) => {
-    if (filter === 'attention')
-      return (
-        document.pipeline.overall_status !== 'completed' ||
-        !document.pipeline.vector_searchable ||
-        document.primary_category?.slug === 'inbox' ||
-        Boolean(
-          document.origin &&
-            (!document.origin.connector_available ||
-              ['failed', 'missing'].includes(
-                document.origin.source_status ?? '',
-              )),
-        )
-      );
-    if (filter === 'all') return true;
-    if (filter === 'not_vectorized') return !document.pipeline.vector_searchable;
-    if (filter === 'needs_organization')
-      return document.primary_category?.slug === 'inbox';
-    if (filter === 'source_issue')
-      return Boolean(
-        document.origin &&
-          (!document.origin.connector_available ||
-            ['failed', 'missing'].includes(
-              document.origin.source_status ?? '',
-            )),
-      );
-    return document.pipeline.overall_status === filter;
-  });
-  const totalPages = Math.max(1, Math.ceil(visibleDocuments.length / PAGE_SIZE));
-  const effectivePage = Math.min(page, totalPages);
-  const pagedDocuments = visibleDocuments.slice(
-    (effectivePage - 1) * PAGE_SIZE,
-    effectivePage * PAGE_SIZE,
-  );
+  useEffect(() => {
+    if (!mountedRef.current) return;
+    clearPollTimer();
+    void performLoad();
+  }, [filter, page, performLoad, clearPollTimer]);
 
-  const parseStageFailedDocuments = useMemo(
+  useEffect(() => {
+    const handle = () => {
+      const visible = document.visibilityState === 'visible';
+      visibleRef.current = visible;
+      if (visible) {
+        if (!mountedRef.current) return;
+        clearPollTimer();
+        aborterRef.current?.abort();
+        void performLoad();
+      } else {
+        ++generationRef.current;
+        aborterRef.current?.abort();
+        aborterRef.current = null;
+        clearPollTimer();
+      }
+    };
+    document.addEventListener('visibilitychange', handle);
+    return () => document.removeEventListener('visibilitychange', handle);
+  }, [performLoad, clearPollTimer]);
+
+  const currentPageParseFailures = useMemo(
     () =>
-      documents.filter((document) => {
-        const stages = document.pipeline.stages;
+      items.filter((d) => {
+        const s = d.pipeline.stages;
         return (
-          stages.parsing.status === 'failed' ||
-          stages.understanding.status === 'failed' ||
-          stages.chunking.status === 'failed'
+          s.parsing.status === 'failed' ||
+          s.understanding.status === 'failed' ||
+          s.chunking.status === 'failed'
         );
       }),
-    [documents],
+    [items],
   );
 
-  const missingVectorDocuments = useMemo(
+  const currentPageMissingVectors = useMemo(
     () =>
-      documents.filter(
-        (document) =>
-          document.pipeline.stages.embedding.status !== 'disabled' &&
-          document.pipeline.stages.embedding.missing > 0,
+      items.filter(
+        (d) =>
+          d.pipeline.stages.embedding.status !== 'disabled' &&
+          d.pipeline.stages.embedding.missing > 0,
       ),
-    [documents],
+    [items],
   );
+
+  const busy = loading || Boolean(error);
+  const canAct = !busy && !retrying && !repairing;
 
   const retryFailed = async () => {
-    if (!parseStageFailedDocuments.length || retrying) return;
+    if (!canAct) return;
+    if (currentPageParseFailures.length === 0) return;
     setRetrying(true);
+    mutationRef.current = true;
+    ++generationRef.current;
+    setFeedback('');
+    aborterRef.current?.abort();
+    clearPollTimer();
+    let succeeded = false;
     try {
-      await Promise.all(
-        parseStageFailedDocuments.map(async (document) => {
-          const response = await fetch(
-            `/api/documents/${document.id}/reprocess`,
-            { method: 'POST' },
-          );
-          if (!response.ok)
-            throw new Error(`资料 ${document.id} 重试提交失败`);
+      const results = await Promise.allSettled(
+        currentPageParseFailures.map(async (d) => {
+          const r = await fetch(`/api/documents/${d.id}/reprocess`, {
+            method: 'POST',
+          });
+          if (!r.ok) throw new Error(`资料 ${d.id} 重试提交失败`);
         }),
       );
-      await load();
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed?.status === 'rejected') throw failed.reason;
+      succeeded = true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '批量重试失败');
     } finally {
+      mutationRef.current = false;
       setRetrying(false);
+      if (succeeded) await performLoad();
     }
   };
 
   const repairMissingVectors = async () => {
-    if (!missingVectorDocuments.length || repairing) return;
+    if (!canAct) return;
+    if (currentPageMissingVectors.length === 0) return;
     setRepairing(true);
+    mutationRef.current = true;
+    ++generationRef.current;
     setFeedback('');
+    aborterRef.current?.abort();
+    clearPollTimer();
+    let succeeded = false;
     try {
       const response = await fetch('/api/documents/batch/repair-vectors', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          document_ids: missingVectorDocuments.map((document) => document.id),
+          document_ids: currentPageMissingVectors.map((d) => d.id),
         }),
       });
       if (!response.ok) throw new Error('补建缺失向量失败');
@@ -261,11 +314,13 @@ export default function InboxPage() {
       setFeedback(
         `已补建 ${enqueued} 项缺失向量并重置 ${reset} 项状态，正在重新处理…`,
       );
-      await load();
+      succeeded = true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '补建缺失向量失败');
     } finally {
+      mutationRef.current = false;
       setRepairing(false);
+      if (succeeded) await performLoad();
     }
   };
 
@@ -280,6 +335,9 @@ export default function InboxPage() {
     { key: 'completed', label: '已完成' },
   ];
 
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const effectivePage = Math.min(page, totalPages);
+
   return (
     <main className="container mx-auto max-w-6xl p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -288,28 +346,37 @@ export default function InboxPage() {
           <p className="mt-1 text-sm text-slate-500">
             只处理需要关注的资料：处理中、失败、待整理和尚未建立语义索引的内容。
           </p>
+          <p className="mt-1 text-xs text-slate-400">
+            批量操作仅作用于当前页（每页 {PAGE_SIZE} 条），不会影响其他页。
+          </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={retryFailed}
-            disabled={retrying || parseStageFailedDocuments.length === 0}
-            className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 disabled:opacity-40"
-          >
-            {retrying
-              ? '正在提交…'
-              : `重试解析失败（${parseStageFailedDocuments.length}）`}
-          </button>
-          <button
-            type="button"
-            onClick={repairMissingVectors}
-            disabled={repairing || missingVectorDocuments.length === 0}
-            className="rounded bg-violet-600 px-4 py-2 text-sm text-white disabled:opacity-40"
-          >
-            {repairing
-              ? '正在补建…'
-              : `补建缺失向量（${missingVectorDocuments.length}）`}
-          </button>
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={retryFailed}
+              disabled={!canAct || currentPageParseFailures.length === 0}
+              className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 disabled:opacity-40"
+              title="仅对当前页解析或整理失败的资料重新提交处理"
+              aria-label="重试当前页解析或整理失败"
+            >
+              {retrying
+                ? '正在提交…'
+                : `重试本页失败（${currentPageParseFailures.length}）`}
+            </button>
+            <button
+              type="button"
+              onClick={repairMissingVectors}
+              disabled={!canAct || currentPageMissingVectors.length === 0}
+              className="rounded bg-violet-600 px-4 py-2 text-sm text-white disabled:opacity-40"
+              title="仅对当前页缺失向量的资料补建向量"
+              aria-label="补建当前页缺失向量"
+            >
+              {repairing
+                ? '正在补建…'
+                : `本页补建缺失向量（${currentPageMissingVectors.length}）`}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -318,7 +385,10 @@ export default function InboxPage() {
           <button
             key={item.key}
             type="button"
-            onClick={() => { setFilter(item.key); setPage(1); }}
+            onClick={() => {
+              if (filter === item.key) return;
+              setItems([]); setLoading(true); setFilter(item.key); setPage(1);
+            }}
             className={`rounded-full px-3 py-1.5 text-sm ${
               filter === item.key
                 ? 'bg-slate-900 text-white'
@@ -330,10 +400,18 @@ export default function InboxPage() {
         ))}
       </div>
 
-      {loading && <p className="mt-6 text-sm text-slate-500">正在汇总处理状态…</p>}
-      {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
+      {loading && items.length === 0 && (
+        <p className="mt-6 text-sm text-slate-500">正在读取收件箱…</p>
+      )}
+      {error && (
+        <p className="mt-4 text-sm text-red-700" role="alert">
+          {error}
+          <button type="button" onClick={() => void performLoad()} disabled={loading}
+            className="ml-3 underline disabled:opacity-40">重新加载</button>
+        </p>
+      )}
       {feedback && <p className="mt-4 text-sm text-violet-700">{feedback}</p>}
-      {!loading && !error && (
+      {!error && (
         <div className="mt-5 overflow-x-auto rounded-xl border border-slate-200 bg-white">
           <table className="min-w-full text-left text-sm">
             <thead className="bg-slate-50 text-xs text-slate-500">
@@ -347,7 +425,7 @@ export default function InboxPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {pagedDocuments.map((document) => {
+              {items.map((document) => {
                 const pipeline = document.pipeline;
                 const embedding = pipeline.stages.embedding;
                 return (
@@ -403,31 +481,31 @@ export default function InboxPage() {
               })}
             </tbody>
           </table>
-          {visibleDocuments.length === 0 && (
+          {items.length === 0 && !loading && (
             <p className="p-8 text-center text-sm text-slate-500">
               当前筛选下没有资料。
             </p>
           )}
         </div>
       )}
-      {!loading && !error && visibleDocuments.length > 0 && (
+      {!error && total > 0 && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
           <span>
-            当前筛选共 {visibleDocuments.length} 条 · 第 {effectivePage}/{totalPages} 页
+            当前筛选共 {total} 条 · 第 {effectivePage}/{totalPages} 页
           </span>
           <div className="flex gap-2">
             <button
               type="button"
-              disabled={effectivePage <= 1}
-              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              disabled={loading || effectivePage <= 1}
+              onClick={() => { setItems([]); setLoading(true); setPage((current) => Math.max(1, current - 1)); }}
               className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
             >
               上一页
             </button>
             <button
               type="button"
-              disabled={effectivePage >= totalPages}
-              onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              disabled={loading || effectivePage >= totalPages}
+              onClick={() => { setItems([]); setLoading(true); setPage((current) => Math.min(totalPages, current + 1)); }}
               className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
             >
               下一页

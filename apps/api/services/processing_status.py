@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any
+from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
+from sqlalchemy.orm import load_only
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..embeddings.build_service import _enqueue_embedding_job
@@ -158,17 +160,30 @@ def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
 
 async def _active_profile(db: AsyncSession) -> EmbeddingProfile | None:
     config = (
-        await db.execute(
-            select(AIRuntimeConfig).order_by(AIRuntimeConfig.id.desc()).limit(1)
+        (
+            await db.execute(
+                select(AIRuntimeConfig)
+                .options(
+                    load_only(
+                        AIRuntimeConfig.id,
+                        AIRuntimeConfig.active_embedding_profile_id,
+                        raiseload=True,
+                    )
+                )
+                .order_by(AIRuntimeConfig.id.desc())
+                .limit(1)
+            )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
     if config is None or config.active_embedding_profile_id is None:
         return None
     return await db.get(EmbeddingProfile, config.active_embedding_profile_id)
 
 
 async def _load_pipeline_inputs(
-    db: AsyncSession, version_ids: list[int]
+    db: AsyncSession, version_ids: list[int], *, include_extraction: bool = True
 ) -> tuple[
     dict[int, DocumentVersion],
     dict[int, list[DocumentChunk]],
@@ -181,19 +196,51 @@ async def _load_pipeline_inputs(
     if not unique_ids:
         return {}, {}, {}, None, {}, {}
 
-    versions = {
-        version.id: version
-        for version in (
-            await db.execute(
-                select(DocumentVersion).where(DocumentVersion.id.in_(unique_ids))
+    # Status needs presence/metadata, never the original body or parsed blocks.
+    version_columns = [
+        DocumentVersion.id,
+        DocumentVersion.document_id,
+        DocumentVersion.processing_status,
+        DocumentVersion.meta,
+        (func.length(DocumentVersion.raw_content) > 0).label("has_raw"),
+        cast(DocumentVersion.structured_content, String)
+        .not_in(["null", "{}", "[]"])
+        .label("has_structured"),
+    ]
+    if include_extraction:
+        version_columns.append(
+            DocumentVersion.structured_content["metadata"]["pdf_extraction"].label(
+                "extraction"
             )
-        ).scalars().all()
-    }
+        )
+    version_rows = (
+        await db.execute(
+            select(*version_columns).where(DocumentVersion.id.in_(unique_ids))
+        )
+    ).all()
+    versions = {}
+    for row in version_rows:
+        extraction = row.extraction if include_extraction else None
+        versions[row.id] = SimpleNamespace(
+            id=row.id,
+            document_id=row.document_id,
+            processing_status=row.processing_status,
+            meta=row.meta,
+            raw_content=bool(row.has_raw),
+            structured_content={"metadata": {"pdf_extraction": extraction}}
+            if row.has_structured
+            else None,
+        )
     chunks_by_version: dict[int, list[DocumentChunk]] = defaultdict(list)
     chunks = list(
         (
             await db.execute(
-                select(DocumentChunk)
+                select(
+                    DocumentChunk.id,
+                    DocumentChunk.document_version_id,
+                    DocumentChunk.order_index,
+                    DocumentChunk.content_hash,
+                )
                 .where(
                     DocumentChunk.document_version_id.in_(unique_ids),
                     DocumentChunk.role == "child",
@@ -201,7 +248,7 @@ async def _load_pipeline_inputs(
                 )
                 .order_by(DocumentChunk.document_version_id, DocumentChunk.id)
             )
-        ).scalars().all()
+        ).all()
     )
     for chunk in chunks:
         chunks_by_version[chunk.document_version_id].append(chunk)
@@ -210,14 +257,20 @@ async def _load_pipeline_inputs(
     stage_jobs = list(
         (
             await db.execute(
-                select(ProcessingJob)
+                select(
+                    ProcessingJob.id,
+                    ProcessingJob.document_version_id,
+                    ProcessingJob.stage,
+                    ProcessingJob.status,
+                    ProcessingJob.last_error,
+                )
                 .where(
                     ProcessingJob.document_version_id.in_(unique_ids),
                     ProcessingJob.stage.in_(PIPELINE_STAGES),
                 )
                 .order_by(ProcessingJob.id.desc())
             )
-        ).scalars().all()
+        ).all()
     )
     for job in stage_jobs:
         latest_jobs[job.document_version_id].setdefault(job.stage, job)
@@ -226,22 +279,34 @@ async def _load_pipeline_inputs(
     embeddings_by_chunk: dict[int, ChunkEmbedding] = {}
     embedding_jobs_by_chunk: dict[int, ProcessingJob] = {}
     if profile is not None and chunks:
-        chunk_ids = [chunk.id for chunk in chunks]
+        chunk_ids = select(DocumentChunk.id).where(
+            DocumentChunk.document_version_id.in_(unique_ids),
+            DocumentChunk.role == "child",
+            DocumentChunk.is_current.is_(True),
+        )
         embeddings_by_chunk = {
             row.chunk_id: row
             for row in (
                 await db.execute(
-                    select(ChunkEmbedding).where(
+                    select(
+                        ChunkEmbedding.id,
+                        ChunkEmbedding.chunk_id,
+                        ChunkEmbedding.content_hash,
+                    ).where(
                         ChunkEmbedding.profile_id == profile.id,
                         ChunkEmbedding.chunk_id.in_(chunk_ids),
                     )
                 )
-            ).scalars().all()
+            ).all()
         }
         embedding_jobs = list(
             (
                 await db.execute(
-                    select(ProcessingJob)
+                    select(
+                        ProcessingJob.id,
+                        ProcessingJob.embedding_chunk_id,
+                        ProcessingJob.status,
+                    )
                     .where(
                         ProcessingJob.stage == "embedding",
                         ProcessingJob.embedding_profile_id == profile.id,
@@ -249,7 +314,7 @@ async def _load_pipeline_inputs(
                     )
                     .order_by(ProcessingJob.id.desc())
                 )
-            ).scalars().all()
+            ).all()
         )
         for job in embedding_jobs:
             if job.embedding_chunk_id is not None:
@@ -266,7 +331,7 @@ async def _load_pipeline_inputs(
 
 
 async def load_pipeline_statuses(
-    db: AsyncSession, version_ids: list[int]
+    db: AsyncSession, version_ids: list[int], *, include_extraction: bool = True
 ) -> dict[int, dict]:
     """Return pipeline status for many versions with a bounded query count."""
 
@@ -277,7 +342,9 @@ async def load_pipeline_statuses(
         profile,
         embeddings_by_chunk,
         embedding_jobs_by_chunk,
-    ) = await _load_pipeline_inputs(db, version_ids)
+    ) = await _load_pipeline_inputs(
+        db, version_ids, include_extraction=include_extraction
+    )
 
     output: dict[int, dict] = {}
     for version_id, version in versions.items():
@@ -338,9 +405,9 @@ async def load_pipeline_statuses(
         )
         expected_ids = {chunk.id for chunk in expected}
         expected_jobs = [
-            job
-            for chunk_id, job in embedding_jobs_by_chunk.items()
-            if chunk_id in expected_ids
+            embedding_jobs_by_chunk[chunk_id]
+            for chunk_id in expected_ids
+            if chunk_id in embedding_jobs_by_chunk
         ]
         failed = sum(job.status == "failed" for job in expected_jobs)
         running = sum(job.status in RUNNING_JOB_STATUSES for job in expected_jobs)
@@ -410,8 +477,7 @@ async def load_pipeline_statuses(
         if version.processing_status == "failed" or "failed" in statuses:
             overall = "failed"
         elif any(
-            status in RUNNING_JOB_STATUSES or status == "pending"
-            for status in statuses
+            status in RUNNING_JOB_STATUSES or status == "pending" for status in statuses
         ):
             overall = "processing"
         else:
@@ -433,9 +499,7 @@ async def load_pipeline_statuses(
     return output
 
 
-async def compute_processing_status(
-    db: AsyncSession, document_id: int
-) -> dict:
+async def compute_processing_status(db: AsyncSession, document_id: int) -> dict:
     document = await db.get(Document, document_id)
     if document is None or document.is_deleted:
         raise ProcessingStatusError("资料不存在")
@@ -466,35 +530,49 @@ async def repair_document_vectors(
                     Document.is_deleted.is_(False),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     version_ids = [
         document.current_version_id
         for document in documents
         if document.current_version_id is not None
     ]
-    versions = {
-        version.id: version
-        for version in (
-            await db.execute(
-                select(DocumentVersion).where(DocumentVersion.id.in_(version_ids))
-            )
-        ).scalars().all()
-    } if version_ids else {}
-    chunks_by_version: dict[int, list[DocumentChunk]] = defaultdict(list)
-    chunks = list(
-        (
-            await db.execute(
-                select(DocumentChunk)
-                .where(
-                    DocumentChunk.document_version_id.in_(version_ids),
-                    DocumentChunk.role == "child",
-                    DocumentChunk.is_current.is_(True),
+    versions = (
+        {
+            version.id: version
+            for version in (
+                await db.execute(
+                    select(DocumentVersion).where(DocumentVersion.id.in_(version_ids))
                 )
-                .order_by(DocumentChunk.document_version_id, DocumentChunk.id)
             )
-        ).scalars().all()
-    ) if version_ids else []
+            .scalars()
+            .all()
+        }
+        if version_ids
+        else {}
+    )
+    chunks_by_version: dict[int, list[DocumentChunk]] = defaultdict(list)
+    chunks = (
+        list(
+            (
+                await db.execute(
+                    select(DocumentChunk)
+                    .where(
+                        DocumentChunk.document_version_id.in_(version_ids),
+                        DocumentChunk.role == "child",
+                        DocumentChunk.is_current.is_(True),
+                    )
+                    .order_by(DocumentChunk.document_version_id, DocumentChunk.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if version_ids
+        else []
+    )
     for chunk in chunks:
         chunks_by_version[chunk.document_version_id].append(chunk)
 
@@ -507,17 +585,23 @@ async def repair_document_vectors(
             expected.extend(selected)
 
     chunk_ids = [chunk.id for chunk in expected]
-    embeddings = {
-        row.chunk_id: row
-        for row in (
-            await db.execute(
-                select(ChunkEmbedding).where(
-                    ChunkEmbedding.profile_id == profile.id,
-                    ChunkEmbedding.chunk_id.in_(chunk_ids),
+    embeddings = (
+        {
+            row.chunk_id: row
+            for row in (
+                await db.execute(
+                    select(ChunkEmbedding).where(
+                        ChunkEmbedding.profile_id == profile.id,
+                        ChunkEmbedding.chunk_id.in_(chunk_ids),
+                    )
                 )
             )
-        ).scalars().all()
-    } if chunk_ids else {}
+            .scalars()
+            .all()
+        }
+        if chunk_ids
+        else {}
+    )
     jobs: dict[int, ProcessingJob] = {}
     if chunk_ids:
         job_rows = list(
@@ -531,7 +615,9 @@ async def repair_document_vectors(
                     )
                     .order_by(ProcessingJob.id.desc())
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         for job in job_rows:
             if job.embedding_chunk_id is not None:

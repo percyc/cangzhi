@@ -41,6 +41,7 @@ from ..services.processing_status import (
     load_pipeline_statuses,
     repair_document_vectors,
 )
+from ..services.inbox import InboxFilter, list_inbox
 from ..services.webdav import WebDAVError, download_file
 from ..storage import get_storage
 from ..storage.base import BlobStorage
@@ -311,6 +312,16 @@ async def list_documents(
         await build_document_response(db, document)
         for document in result.scalars().all()
     ]
+
+
+@router.get("/inbox")
+async def inbox_documents(
+    filter: InboxFilter = Query("attention"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    return await list_inbox(db, filter=filter, offset=offset, limit=limit)
 
 
 @router.get("/overview", response_model=list[DocumentListItemResponse])

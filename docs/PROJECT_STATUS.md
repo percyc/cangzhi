@@ -47,6 +47,12 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
+- 2026-09-14 收件箱性能修复完成待合并：分支 `codex/CZ-Q07-inbox-performance`，
+  负责人 Codex / OpenCode；精简状态查询、服务端分页筛选、刷新串行与取消。
+  API/Worker 656 项通过，Web lint/typecheck 通过；隔离 Chromium 验证分页、
+  本页批量操作、旧响应丢弃、慢轮询、隐藏页暂停及超时重试。真实环评空间只读
+  试跑全部页约 2.3 秒、失败筛选约 2.0 秒；未部署。
+
 - 2026-09-14 解析可靠性第一批完成验证：派生文本 Unicode 规范化、元数据字段
   冲突显式失败、Word PDF 预览保存点隔离与异常脱敏、OCR 空结果状态修复。
   负责人 Codex / OpenCode；修复提交 `1413786`，来自
