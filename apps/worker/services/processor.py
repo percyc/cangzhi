@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from io import BytesIO
 from pathlib import Path
+from typing import Sequence
 
 import structlog
 from sqlalchemy import delete, func, select, update
@@ -98,6 +99,20 @@ PDF_PREVIEW_CONFIG = "pdf-v1"
 PDF_PREVIEW_MAX_BYTES = 100 * 1024 * 1024
 DATASET_ARTIFACT_VERSION = "dataset-parquet:v1"
 CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
+
+# Each stage gets a turn; stored/parsing share two FIFO slots.
+# Model backlogs cannot monopolize the queue, nor vice versa.
+# Structural stages (especially OCR and preview) can still be slow.
+STAGE_CYCLE: tuple[str, ...] = (
+    "stored",
+    "parsing",
+    "chunking",
+    DATASET_CATALOG_STAGE,
+    DATASET_ARTIFACT_STAGE,
+    PREVIEW_STAGE,
+    UNDERSTANDING_STAGE,
+    "embedding",
+)
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
@@ -2185,18 +2200,55 @@ def _apply_parse_result(
         )
 
 
-def claim_pending_jobs(session: Session, limit: int = BATCH_SIZE) -> list[int]:
+def claim_pending_jobs(
+    session: Session,
+    limit: int = BATCH_SIZE,
+    *,
+    stages: Sequence[str] | None = None,
+) -> list[int]:
+    """Atomically claim up to ``limit`` due processing jobs.
+
+    The claim is implemented with ``with_for_update(skip_locked=True)``
+    so a second worker cannot steal the same row. The query
+    always honours the existing due-retry filter
+    (``next_retry_at IS NULL`` or already past). Passing
+    ``stages`` restricts the claim to the given stage values
+    (the stored/parsing aliases are expanded so legacy rows are reachable via
+    ``stages=("parsing",)``). ``stages=None`` keeps the legacy
+    FIFO-across-all-stages behaviour used by the operator path
+    and external callers.
+
+    A non-positive ``limit`` short-circuits without touching
+    any row, which keeps the scheduler testable and lets an
+    operator abort a batch cleanly.
+    """
+    if limit <= 0 or (stages is not None and not stages):
+        return []
     now = utc_now()
+    conditions = [
+        ProcessingJob.status.in_(("created", "retry")),
+        (
+            ProcessingJob.next_retry_at.is_(None)
+            | (ProcessingJob.next_retry_at <= now)
+        ),
+    ]
+    if stages is not None:
+        stage_values = set(stages)
+        # Legacy ``stored`` rows are written with that exact
+        # label on disk; the rest of the pipeline treats them
+        # as ``parsing``. If the caller asks for either side
+        # of that alias, claim both so a legacy backlog is
+        # still reachable through the modern filter.
+        if "parsing" in stage_values:
+            stage_values.add("stored")
+        if "stored" in stage_values:
+            stage_values.add("parsing")
+        if stage_values:
+            conditions.append(ProcessingJob.stage.in_(tuple(stage_values)))
     jobs = list(
         session.scalars(
             select(ProcessingJob)
-            .where(
-                ProcessingJob.status.in_(("created", "retry")),
-                (
-                    ProcessingJob.next_retry_at.is_(None)
-                    | (ProcessingJob.next_retry_at <= now)
-                ),
-            )
+            .where(*conditions)
             .order_by(ProcessingJob.created_at, ProcessingJob.id)
             .with_for_update(skip_locked=True)
             .limit(limit)
@@ -2211,58 +2263,153 @@ def claim_pending_jobs(session: Session, limit: int = BATCH_SIZE) -> list[int]:
     return [job.id for job in jobs]
 
 
-def process_pending_jobs(session: Session) -> int:
-    job_ids = claim_pending_jobs(session)
-    completed = 0
-    for job_id in job_ids:
-        try:
-            completed += int(process_single_job(session, job_id))
-        except Exception as exc:
-            logger.exception("unexpected_job_error", job_id=job_id)
-            session.rollback()
-            job = session.get(ProcessingJob, job_id)
-            if job is not None and job.stage == "embedding":
-                job.retry_count += 1
-                job.finished_at = utc_now()
-                job.last_error = "向量任务发生异常"
-                job.error_details = {"exception": str(exc)}
-                if job.retry_count >= (job.max_retries or MAX_RETRIES):
-                    job.status = "failed"
-                    job.next_retry_at = None
-                else:
-                    job.status = "retry"
-                    job.next_retry_at = calculate_next_retry_at(job.retry_count - 1)
-                session.add(job)
-                session.commit()
-                from apps.worker.services.embedding_processor import (
-                    reconcile_profile_progress,
-                )
+def _claim_one_unknown_stage_job(session: Session) -> int | None:
+    """Claim the oldest due job whose ``stage`` is not in
+    :data:`STAGE_CYCLE`.
 
-                if job.embedding_profile_id is not None:
-                    reconcile_profile_progress(session, job.embedding_profile_id)
-                    session.commit()
-                continue
-            version = (
-                session.get(DocumentVersion, job.document_version_id)
-                if job is not None
-                else None
+    The cycle is the canonical stage set today; future stages
+    added without updating the constant would otherwise sit
+    in the queue forever. Falling back to one off-cycle job
+    per cycle keeps them moving while still preserving the
+    fair-share budget of the known stages.
+    """
+    now = utc_now()
+    job = session.scalar(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.status.in_(("created", "retry")),
+            (
+                ProcessingJob.next_retry_at.is_(None)
+                | (ProcessingJob.next_retry_at <= now)
+            ),
+            ~ProcessingJob.stage.in_(tuple(STAGE_CYCLE)),
+        )
+        .order_by(ProcessingJob.created_at, ProcessingJob.id)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+    if job is None:
+        return None
+    job.status = "processing"
+    job.started_at = now
+    job.finished_at = None
+    session.add(job)
+    session.commit()
+    return job.id
+
+
+def _run_claimed_job(session: Session, job_id: int) -> int:
+    """Run :func:`process_single_job` for one already-claimed
+    job, keeping the legacy per-job exception handling so the
+    scheduler loop stays readable.
+
+    The function is deliberately synchronous and the caller is
+    expected to invoke it serially. The original behaviour for
+    embedding failures (reconcile profile progress on every
+    retry/failure path) and for non-embedding failures (route
+    through :func:`_mark_parse_failure` / :func:`_mark_terminal_failure`)
+    is preserved unchanged.
+    """
+    try:
+        return int(process_single_job(session, job_id))
+    except Exception as exc:
+        logger.exception("unexpected_job_error", job_id=job_id)
+        session.rollback()
+        job = session.get(ProcessingJob, job_id)
+        if job is not None and job.stage == "embedding":
+            job.retry_count += 1
+            job.finished_at = utc_now()
+            job.last_error = "向量任务发生异常"
+            job.error_details = {"exception": str(exc)}
+            if job.retry_count >= (job.max_retries or MAX_RETRIES):
+                job.status = "failed"
+                job.next_retry_at = None
+            else:
+                job.status = "retry"
+                job.next_retry_at = calculate_next_retry_at(job.retry_count - 1)
+            session.add(job)
+            session.commit()
+            from apps.worker.services.embedding_processor import (
+                reconcile_profile_progress,
             )
-            if job is not None and version is not None:
-                _mark_parse_failure(
-                    session,
-                    job,
-                    version,
-                    "处理任务发生异常",
-                    {"exception": str(exc)},
-                )
-            elif job is not None:
-                _mark_terminal_failure(
-                    session,
-                    job,
-                    None,
-                    "处理任务关联的文档版本不存在",
-                    details={"exception": str(exc)},
-                )
+
+            if job.embedding_profile_id is not None:
+                reconcile_profile_progress(session, job.embedding_profile_id)
+                session.commit()
+            return 0
+        version = (
+            session.get(DocumentVersion, job.document_version_id)
+            if job is not None
+            else None
+        )
+        if job is not None and version is not None:
+            _mark_parse_failure(
+                session,
+                job,
+                version,
+                "处理任务发生异常",
+                {"exception": str(exc)},
+            )
+        elif job is not None:
+            _mark_terminal_failure(
+                session,
+                job,
+                None,
+                "处理任务关联的文档版本不存在",
+                details={"exception": str(exc)},
+            )
+        return 0
+
+
+def process_pending_jobs(
+    session: Session,
+    max_jobs: int | None = BATCH_SIZE,
+) -> int:
+    """Run one stage-fair pass over due processing jobs.
+
+    The previous implementation claimed a fixed batch of ten
+    jobs in FIFO order and then processed them sequentially,
+    which let a long embedding backlog starve freshly enqueued
+    parsing or chunking work and let an endless structural
+    backlog starve model-driven understanding jobs.
+
+    This scheduler iterates :data:`STAGE_CYCLE` in a fixed
+    order, claiming **exactly one** job per stage slot and
+    running it before advancing. Empty stages are skipped, so
+    a quiet stage does not block the rest of the cycle. The
+    cycle ends with an off-cycle slot that picks up due jobs
+    whose stage value is not in the cycle (the unknown-stage
+    fallback), guaranteeing that a future stage added without
+    updating the constant still gets serviced.
+
+    ``max_jobs`` bounds attempts, including failed jobs; None uses BATCH_SIZE.
+    A session-local cursor preserves fairness across calls with small budgets.
+    Each claim commits one job; no later slot is claimed before it executes.
+    This does not reclaim existing orphaned processing jobs or preempt slow work.
+    """
+    budget = BATCH_SIZE if max_jobs is None else max_jobs
+    if budget <= 0:
+        return 0
+    completed = 0
+    attempted = 0
+    empty_slots = 0
+    slot_count = len(STAGE_CYCLE) + 1
+    cursor_key = "cangzhi_stage_cursor"
+    cursor = session.info.get(cursor_key, 0) % slot_count
+    while attempted < budget and empty_slots < slot_count:
+        if cursor == len(STAGE_CYCLE):
+            job_id = _claim_one_unknown_stage_job(session)
+        else:
+            ids = claim_pending_jobs(session, limit=1, stages=(STAGE_CYCLE[cursor],))
+            job_id = ids[0] if ids else None
+        cursor = (cursor + 1) % slot_count
+        session.info[cursor_key] = cursor
+        if job_id is None:
+            empty_slots += 1
+            continue
+        empty_slots = 0
+        attempted += 1
+        completed += _run_claimed_job(session, job_id)
     return completed
 
 
