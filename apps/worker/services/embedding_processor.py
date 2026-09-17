@@ -54,7 +54,7 @@ from datetime import datetime, timezone
 from typing import Callable, Sequence
 
 import httpx
-from sqlalchemy import and_, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -699,6 +699,183 @@ def process_embedding_job(
 # --- Reconciliation after the per-job path -------------------------------
 
 
+def _dialect_name(session: Session) -> str:
+    """Return the bound dialect name for ``session`` (empty when unknown).
+
+    The worker hands reconcile a sync ``Session`` whose ``bind`` is the
+    configured engine; ``dialect.name`` is ``"postgresql"`` in production
+    and ``"sqlite"`` in the test path. Centralised here so the aggregate
+    builder and the SQLite safe fallback agree on which dim function to
+    use.
+    """
+
+    bind = session.bind if session is not None else None
+    if bind is None and hasattr(session, "get_bind"):
+        bind = session.get_bind()
+    if bind is None:
+        return ""
+    return getattr(getattr(bind, "dialect", None), "name", "")
+
+
+def _build_progress_aggregate_stmt(dialect_name: str, profile: EmbeddingProfile):
+    """Build the SQL aggregate that powers :func:`reconcile_profile_progress`.
+
+    The query joins ``processing_jobs`` with current child
+    ``document_chunks`` and outer-joins ``chunk_embeddings`` for the
+    matching (profile, chunk) pair. The four counters — total distinct
+    chunks, failed jobs, pending jobs and completed embeddings — are
+    returned in a single round-trip. Only aggregate expressions appear
+    in the SELECT clause; ``chunk_embeddings.vector`` is referenced
+    solely via the dim function inside the CASE expression that powers
+    the completed counter, so production (PostgreSQL + pgvector) never
+    materialises vector floats and the test path (SQLite) does not
+    select DocumentChunk text.
+
+    The dim function is dialect-specific: ``vector_dims`` on
+    PostgreSQL (pgvector's stored-dim function) and
+    ``json_array_length`` on SQLite (the test path's JSON column has
+    no pgvector-equivalent invariant). Both run server-side and let
+    the database keep the vector payload off the wire.
+    """
+
+    if dialect_name == "postgresql":
+        dim_expr = func.vector_dims(ChunkEmbedding.vector)
+    else:
+        dim_expr = case(
+            (func.json_valid(ChunkEmbedding.vector) == 1,
+             func.json_array_length(ChunkEmbedding.vector)),
+            else_=None,
+        )
+
+    job_chunk_join = and_(
+        DocumentChunk.id == ProcessingJob.embedding_chunk_id,
+        DocumentChunk.role == "child",
+        DocumentChunk.is_current.is_(True),
+    )
+    emb_join = and_(
+        ChunkEmbedding.profile_id == ProcessingJob.embedding_profile_id,
+        ChunkEmbedding.chunk_id == ProcessingJob.embedding_chunk_id,
+    )
+    job_filter = and_(
+        ProcessingJob.embedding_profile_id == profile.id,
+        ProcessingJob.stage == EMBEDDING_STAGE,
+    )
+
+    return (
+        select(
+            func.count(func.distinct(ProcessingJob.embedding_chunk_id)).label(
+                "total"
+            ),
+            func.sum(
+                case((ProcessingJob.status == "failed", 1), else_=0)
+            ).label("failed"),
+            func.sum(
+                case(
+                    (
+                        ProcessingJob.status.in_(
+                            ("created", "retry", "processing")
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("pending"),
+            func.count(func.distinct(
+                case(
+                    (
+                        and_(
+                            ChunkEmbedding.id.isnot(None),
+                            ChunkEmbedding.content_hash
+                            == DocumentChunk.content_hash,
+                            dim_expr == profile.dim,
+                        ),
+                        ChunkEmbedding.id,
+                    ),
+                    else_=None,
+                )
+            )).label("completed"),
+        )
+        .select_from(ProcessingJob)
+        .join(DocumentChunk, job_chunk_join)
+        .outerjoin(ChunkEmbedding, emb_join)
+        .where(job_filter)
+    )
+
+
+def _revalidate_finite_sqlite(session: Session, profile: EmbeddingProfile) -> int:
+    """Recompute the SQLite ``completed`` counter with a finite re-check.
+
+    pgvector enforces finiteness at insert time, so production never
+    needs this. The JSON column on SQLite has no such invariant, so
+    the test path keeps the existing per-row Python safety net:
+    re-query only hash-matching eligible rows, then verify their
+    list type, dimension and finiteness in Python. The SELECT pulls just ``(chunk_id,
+    content_hash, vector)`` — DocumentChunk text and any other payload
+    are not materialised.
+    """
+
+    candidate_stmt = (
+        select(
+            ChunkEmbedding.chunk_id,
+            ChunkEmbedding.content_hash,
+            ChunkEmbedding.vector,
+        )
+        .select_from(ChunkEmbedding)
+        .join(
+            ProcessingJob,
+            and_(
+                ProcessingJob.embedding_profile_id == ChunkEmbedding.profile_id,
+                ProcessingJob.embedding_chunk_id == ChunkEmbedding.chunk_id,
+                ProcessingJob.stage == EMBEDDING_STAGE,
+            ),
+        )
+        .join(
+            DocumentChunk,
+            and_(
+                DocumentChunk.id == ChunkEmbedding.chunk_id,
+                DocumentChunk.role == "child",
+                DocumentChunk.is_current.is_(True),
+            ),
+        )
+        .where(
+            and_(
+                ChunkEmbedding.profile_id == profile.id,
+                ChunkEmbedding.content_hash == DocumentChunk.content_hash,
+            )
+        )
+    )
+    rows = session.execute(candidate_stmt.distinct()).all()
+    return sum(1 for row in rows if isinstance(row.vector, list)
+               and len(row.vector) == profile.dim and _is_finite_vector(row.vector))
+
+
+def _aggregate_progress(
+    session: Session, profile: EmbeddingProfile
+) -> tuple[int, int, int, int]:
+    """Return ``(total, completed, failed, pending)`` for ``profile``.
+
+    PostgreSQL runs a single aggregate round-trip; the dim check uses
+    ``vector_dims`` server-side and no vector floats or chunk text are
+    materialised. SQLite runs the same aggregate (``json_array_length``
+    replaces ``vector_dims``) and then a small per-row finite re-check
+    is layered on top of the completed counter, since the JSON column
+    has no storage-side invariant against non-finite values.
+    """
+
+    dialect_name = _dialect_name(session)
+    stmt = _build_progress_aggregate_stmt(dialect_name, profile)
+    row = session.execute(stmt).one()
+    total = int(row.total or 0)
+    failed = int(row.failed or 0)
+    pending = int(row.pending or 0)
+    completed = int(row.completed or 0)
+    if dialect_name != "postgresql":
+        # SQLite safe fallback: pgvector's storage contract is replaced
+        # by explicit type/dimension/finite checks on hash-matching rows.
+        completed = _revalidate_finite_sqlite(session, profile)
+    return total, completed, failed, pending
+
+
 def reconcile_profile_progress(session: Session, profile_id: int) -> None:
     """Reconcile counters against the actual job status for a profile.
 
@@ -706,6 +883,18 @@ def reconcile_profile_progress(session: Session, profile_id: int) -> None:
     "finished" branch can flip the profile to ``ready`` if every
     job is now in a terminal state. The function is idempotent
     and safe to call multiple times.
+
+    Implementation note: counters are computed by a single SQL
+    aggregate that joins ``processing_jobs`` with current child
+    ``document_chunks`` and outer-joins ``chunk_embeddings``. The
+    SELECT clause emits only aggregate expressions, so the vector
+    payload is never pulled into Python on the PostgreSQL production
+    path. On SQLite, a small per-row re-check re-validates
+    finiteness, since the JSON column has no server-side invariant
+    against non-finite values. The public status / hash / dim /
+    count semantics — including sampled datasets, retired profiles
+    being skipped, empty cases and ``active`` profiles staying
+    ``active`` — are preserved.
     """
 
     profile = session.get(EmbeddingProfile, profile_id)
@@ -717,63 +906,11 @@ def reconcile_profile_progress(session: Session, profile_id: int) -> None:
     ):
         return
     remains_active = profile.status == "active"
-    all_current_chunks = list(
-        session.execute(
-            select(DocumentChunk).where(
-                DocumentChunk.role == "child",
-                DocumentChunk.is_current.is_(True),
-            )
-        ).scalars().all()
-    )
-    all_current_ids = {chunk.id for chunk in all_current_chunks}
-    jobs = list(
-        session.execute(
-            select(ProcessingJob).where(
-                and_(
-                    ProcessingJob.embedding_profile_id == profile.id,
-                    ProcessingJob.stage == EMBEDDING_STAGE,
-                    ProcessingJob.embedding_chunk_id.in_(all_current_ids)
-                    if all_current_ids
-                    else False,
-                )
-            )
-        ).scalars().all()
-    )
-    # A profile covers the chunks for which its build/incremental pipeline
-    # created jobs. Large structured tables intentionally sample embeddings;
-    # their remaining rows stay available through lexical and exact-table
-    # indexes and must not leave the vector profile permanently "incomplete".
-    eligible_ids = {job.embedding_chunk_id for job in jobs}
-    current_chunks = [
-        chunk for chunk in all_current_chunks if chunk.id in eligible_ids
-    ]
-    current_ids = {chunk.id for chunk in current_chunks}
-    embeddings = list(
-        session.execute(
-            select(ChunkEmbedding).where(
-                ChunkEmbedding.profile_id == profile.id,
-                ChunkEmbedding.chunk_id.in_(current_ids) if current_ids else False,
-            )
-        ).scalars().all()
-    )
-    current_hashes = {chunk.id: chunk.content_hash for chunk in current_chunks}
-    completed = sum(
-        1
-        for row in embeddings
-        if current_hashes.get(row.chunk_id) == row.content_hash
-        and isinstance(row.vector, list)
-        and len(row.vector) == profile.dim
-        and _is_finite_vector(row.vector)
-    )
-    failed = sum(1 for job in jobs if job.status == "failed")
-    pending = sum(
-        1
-        for job in jobs
-        if job.status in ("created", "retry", "processing")
-    )
+
+    total, completed, failed, pending = _aggregate_progress(session, profile)
+
     profile.completed_chunks = completed
     profile.failed_chunks = failed
-    total = len(current_chunks)
     profile.total_chunks = total
     if remains_active:
         # An active profile keeps serving completed vectors while newly

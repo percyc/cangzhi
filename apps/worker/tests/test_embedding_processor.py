@@ -26,11 +26,13 @@ enforced:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 
 import httpx
 import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import sessionmaker
 
 from apps.api.core.db import Base
@@ -769,6 +771,198 @@ class TestReconcileProgress:
         session.commit()
         session.refresh(profile)
         assert profile.build_finished_at == first_finished
+
+    def test_stale_hash_excluded_from_completed(self, session):
+        """An embedding whose ``content_hash`` lags the chunk's
+        current ``content_hash`` must not be counted as completed.
+
+        The reconcile path joins ``processing_jobs`` with the
+        current child chunk and ``chunk_embeddings``; the SQL
+        aggregate gates the completed counter on the equality of
+        the two content hashes, so a stale row drops out without
+        any Python iteration over vector floats.
+        """
+
+        _make_config(session)
+        profile = _make_profile(session, dim=4)
+        document, version, chunk = _make_doc_and_chunk(
+            session, content_hash="current-hash"
+        )
+        session.add(
+            ChunkEmbedding(
+                profile_id=profile.id,
+                chunk_id=chunk.id,
+                content_hash="stale-hash",
+                vector=[0.1, 0.2, 0.3, 0.4],
+            )
+        )
+        job = _make_embedding_job(
+            session, profile=profile, chunk=chunk, document=document, version=version
+        )
+        job.status = "completed"
+        profile.status = "building"
+        session.add_all([job, profile])
+        session.commit()
+
+        reconcile_profile_progress(session, profile.id)
+        session.commit()
+        session.refresh(profile)
+
+        assert profile.completed_chunks == 0
+        assert profile.total_chunks == 1
+        # ``pending == 0`` and ``failed == 0`` but ``completed != total``,
+        # so the profile stays in ``building`` (matches the original
+        # branch's behaviour for "finished, but not ready").
+        assert profile.status == "building"
+
+    def test_missing_vector_excluded_from_completed(self, session):
+        """A chunk with a job but no ``chunk_embeddings`` row must
+        not be counted as completed.
+
+        The main aggregate LEFT-JOINs ``chunk_embeddings`` and the
+        ``completed`` counter is gated on
+        ``chunk_embeddings.id IS NOT NULL``, so a missing row is
+        counted as zero. The status branch stays in ``building``
+        for the same reason as the stale-hash case.
+        """
+
+        _make_config(session)
+        profile = _make_profile(session, dim=4)
+        document, version, chunk = _make_doc_and_chunk(session)
+        job = _make_embedding_job(
+            session, profile=profile, chunk=chunk, document=document, version=version
+        )
+        job.status = "completed"
+        profile.status = "building"
+        session.add_all([job, profile])
+        session.commit()
+        # No ChunkEmbedding row is pre-populated.
+
+        reconcile_profile_progress(session, profile.id)
+        session.commit()
+        session.refresh(profile)
+
+        assert profile.completed_chunks == 0
+        assert profile.total_chunks == 1
+        assert profile.status == "building"
+
+    def test_non_finite_vector_excluded_from_completed(self, session):
+        """A non-finite vector must not be counted as completed.
+
+        This is the SQLite "safe fallback" contract: pgvector
+        refuses non-finite vectors at insert time so production
+        never sees them, but the test JSON column has no such
+        invariant. The reconcile path therefore re-validates
+        finiteness on the rows that already passed the dim + hash
+        filter, only selecting the required scalars
+        ``(chunk_id, content_hash, vector)`` from
+        ``chunk_embeddings``.
+        """
+
+        _make_config(session)
+        profile = _make_profile(session, dim=4)
+        document, version, chunk = _make_doc_and_chunk(session)
+        # Persist a non-finite vector directly, bypassing the
+        # embedding API's validation. SQLite's JSON column accepts
+        # ``NaN`` so the row is materialised.
+        session.add(
+            ChunkEmbedding(
+                profile_id=profile.id,
+                chunk_id=chunk.id,
+                content_hash=chunk.content_hash,
+                vector=[0.1, float("nan"), 0.2, 0.3],
+            )
+        )
+        job = _make_embedding_job(
+            session, profile=profile, chunk=chunk, document=document, version=version
+        )
+        job.status = "completed"
+        profile.status = "building"
+        session.add_all([job, profile])
+        session.commit()
+
+        reconcile_profile_progress(session, profile.id)
+        session.commit()
+        session.refresh(profile)
+
+        # The main aggregate counts the row (dim + hash match); the
+        # SQLite safe fallback then excludes it because the vector
+        # is not finite. Net result: ``completed_chunks == 0``.
+        assert profile.completed_chunks == 0
+        assert profile.total_chunks == 1
+        assert profile.status == "building"
+
+    def test_progress_aggregate_sql_excludes_vector_payload(self, session):
+        """The compiled aggregate must not SELECT the vector
+        payload column.
+
+        The aggregate's SELECT clause lists only
+        ``count(...)`` / ``sum(CASE WHEN ... THEN 1 ELSE 0 END)``
+        expressions. The ``chunk_embeddings.vector`` column is
+        referenced solely inside the dim function call (which the
+        database evaluates server-side), never as a bare column
+        reference that would pull float arrays back into Python.
+        Both the PostgreSQL and SQLite compilations must satisfy
+        this contract.
+        """
+
+        from apps.worker.services.embedding_processor import (
+            _build_progress_aggregate_stmt,
+        )
+
+        _make_config(session)
+        profile = _make_profile(session, dim=4)
+
+        for dialect, label in (
+            (postgresql.dialect(), "postgresql"),
+            (sqlite.dialect(), "sqlite"),
+        ):
+            stmt = _build_progress_aggregate_stmt(dialect.name, profile)
+            sql = str(
+                stmt.compile(
+                    dialect=dialect, compile_kwargs={"literal_binds": True}
+                )
+            )
+            match = re.search(
+                r"\bSELECT\s+(.*?)\s+\bFROM\b", sql, re.DOTALL | re.IGNORECASE
+            )
+            assert match, f"[{label}] could not find SELECT clause in: {sql}"
+            select_clause = match.group(1)
+            # Strip the dialect-specific dim function call: the
+            # vector column is only allowed to appear inside it.
+            stripped = re.sub(
+                r"(?:vector_dims|json_array_length|json_valid)\s*\([^)]*\)",
+                "DIMFN",
+                select_clause,
+            )
+            assert "chunk_embeddings.vector" not in stripped, (
+                f"[{label}] SELECT clause still references "
+                f"chunk_embeddings.vector: {select_clause}"
+            )
+            # Sanity-check the four aggregate expressions are
+            # present so a future regression that drops a counter
+            # is caught.
+            for needle in ("count(", "sum(CASE"):
+                assert needle in select_clause, (
+                    f"[{label}] expected {needle!r} in SELECT: {select_clause}"
+                )
+
+    def test_multiple_jobs_do_not_double_count_completed_vectors(self, session):
+        _make_config(session)
+        profile = _make_profile(session, dim=4)
+        document, version, chunk = _make_doc_and_chunk(session)
+        job = _make_embedding_job(session, profile=profile, chunk=chunk,
+                                  document=document, version=version)
+        job.status = "completed"
+        session.add(ProcessingJob(document_id=document.id, document_version_id=version.id,
+            stage=EMBEDDING_STAGE, status="completed", idempotency_key="another-generation",
+            config_version="another", embedding_profile_id=profile.id, embedding_chunk_id=chunk.id))
+        session.add(ChunkEmbedding(profile_id=profile.id, chunk_id=chunk.id,
+            content_hash=chunk.content_hash, vector=[0.1, 0.2, 0.3, 0.4]))
+        session.commit()
+        reconcile_profile_progress(session, profile.id)
+        assert profile.total_chunks == profile.completed_chunks == 1
+        assert profile.status == "ready"
 
 
 # --- integration with process_single_job ---------------------------------
