@@ -586,6 +586,29 @@ class PdfParser(BaseParser):
         return _ExternalOcrPageOutcome(lines=internal, error=None)
 
 
+def native_heading_level(text: str) -> int | None:
+    """Conservative textual headings; identifiers/units are not structure."""
+    import re
+    import unicodedata
+
+    value = unicodedata.normalize("NFKC", text).strip()
+    if not value or len(value) > 100:
+        return None
+    if re.match(r"^第[一二三四五六七八九十百零〇0-9]+[章节篇部](?:分)?\s*[^\W\d]", value):
+        return 2 if "节" in value[:12] else 1
+    if re.match(r"^(?:Chapter|Section)\s+(?:\d+|[IVX]+)\b\s*[:. -]?\s+[A-Za-z]", value, re.I):
+        return 2 if value.lower().startswith("section") else 1
+    numbered = re.match(r"^(\d{1,2}(?:\.\d{1,2}){0,3})[\s、)]+([^\W\d].*)$", value)
+    if numbered and not re.search(r"[=<>≤≥%/^]|\d{3,}", numbered.group(2)):
+        return min(3, numbered.group(1).count(".") + 1)
+    # Uppercase alone is not a heading signal: require a phrase, not an acronym,
+    # standard number, Roman numeral, unit, formula, or CJK line with one Latin letter.
+    words = value.split()
+    if len(words) >= 2 and all(re.fullmatch(r"[A-Z]{3,}", word) for word in words):
+        return 1
+    return None
+
+
 def _build_native_blocks(
     text: str,
     page_number: int,
@@ -597,12 +620,8 @@ def _build_native_blocks(
         line = line.strip()
         if not line:
             continue
-        is_heading = (
-            (len(line) < 100 and line.isupper())
-            or line.startswith(("Chapter", "Section"))
-        )
-        if is_heading:
-            level = 1 if len(line) < 30 else 2
+        level = native_heading_level(line)
+        if level is not None:
             while len(heading_path) >= level:
                 heading_path.pop()
             heading_path.append(line)

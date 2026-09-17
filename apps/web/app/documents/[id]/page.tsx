@@ -8,6 +8,7 @@ import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 
 import { withApiBasePath } from '@/lib/paths';
+import ChunkingPreview from '@/components/ChunkingPreview';
 
 type DocumentCategory = {
   id: number;
@@ -686,6 +687,7 @@ export default function DocumentDetailPage() {
         </details>
       )}
 
+      <ChunkingPreview key={params.id} documentId={params.id} />
       {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
       {latestJob?.last_error && status === 'failed' && (
         <div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">

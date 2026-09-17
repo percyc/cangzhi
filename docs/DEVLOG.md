@@ -464,3 +464,62 @@
   不将全库旧 completed 记录纳入本次增量验收；没有声称全部重处理完成。
 - 两条上线前遗留 processing 向量任务 `44367` / `44368` 未重置，后续按心跳/租约
   恢复工作处理。备份与回滚镜像保留；调度公平性通过，不代表模型延迟或全库整理完成。
+
+### 2026-09-17 reconcile_profile_progress 改为 SQL 聚合（CZ-Q03 性能前置）
+
+- 背景：reconcile_profile_progress 每次扫描全库 current child chunk 与
+  chunk_embeddings 行，再在 Python 里数 completed / failed / pending；CZ-Q03
+  报告向量覆盖统计在切片刻增长时全量加载会拖慢处理中心与文档详情；CZ-N04
+  AI 辅助切片与黄金集评测之前先把统计端改造完。
+- 负责人 Codex / OpenCode，本地未推送、未部署、未触碰公共契约与迁移。
+- 改动 apps/worker/services/embedding_processor.py：
+  * 新增 `_build_progress_aggregate_stmt` 与 `_aggregate_progress`，
+    一次聚合查询拿 total / failed / pending / completed。PostgreSQL
+    路径用 `vector_dims(ce.vector)` 服务端校验维度，SQLite 测试路径
+    用 `json_array_length(...)`；候选行不再 SELECT vector payload，
+    文档切片的 `content` / `search_text` 也不进 Python。
+  * SQLite 路径保留 safe fallback：再发一次只取
+    `(chunk_id, content_hash, vector)` 的最小标量查询并用
+    `_is_finite_vector` 复检，对应 JSON 列缺乏存储端不变量的兜底；
+    生产 PostgreSQL 不走这条路径。
+  * 函数签名、状态分支、sampled eligibility、retired 跳过、active
+    保持 active、空集行为与原实现完全等价；`_is_finite_vector`
+    / `_vector_matches` 等纯函数未动。
+- 改动 apps/worker/tests/test_embedding_processor.py：
+  * 新增 stale hash、missing vector、非有限向量、SQL 编译不含 vector
+    payload 四项断言；已有 sampled eligibility / active 保持 / 幂等
+    / ready / failed 回归由主任务在隔离镜像复验。
+- 风险：SQLite fallback 多发一次候选查询，仅在测试集执行；PostgreSQL
+  走纯聚合，不存在 O(N) Python 循环。pgvector `vector_dims` 在向量为
+  NULL 时返回 NULL（与存储合同一致）；非有限向量由 pgvector 插入阶段
+  直接拒绝，未在本路径暴露。`reconcile_profile_progress` 的调用方
+  `apps.worker.services.processor` 未改。
+- OpenCode 初稿交付时未跑测试、未部署、未提交；随后由主任务复核并执行下列验证。
+  性能代码本地提交 `ae32dc0`，仍按 AGENTS.md 由维护者推进合并与发布。
+
+### 2026-09-17 PDF 碎片诊断与 AI 切片候选（CZ-N04 首批，未启用）
+
+- 分支 `codex/CZ-N04-assisted-chunking`，Codex 主持；OpenCode M3 编写统计聚合
+  初稿，Codex 复核后补齐重复任务去重、SQLite 非标准 JSON 防御。ark 调用未产出
+  代码，PDF/候选/网页由 Codex 实现。不读取 .env，不部署、不替换生产索引。
+- PDF 不再用 `isupper()` 判断标题：标准编号、单位、罗马数字、公式及中英混排
+  不再仅因包含大写字母形成独立章节。原文、页码、段落序号不改写。
+- 新增纯服务候选构建：AI 只提交连续原文块编号的分组终点；检查顺序、完整覆盖、
+  单窗预算及表格邻接，失败退回规则。数据库/Excel 数据集不走逐行 AI 切片。
+  对历史 PDF 的错误标题只在候选副本纠正，原结构与当前索引不变。
+- 文档详情折叠区主动生成/重新生成候选；管理 POST `/api/documents/{id}/chunking-preview`
+  沿用管理员与空间校验，每次最多 2 次模型调用，模型网络超时限制到 10 秒；
+  展示规则/候选片段数、短片段数、AI 覆盖块数、失败回退及最多 5 个截断样例。
+  未覆盖窗口明确是规则；不宣称全篇 AI 分析。相同来源/模型/策略复用缓存，模型调用
+  不持有数据库事务，完成后锁定资料并复核版本/结构指纹，拒绝过期结果。
+- 两份实际 PDF 只读规则候选对照：资料 664 子片段 1346→212，短片段 1259→17；
+  资料 671 子片段 2586→463，短片段 2369→43。本对比没有模型调用，没有改生产数据，
+  **不是检索黄金集，也不能据片段数量下降证明回答质量提升**。
+- 隔离 PostgreSQL/pgvector 聚合实测通过重复任务、旧哈希、错维度、等待任务和空集
+  5 种情况；测试容器使用内存数据、无外网/宿主端口，完成后已移除，仅删除临时测试数据。
+- 全库 AI 切片自动启用仍未交付：CZ-N02 产物版本/原子启用/旧引用保留与 ≥30 个真实
+  跨类型黄金问题待完成。ADR-023 明确该门槛；本次不提供危险的直接替换按钮。
+- 验证：最终全套 API/Worker 隔离回归 755 项通过（192.23 秒，4 条既有弃用警告）；
+  随后补充数据库数据集跳过与标题正文边界保护，候选/缓存/空间/鉴权定向回归
+  23 项通过。Web TypeScript 与 ESLint、git diff --check 通过；未做浏览器实测，
+  不声称正式环境验收完成。本地提交仅在任务分支，未合并、未推送、未部署。

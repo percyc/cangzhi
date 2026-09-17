@@ -318,3 +318,9 @@ Top 5 命中率；或 active profile 超过 10 万个切片导致精确余弦查
 
 完整安全边界和接口见 [ADR-021](ADR-021-external-client-access.md) 与
 [外部系统接入](EXTERNAL_CLIENT_ACCESS.md)。
+
+## ADR-023：受约束 AI 切片候选
+
+**决定**：模型只提议原文块分组终点，程序保证顺序与完整覆盖。先提供管理员主动
+生成的候选比较，不改写正文，不替换现有索引。原子启用、旧引用保留及真实黄金集
+仍是启用门槛。参见 [ADR-023](ADR-023-assisted-chunking-candidates.md)。

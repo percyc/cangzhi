@@ -71,6 +71,8 @@
 
 - 确定性识别 general、legal、contract、paper、meeting、code 和 table 文档。
 - 根据标题、章节、条款、段落和表格边界生成结构优先的父子切片。
+- 文档详情提供 **AI 辅助切片候选评估**：有限窗口内让模型建议原文块边界，程序
+  校验完整性并对比片段数量与样例。候选尚不替换现有索引；不是全篇自动 AI 切片。
 - PostgreSQL 全文检索与 pgvector 向量检索通过 RRF 融合。
 - 二维数据集生成可重建的 Parquet 版本，由 DuckDB 下推筛选、投影、排序、分组与
   聚合；API/MCP 只接受受控查询计划，不开放任意 SQL。

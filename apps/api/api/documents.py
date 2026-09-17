@@ -69,6 +69,15 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 _RUNNING_JOB_STATUSES = {"created", "processing", "retry"}
 
 
+@router.post("/{document_id}/chunking-preview")
+async def chunking_preview(document_id: int, refresh: bool = False, db: AsyncSession = Depends(get_db)):
+    from ..services.chunking_preview import PreviewError, preview_document
+    try:
+        return await preview_document(db, document_id, refresh=refresh)
+    except PreviewError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+
+
 def _download_response(
     stream,
     *,
