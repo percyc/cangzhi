@@ -55,7 +55,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
-- 2026-09-18 第三批增强产物只读探索在 `codex/CZ-N05-enhancement-exploration` 完成。
+- 2026-09-18 第三批增强产物只读探索 `d3af04b` 在 `codex/CZ-N05-enhancement-exploration` 完成。
   OpenCode M3/ark 编写服务与适配器，Codex 复核补齐证据结构、参数边界与真实鉴权测试。
   REST/MCP/CLI/Skill 分窗读取已构建摘要、实体、关系、事件和原文证据；读取不调用模型，
   当前空间、文档选择和临时凭证边界共同生效。API/Worker 1159 passed、1 skipped
