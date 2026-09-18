@@ -13,6 +13,7 @@ import subprocess
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--deep", action="store_true", help="Validate deep analysis instead of quick Q&A")
 parser.add_argument("--search-only", action="store_true", help="Check shared search and MCP adapter, without model generation")
+parser.add_argument("--deployed", action="store_true", help="Verify and use installed service code; do not load candidate modules")
 args = parser.parse_args()
 
 modules = {
@@ -20,14 +21,20 @@ modules = {
     for name in ("fragment_context", "search", "qa", "deep_analysis")
 }
 program = '''
-import asyncio, json, sys, types, unicodedata
+import asyncio, json, sys, types, unicodedata, importlib, hashlib
+from pathlib import Path
 from types import SimpleNamespace
 import apps.api.models
 from sqlalchemy import text
 from apps.api.core.db import AsyncSessionLocal
 from apps.api.services.workspaces import bind_workspace_context
 SOURCES = SOURCES_PLACEHOLDER
+DEPLOYED = DEPLOYED_PLACEHOLDER
 for name, source in SOURCES.items():
+    if DEPLOYED:
+        module = importlib.import_module(name)
+        assert hashlib.sha256(Path(module.__file__).read_bytes()).digest() == hashlib.sha256(source.encode()).digest(), 'Deployed code mismatch: ' + name
+        continue
     module = types.ModuleType(name)
     module.__file__ = '<candidate-validation>'
     sys.modules[name] = module
@@ -74,7 +81,7 @@ async def main():
         assert all(normalize(v) in normalize(answer.answer) for v in ['25', 'M2', 'M3', 'N2', 'N3', '3500', 'M1', '可不按本标准'])
         await db.rollback()
 asyncio.run(main())
-'''.replace('SOURCES_PLACEHOLDER', repr(modules)).replace('DEEP_PLACEHOLDER', repr(args.deep)).replace('SEARCH_ONLY_PLACEHOLDER', repr(args.search_only))
+'''.replace('SOURCES_PLACEHOLDER', repr(modules)).replace('DEEP_PLACEHOLDER', repr(args.deep)).replace('SEARCH_ONLY_PLACEHOLDER', repr(args.search_only)).replace('DEPLOYED_PLACEHOLDER', repr(args.deployed))
 result = subprocess.run(
     ["docker", "compose", "exec", "-T", "api", "python", "-"],
     input=program, text=True, timeout=240,
