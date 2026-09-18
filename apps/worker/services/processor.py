@@ -124,6 +124,7 @@ STAGE_CYCLE: tuple[str, ...] = (
     PREVIEW_STAGE,
     UNDERSTANDING_STAGE,
     "embedding",
+    "knowledge_enhancement",
 )
 
 PARSING_CONFIG_VERSION = "url-html-v1"
@@ -1972,6 +1973,10 @@ def process_single_job(session: Session, job_id: int) -> bool:
 
     stage = _normalize_stage(job.stage)
 
+    if stage == "knowledge_enhancement":
+        from apps.worker.services.enhancement_processor import process_enhancement_job
+        return process_enhancement_job(session, job)
+
     if stage == UNDERSTANDING_STAGE:
         return _process_understanding(session, job, document, version)
 
@@ -2290,6 +2295,13 @@ def _process_parsing(
                 document_id=document.id,
                 version_id=version.id,
             )
+            # Optional enhancement cannot roll back successful basic parsing.
+            try:
+                with session.begin_nested():
+                    from apps.api.services.knowledge_enhancement import start_run
+                    start_run(session, document.id, automatic=True)
+            except Exception:
+                logger.warning("optional_enhancement_not_enqueued", document_id=document.id)
         else:
             version.processing_status = "unsupported"
             version.meta = {
@@ -2590,9 +2602,16 @@ def _run_claimed_job(session: Session, job_id: int) -> int:
     try:
         return int(process_single_job(session, job_id))
     except Exception as exc:
-        logger.exception("unexpected_job_error", job_id=job_id)
         session.rollback()
         job = session.get(ProcessingJob, job_id)
+        if job is not None and job.stage == "knowledge_enhancement":
+            # Optional work must never corrupt the basic parsing lifecycle or
+            # auto-retry a possibly billed attempt. Lease recovery is explicit.
+            from apps.worker.services.enhancement_processor import fail_enhancement_job
+            fail_enhancement_job(session, job_id)
+            logger.warning("enhancement_job_error", job_id=job_id)
+            return 0
+        logger.exception("unexpected_job_error", job_id=job_id)
         if job is not None and job.stage == "embedding":
             job.retry_count += 1
             job.finished_at = utc_now()

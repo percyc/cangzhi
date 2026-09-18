@@ -9,6 +9,7 @@ import remarkGfm from 'remark-gfm';
 
 import { withApiBasePath } from '@/lib/paths';
 import ChunkingPreview from '@/components/ChunkingPreview';
+import KnowledgeEnhancement from '@/components/KnowledgeEnhancement';
 
 type DocumentCategory = {
   id: number;
@@ -688,6 +689,7 @@ export default function DocumentDetailPage() {
       )}
 
       <ChunkingPreview key={params.id} documentId={params.id} />
+      <KnowledgeEnhancement key={params.id} docId={params.id} />
       {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
       {latestJob?.last_error && status === 'failed' && (
         <div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">

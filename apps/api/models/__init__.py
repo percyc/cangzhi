@@ -7,6 +7,7 @@ from .datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from .document_scope_keys import DocumentScopeKey
 from .documents import Document, DocumentSourceType, DocumentVersion
 from .embedding_profiles import ChunkEmbedding, EmbeddingProfile
+from .enhancement import EnhancementRun, EnhancementWindow
 from .exploration_grants import ExplorationGrant
 from .knowledge_scopes import KnowledgeScope
 from .processing import ProcessingJob
@@ -47,6 +48,8 @@ __all__ = [
     "DocumentTag",
     "DocumentVersion",
     "EmbeddingProfile",
+    "EnhancementRun",
+    "EnhancementWindow",
     "ExternalItemExclusion",
     "ExplorationGrant",
     "KnowledgeDataset",

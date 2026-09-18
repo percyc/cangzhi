@@ -20,6 +20,7 @@ from ..models.database_source import DatabaseSnapshot, DatabaseSource
 from ..models.document_scope_keys import DocumentScopeKey
 from ..models.documents import Document
 from ..models.exploration_grants import ExplorationGrant
+from ..models.enhancement import EnhancementRun
 from ..models.knowledge_scopes import KnowledgeScope
 from ..models.taxonomy import DEFAULT_CATEGORY_SLUGS, Category, Tag
 from ..models.webdav import ExternalItemExclusion, WebDAVSource
@@ -46,6 +47,7 @@ _SCOPED_MODELS = (
     DatabaseSnapshot,
     DocumentScopeKey,
     ExplorationGrant,
+    EnhancementRun,
 )
 
 
@@ -173,6 +175,16 @@ async def update_workspace(
     description: str | None,
     settings: dict | None,
 ) -> Workspace:
+    if settings is not None:
+        workspace = (await db.execute(select(Workspace).where(Workspace.id == workspace.id)
+                     .with_for_update().execution_options(populate_existing=True))).scalar_one()
+        reserved = "knowledge_enhancement"
+        existing = (workspace.settings or {}).get(reserved)
+        if reserved in settings and settings[reserved] != existing:
+            raise WorkspaceError("dedicated_enhancement_settings", "请通过知识增强设置修改增强配置")
+        settings = dict(settings)
+        if existing is not None:
+            settings[reserved] = existing
     if name is not None:
         workspace.name = validate_name(name)
     if description is not None:

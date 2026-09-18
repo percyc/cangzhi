@@ -97,6 +97,7 @@ FOREGROUND_STAGES: tuple[str, ...] = (
     "understanding",
     EMBEDDING_STAGE,
     "stored",
+    "knowledge_enhancement",
 )
 
 FOREGROUND_WEIGHT = 4
@@ -210,7 +211,11 @@ def _claim_one_foreground_job(
         Workspace.status == "active",
         Document.current_version_id == DocumentVersion.id,
         DocumentVersion.document_id == Document.id,
-        DocumentVersion.created_at >= cutoff,
+        or_(DocumentVersion.created_at >= cutoff, and_(
+            ProcessingJob.stage == "knowledge_enhancement",
+            ProcessingJob.created_at >= cutoff,
+            ProcessingJob.config_version.like("enhancement:%"),
+        )),
         ProcessingJob.status.in_(("created", "retry")),
         _due_filter(now),
     ]
@@ -322,6 +327,11 @@ def _dispatch(session: Session, job_id: int, *, pool: str) -> bool:
     except Exception as exc:
         session.rollback()
         job = session.get(ProcessingJob, job_id)
+        if job is not None and job.stage == "knowledge_enhancement":
+            from apps.worker.services.enhancement_processor import fail_enhancement_job
+            fail_enhancement_job(session, job_id)
+            logger.warning("priority_enhancement_error", job_id=job_id)
+            return False
         if job is not None:
             job.status = "failed"
             job.finished_at = utc_now()

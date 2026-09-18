@@ -27,6 +27,7 @@ from .api import (
     datasets,
     documents,
     embeddings,
+    enhancement,
     exports,
     files,
     health,
@@ -106,6 +107,7 @@ app.include_router(access_tokens.router, prefix="/api")
 app.include_router(notes.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(files.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(documents.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(enhancement.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(datasets.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(sources.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(
