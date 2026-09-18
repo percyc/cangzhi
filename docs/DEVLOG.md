@@ -729,3 +729,25 @@
 - 依赖文件与在线 API/Worker SHA-256 一致，本地无网络原始构建缺少 apt 缓存，
   因而使用已验证运行镜像的依赖层加当前源码构建发布镜像，无代理/镜像源变更。
   正在执行镜像内回归与联合备份，最终结果和镜像 ID 在发布完成条目追加。
+
+### 2026-09-18 CZ-N01/N04：按本次授权合并、推送 Gitea 并部署
+
+- `2a1d559` 与 `8bdba8e` 快进合并 main，推送 origin（Gitea），无强推或历史重写。
+  本次交付仅包含候选策略和知识增强底层基础，完整增强功能仍在 BACKLOG。
+- 最终 Worker 发布镜像 `c30ed2e16eda` 中 API/Worker 989 passed、4 条既有警告，
+  206.62 秒；API 镜像 `fa04a589faa4` 专项 105 passed。Web lint/typecheck 通过。
+  首轮新增 PDF 测试错误地以切片数量下降为条件，已改为原文完整恢复断言后全量重跑。
+- 联合备份 `backups/cangzhi-20260918-124617`（约 730 MB）完整校验通过。
+  API 单独重建容器；旧优先 Worker TERM 正常退出 exit 0，保留改名回退容器，
+  新优先 Worker 继续原截止时间和历史白名单，restart=unless-stopped，未加 adaptive。
+- 正式 API/Worker 全部已跟踪后端/包/迁移文件与代码提交的聚合 SHA-256 均为
+  `f3b76f8e450e50ae46b0bde1dec7ab97a69e7c68151aa6a897a9d20027ed0f97`。
+  API/Web/PostgreSQL/优先 Worker 均 healthy，readiness/health 返回 ok，登录页 200；
+  MCP 初始化和候选预览未认证均 401。Web 未重启，无数据库迁移，非完整浏览器验收。
+- 部署前后数据库均 schema 0031、817 文档/817 版本、92556 当前切片、0 条 adaptive
+  任务；52614 条旧任务 ID/状态/执行时间摘要维持 `30061a76d175b2b22c5d8fdf24f397d4`。
+  优先执行器持有一把预期 PostgreSQL advisory lock；普通 Worker 未恢复。
+- 正式只读五问抽查前后同为 4/5，法律 Word 的“十年”既有召回缺口仍在；没有对
+  全库质量提升作出结论，也没有创建生产测试文档或发起历史重建。
+- 回退镜像/容器与备份均保留，详见 RECHUNK_MAINTENANCE。后续继续持久化、
+  任务预算、覆盖/取消、UI、原子激活/旧引用及统一探索，不能把本次发布当作全功能上线。

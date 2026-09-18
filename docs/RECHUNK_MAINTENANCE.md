@@ -88,6 +88,24 @@ Worker。新上传处理暂停不影响原文件保存。部署前联合备份
 
 ## 处理和风险边界
 
+### 2026-09-18 知识增强底层发布后的运行版本
+
+维护者再次授权合并/推送/部署后，运行代码为 `8bdba8e`：API 镜像 `fa04a589faa4`，
+优先 Worker 镜像 `c30ed2e16eda`。启动参数与时间/五份名单保持不变，未加
+`--adaptive-chunking`；原普通 Worker 继续停止。API/Worker 完整回归 989 项通过，
+运行代码哈希核对一致。Web 和数据库镜像未变，不需要迁移。
+
+此次联合备份为 `backups/cangzhi-20260918-124617`，已通过校验。旧镜像保留在
+`cangzhi-api:rollback-before-enhancement-20260918` 与
+`cangzhi-worker:rollback-before-enhancement-20260918`；旧优先容器已正常退出并保留为
+`cangzhi-priority-worker-pre-enhancement-20260918`，restart=no，避免误启动第二个执行器。
+Compose 的 orphan 提示来自该回退容器，不应为消除提示自动删除它。
+
+若需回退，先等待当前任务完成并正常停止新优先 Worker，再使用保留的旧优先容器/
+镜像与完全相同的截止时间和名单恢复；API 使用上述回退镜像重新创建。
+不得启动旧普通 Worker，也不要用全量 make upgrade 回退。此次没有切换在线切片，
+通常只需代码镜像回退；不能自动覆盖恢复数据库或 storage。
+
 ### adaptive-v2 开发入口（需评测后另行启用）
 
 新代码提供 `--adaptive-chunking` 给优先维护调度器。只有明确加此开关，新正文任务
