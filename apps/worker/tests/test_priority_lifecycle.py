@@ -134,3 +134,75 @@ def test_executor_exception_does_not_leave_permanent_processing(db, monkeypatch)
     assert job.status == "failed"
     assert job.finished_at is not None
     assert "secret" not in str(job.error_details) + job.last_error
+
+
+@pytest.mark.parametrize("kind", ["pdf", "doc", "docx", "md", "txt", "html"])
+def test_adaptive_fresh_text_policy_preserves_source_and_job_key(db, kind):
+    from apps.worker.services.processor import ADAPTIVE_CHUNKING_CONFIG
+    _, version, job = document(db, stage="chunking")
+    payload = {"document_type": kind, "blocks": [{"type": "paragraph", "text": "正文。"}]}
+    version.structured_content = payload
+    db.commit()
+    key = job.idempotency_key
+    assert priority._claim_one_foreground_job(db, CUTOFF, stage="chunking", adaptive=True) == job.id
+    assert job.config_version == ADAPTIVE_CHUNKING_CONFIG
+    assert job.idempotency_key == key
+    assert version.structured_content == payload
+
+
+@pytest.mark.parametrize("kind", ["xlsx", "xls", "database_table"])
+def test_adaptive_leaves_dataset_route_unchanged(db, kind):
+    _, version, job = document(db, stage="chunking")
+    version.structured_content = {"document_type": kind, "blocks": []}
+    db.commit()
+    priority._claim_one_foreground_job(db, CUTOFF, stage="chunking", adaptive=True)
+    assert job.config_version == "1"
+
+
+def test_adaptive_docx_worker_uses_existing_structure_without_reparse(db, monkeypatch):
+    from apps.worker.services.processor import process_single_job, ADAPTIVE_CHUNKING_CONFIG
+    _, version, job = document(db, stage="chunking")
+    payload = {"document_type": "docx", "blocks": [
+        {"type": "heading", "level": 1, "text": "说明", "heading_path": ["说明"]},
+        {"type": "paragraph", "text": "清楚的正文，不需要重新解析原文件。", "heading_path": ["说明"]},
+    ], "metadata": {}}
+    version.structured_content = payload
+    version.processing_status = "ready"
+    db.commit()
+    raw = version.raw_content
+    monkeypatch.setattr("apps.worker.services.processor.build_provider_from_session", lambda _: None)
+    priority._claim_one_foreground_job(db, CUTOFF, stage="chunking", adaptive=True)
+    assert process_single_job(db, job.id)
+    db.refresh(version)
+    db.refresh(job)
+    assert job.status == "completed"
+    assert version.raw_content == raw
+    assert version.structured_content == payload
+    assert version.meta["chunk_config_version"] == ADAPTIVE_CHUNKING_CONFIG
+    assert version.meta["assisted_chunking"]["calls"] == 0
+    assert not version.meta["assisted_chunking"]["ai_used"]
+    assert db.scalar(select(DocumentChunk.id).where(DocumentChunk.document_version_id == version.id).limit(1))
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("config", ["chunking:assisted-v1", "chunking:adaptive-v2"])
+def test_claim_preserves_explicit_policy_on_retry(db, adaptive, config):
+    _, version, job = document(db, stage="chunking")
+    version.structured_content = {"document_type": "pdf", "blocks": []}
+    job.config_version = config
+    job.status = "retry"
+    db.commit()
+    priority._claim_one_foreground_job(db, CUTOFF, stage="chunking", adaptive=adaptive)
+    assert job.config_version == config
+
+
+def test_adaptive_oversize_docx_records_fallback_without_reparse(db):
+    _, version, job = document(db, stage="chunking")
+    version.structured_content = {"document_type": "docx", "blocks": [
+        {"type": "paragraph", "text": "段落", "heading_path": []}
+    ] * (priority.MAX_BLOCKS + 1)}
+    db.commit()
+    priority._claim_one_foreground_job(db, CUTOFF, stage="chunking", adaptive=True)
+    assert job.config_version == "1"
+    assert len(version.structured_content["blocks"]) == priority.MAX_BLOCKS + 1
+    assert version.meta["chunking_policy_fallback"]["reason"] == "assisted_block_limit"

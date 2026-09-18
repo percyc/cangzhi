@@ -75,6 +75,7 @@ from apps.api.services.workspaces import clear_workspace_context
 from apps.worker.core.config import settings
 from apps.api.services.chunking_candidate import MAX_BLOCKS
 from apps.worker.services.processor import (
+    ADAPTIVE_CHUNKING_CONFIG,
     ASSISTED_CHUNKING_CONFIG,
     CHUNKING_STAGE,
     process_single_job,
@@ -199,6 +200,7 @@ def _claim_one_foreground_job(
     session: Session,
     cutoff: datetime.datetime,
     stage: str | None = None,
+    adaptive: bool = False,
 ) -> int | None:
     """Claim exactly one foreground job; commit before invoking the worker."""
     clear_workspace_context(session)
@@ -235,7 +237,20 @@ def _claim_one_foreground_job(
     if job is None:
         session.rollback()
         return None
-    if (
+    if job.config_version in {ASSISTED_CHUNKING_CONFIG, ADAPTIVE_CHUNKING_CONFIG}:
+        pass  # A retry keeps its explicitly assigned policy across daemon restarts.
+    elif adaptive and job.stage == CHUNKING_STAGE:
+        version = session.get(DocumentVersion, job.document_version_id)
+        payload = (version.structured_content or {}) if version else {}
+        if payload.get("document_type") in {"pdf", "doc", "docx", "md", "markdown", "txt", "html", "note"}:
+            if len(payload.get("blocks") or []) <= MAX_BLOCKS:
+                job.config_version = ADAPTIVE_CHUNKING_CONFIG
+            else:
+                version.meta = {**(version.meta or {}), "chunking_policy_fallback": {
+                    "reason": "assisted_block_limit", "limit": MAX_BLOCKS,
+                    "blocks": len(payload["blocks"]), "strategy": "profile_rules",
+                }}
+    elif (
         job.stage == CHUNKING_STAGE
         and job.config_version != ASSISTED_CHUNKING_CONFIG
         and _is_pdf_version(session, job.document_version_id)
@@ -339,7 +354,8 @@ def _run_foreground_step(
     for _ in FOREGROUND_STAGES:
         stage = FOREGROUND_STAGES[state["fg_cursor"] % len(FOREGROUND_STAGES)]
         state["fg_cursor"] = (state["fg_cursor"] + 1) % len(FOREGROUND_STAGES)
-        job_id = _claim_one_foreground_job(session, cutoff, stage=stage)
+        options = {"adaptive": True} if state.get("adaptive") else {}
+        job_id = _claim_one_foreground_job(session, cutoff, stage=stage, **options)
         if job_id is not None:
             _dispatch(session, job_id, pool="foreground")
             return True  # Count attempted work, not only successful jobs.
@@ -435,6 +451,7 @@ def run_priority_daemon(
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     install_signal_handlers: bool = True,
     lock_connection: Connection | None = None,
+    adaptive: bool = False,
 ) -> int:
     """Main loop: claim a job, hand it to the worker, repeat until shutdown.
 
@@ -450,7 +467,7 @@ def run_priority_daemon(
             # thread; secondary callers should use the flag directly.
             pass
     Session = sessionmaker(bind=engine)
-    state = {"fg_cursor": 0, "fg_weight": 0}
+    state = {"fg_cursor": 0, "fg_weight": 0, "adaptive": adaptive}
     processed = 0
     with Session() as session:
         while not is_shutdown_requested():
@@ -512,6 +529,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_POLL_INTERVAL,
         help="Seconds to sleep between iterations in serve mode.",
     )
+    parser.add_argument(
+        "--adaptive-chunking", action="store_true",
+        help="Opt into structure-aware adaptive-v2 for fresh text documents; does not reparse history.",
+    )
     args = parser.parse_args(argv)
     if not 0.1 <= args.poll_interval <= 30:
         parser.error("--poll-interval must be between 0.1 and 30 seconds")
@@ -531,6 +552,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             once=args.once,
             poll_interval=args.poll_interval,
             lock_connection=connection,
+            adaptive=args.adaptive_chunking,
         )
     finally:
         release_daemon_lock(connection)

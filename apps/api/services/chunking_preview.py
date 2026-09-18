@@ -3,7 +3,8 @@ import asyncio
 from sqlalchemy import select
 from ..ai.provider import build_provider_from_db
 from ..models.documents import Document, DocumentVersion
-from .chunking_candidate import POLICY_VERSION, build_candidate, source_fingerprint
+from .chunking_candidate import source_fingerprint
+from .chunking_adaptive import POLICY_VERSION, build_adaptive_candidate as build_candidate
 
 
 class PreviewError(ValueError):

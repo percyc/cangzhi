@@ -102,13 +102,13 @@ PDF_PREVIEW_MAX_BYTES = 100 * 1024 * 1024
 DATASET_ARTIFACT_VERSION = "dataset-parquet:v1"
 CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
 
-# Opt-in rechunk policy for authorized maintenance passes. Only jobs with
-# this exact ``config_version`` ever enter the assisted path; default
-# ingestion still uses ``CHUNKING_IDEMPOTENCY`` and is untouched by this
-# code path. The constant is intentionally distinct from
-# ``CHUNKING_IDEMPOTENCY`` so a job dispatched under the legacy
-# idempotency key cannot accidentally run AI calls.
+# Execution policy is distinct from the enqueue deduplication identity.
+# Normal ingestion creates CHUNKING_IDEMPOTENCY jobs. The explicitly enabled
+# maintenance scheduler may assign an assisted config at first claim while
+# preserving that identity, preventing a second pending ingestion job.
+# Explicit historical rebuilds have their own policy-specific identity.
 ASSISTED_CHUNKING_CONFIG = "chunking:assisted-v1"
+ADAPTIVE_CHUNKING_CONFIG = "chunking:adaptive-v2"
 ASSISTED_CHUNKING_MAX_CALLS = 2
 ASSISTED_CHUNKING_TIMEOUT_SECONDS = 10.0
 
@@ -972,15 +972,13 @@ def _process_chunking(
         chunking_config = get_chunking_config(profile)
         structure_anomaly = f"detection_error: {exc}"
 
-    # Step 1.5: Opt-in AI-assisted rechunk for PDFs. Non-PDF jobs with
-    # the assisted config continue on the default path; the meta below
-    # records the job config so consumers can tell the slices came
-    # from a non-default path.
-    if (
+    # Explicit v1 retains its PDF-only semantics; v2 evaluates structure
+    # across text formats. Normal ingestion config remains unchanged.
+    if job.config_version == ADAPTIVE_CHUNKING_CONFIG or (
         job.config_version == ASSISTED_CHUNKING_CONFIG
         and structured.document_type == "pdf"
     ):
-        return _process_chunking_assisted_pdf(
+        return _process_chunking_assisted(
             session,
             job,
             document,
@@ -1102,7 +1100,7 @@ def _process_chunking(
     return True
 
 
-def _process_chunking_assisted_pdf(
+def _process_chunking_assisted(
     session: Session,
     job: ProcessingJob,
     document: Document,
@@ -1111,13 +1109,13 @@ def _process_chunking_assisted_pdf(
     profile: DocumentProfile,
     chunking_config: ChunkingConfig,
 ) -> bool:
-    """Bounded AI-assisted rechunk for PDFs.
+    """Bounded, explicitly versioned assisted chunking.
 
     The path is opt-in: it only runs for jobs whose ``config_version`` is
-    :data:`ASSISTED_CHUNKING_CONFIG`. The default chunking pipeline never
-    reaches this helper, and a non-PDF job dispatched with the same
-    ``config_version`` continues on the profile-driven path in
-    :func:`_process_chunking`.
+    :data:`ASSISTED_CHUNKING_CONFIG` (PDF v1) or
+    :data:`ADAPTIVE_CHUNKING_CONFIG` (structure-aware v2). The default
+    chunking pipeline never reaches this helper. Non-PDF v1 jobs still
+    use the profile-driven baseline.
 
     The candidate is built with :func:`build_candidate`
     (``max_calls=ASSISTED_CHUNKING_MAX_CALLS``) using a provider whose
@@ -1150,7 +1148,11 @@ def _process_chunking_assisted_pdf(
             )
 
     try:
-        candidate = build_candidate(
+        candidate_builder = build_candidate
+        if job.config_version == ADAPTIVE_CHUNKING_CONFIG:
+            from apps.api.services.chunking_adaptive import build_adaptive_candidate
+            candidate_builder = build_adaptive_candidate
+        candidate = candidate_builder(
             structured.to_dict(),
             provider=provider,
             max_calls=ASSISTED_CHUNKING_MAX_CALLS,
@@ -1224,8 +1226,8 @@ def _process_chunking_assisted_pdf(
     calls = int(candidate.get("calls") or 0)
     coverage = round(assisted_blocks / total_blocks, 4) if total_blocks else 0.0
     diagnostic = {
-        "policy": ASSISTED_CHUNKING_POLICY,
-        "config_version": ASSISTED_CHUNKING_CONFIG,
+        "policy": candidate.get("policy_version", ASSISTED_CHUNKING_POLICY),
+        "config_version": job.config_version,
         "max_calls": ASSISTED_CHUNKING_MAX_CALLS,
         "timeout_seconds": ASSISTED_CHUNKING_TIMEOUT_SECONDS,
         "provider_available": provider is not None,
@@ -1239,6 +1241,11 @@ def _process_chunking_assisted_pdf(
         "ai_used": accepted > 0,
         "skipped_dataset": bool(candidate.get("skipped_dataset")),
     }
+    if job.config_version == ADAPTIVE_CHUNKING_CONFIG:
+        diagnostic["decision"] = candidate.get("decision")
+        diagnostic["reasons"] = candidate.get("reasons", [])
+        diagnostic["quality_rejected"] = candidate.get("quality_rejected", False)
+        diagnostic["validated_windows"] = candidate.get("validated_windows", 0)
 
     job.status = "completed"
     job.finished_at = utc_now()
@@ -1254,7 +1261,7 @@ def _process_chunking_assisted_pdf(
     meta["chunk_count"] = sum(1 for spec in specs if spec.role == "child")
     meta["parent_count"] = sum(1 for spec in specs if spec.role == "parent")
     meta["structured_table_row_count"] = table_row_count
-    meta["chunk_config_version"] = ASSISTED_CHUNKING_CONFIG
+    meta["chunk_config_version"] = job.config_version
     meta["assisted_chunking"] = diagnostic
     version.meta = meta
     session.add_all([job, version])
