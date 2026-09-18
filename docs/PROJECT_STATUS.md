@@ -55,7 +55,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
-- 2026-09-19 第五批原文地图探索在 `codex/CZ-N05-source-navigation` 完成（父提交0a534d7）。
+- 2026-09-19 第五批原文地图探索 `3e662dd` 在 `codex/CZ-N05-source-navigation` 完成。
   REST/MCP/CLI/Skill 可在不启用增强时浏览解析器标题/原序块，并分页核对版本绑定的
   精确原文。空间/选择/凭证交集先于正文读取，双重SQL大小谓词、结构上限与元数据限长。
   完整 API/Worker 回归1340 passed、2 skipped（独立PostgreSQL并发测试需显式配置）；
