@@ -55,7 +55,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
-- 2026-09-18 第二批知识增强管理闭环在独立分支完成代码与隔离验证。API/Worker
+- 2026-09-18 第二批知识增强管理闭环 `b860e1e` 在独立分支完成代码与隔离验证。API/Worker
   1081 passed、1 skipped（PostgreSQL专项另行1 passed）；全新PostgreSQL迁移到0032、
   回退0031再升级通过；Web lint/typecheck与1280px/375px模拟API浏览器交互通过。
   模型输出使用测试替身，未做真实全库质量验收；未部署/推送/迁移生产或恢复旧队列。
