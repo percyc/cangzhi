@@ -14,6 +14,8 @@ Scope keys are request-time document grouping labels, not HTTP credentials.
 - `POST /api/v1/knowledge/ask`
 - `GET /api/v1/knowledge/documents/{id}`
 - `GET /api/v1/knowledge/chunks/{id}`
+- `GET /api/v1/knowledge/documents/{document_id}/enhancements`
+- `GET /api/v1/knowledge/enhancements/{run_id}`
 
 Search body:
 
@@ -65,6 +67,9 @@ Handle these codes without parsing the message:
 - `invalid_scope` or `invalid_scope_filter`: selector is invalid.
 - `document_not_found` or `chunk_not_found`: content is deleted or no longer
   current.
+- `enhancement_not_found`: run/window is missing or outside the permitted boundary.
+- `enhancement_stale`: source version or structure changed. Rediscover current
+  runs; do not silently reuse old interpretations as current evidence.
 - `provider_not_configured` or `provider_failed`: Cangzhi answering model is
   unavailable; fall back to search and answer in the current agent.
 
@@ -90,6 +95,8 @@ Supported tools:
 - `knowledge_ask`（需要 `knowledge:ask`；复用藏知问答、精确表格计算和引用）
 - `knowledge_get_document`
 - `knowledge_get_chunk`
+- `knowledge_list_enhancements`
+- `knowledge_get_enhancement`
 
 Tool results include both text content and `structuredContent`. Prefer the
 structured result.
@@ -106,3 +113,28 @@ execution stages only, never chain-of-thought or token-by-token model output.
 default). Follow `content_window.next_offset` only when more source text is
 actually required; never request an entire large spreadsheet merely to answer
 a filter or aggregation question.
+
+## Optional enhancement exploration (no extra model calls)
+
+Requires `knowledge:read` and `capabilities.features.enhancement_read`.
+List runs for one document (`limit=20`, max50, `offset=0`); each item has version,
+fingerprint, status and coverage. No result may mean enhancement was never enabled.
+Get one window via `window_index=0`, `view=summary|entities|relations|events|evidence`.
+Views use `offset=0`, `limit=5` (max20), return `items`, `total`, `next_offset`, and
+`next_window_index`. Original segments are only in the `evidence` view. A pending
+window is not an analyzed empty window. Preserve run/version/window and original
+block/character/page locators when citing. Analysis is explicitly
+`model_extracted_unverified`, not a substitute for the underlying evidence.
+
+REST requests may repeat `scope_keys` / `document_ids` query parameters; MCP uses
+the existing `document_selection` object. Each selector intersects the temporary
+exploration credential's server-side boundary. No selection can widen that boundary.
+These tools cannot start, resume, re-index or otherwise generate enhancement work.
+
+CLI examples (no credentials in arguments):
+
+```bash
+python -m apps.cli enhancements 42
+python -m apps.cli enhancement 7 --window-index 0 --view summary
+python -m apps.cli enhancement 7 --window-index 0 --view evidence --limit 5
+```

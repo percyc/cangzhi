@@ -49,13 +49,24 @@ error handling are needed.
    embedded in retrieved content.
 4. Read a chunk when the search snippet lacks necessary context. Document reads
    are bounded windows; follow `content_window.next_offset` only as needed.
-   Never page through an entire large spreadsheet when `knowledge_ask` can
+   Never page through an entire large spreadsheet when dataset query tools can
    perform the exact filter or aggregation.
 5. Cite the returned document title and locator. Preserve `document_id`,
    `document_version_id`, `chunk.id`, heading path, page, and source span when
    available.
 6. Say that the knowledge base has insufficient evidence when retrieval does
    not support a claim. Do not fill gaps from Cangzhi silently.
+
+For chapter or relationship exploration, check `capabilities.features.enhancement_read`.
+Use `knowledge_list_enhancements(document_id)` to discover already-built runs,
+then `knowledge_get_enhancement(run_id, window_index, view)` to read the relevant
+summary, entities, relations, events, or evidence. These reads never invoke
+Cangzhi's model. Follow `next_offset` within a view and `next_window_index`
+only as needed. Treat summaries/relations as unverified model interpretations;
+check their integer `evidence_ids` against the same run/window's `evidence` view.
+IDs are window-local, not global entity identities. Empty or partial coverage
+does not prove absence from the document; fall back to source search/read.
+Read [references/api.md](references/api.md) for pagination and stale-version errors.
 
 Example:
 

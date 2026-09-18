@@ -8,6 +8,7 @@ import os
 import sys
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -190,6 +191,17 @@ def build_parser() -> argparse.ArgumentParser:
     document.add_argument("id", type=int)
     chunk = commands.add_parser("chunk", help="读取当前知识片段")
     chunk.add_argument("id", type=int)
+    for name, help_text in (("enhancements", "列出文档的已构建增强记录（不调用模型）"),
+                            ("enhancement", "分页读取一个增强窗口及其证据（不调用模型）")):
+        enhancement = commands.add_parser(name, help=help_text)
+        enhancement.add_argument("id", type=int, help="文档 ID" if name == "enhancements" else "增强运行 ID")
+        enhancement.add_argument("--offset", type=int, default=0)
+        enhancement.add_argument("--limit", type=int, default=20 if name == "enhancements" else 5)
+        enhancement.add_argument("--scope-keys", help="文档范围键，逗号分隔")
+        enhancement.add_argument("--document-ids", help="文档 ID，逗号分隔；与范围键取并集")
+        if name == "enhancement":
+            enhancement.add_argument("--window-index", type=int, default=0)
+            enhancement.add_argument("--view", choices=["summary", "entities", "relations", "events", "evidence"], default="summary")
     return parser
 
 
@@ -200,6 +212,28 @@ def run(args: argparse.Namespace, client: CangzhiClient) -> dict[str, Any]:
         return client.request("GET", "/api/v1/knowledge/scopes")
     if args.command == "facets":
         return client.request("GET", "/api/v1/knowledge/facets")
+    if args.command in {"enhancements", "enhancement"}:
+        max_limit = 50 if args.command == "enhancements" else 20
+        if args.id <= 0 or args.offset < 0 or not 1 <= args.limit <= max_limit:
+            raise CLIError("ID、分页范围无效", code="invalid_arguments")
+        query = {"offset": args.offset, "limit": args.limit}
+        selected = args.scope_keys is not None or args.document_ids is not None
+        keys = _comma_values(args.scope_keys)
+        ids = _comma_values(args.document_ids, integers=True)
+        if (selected and not keys and not ids) or any(identifier <= 0 for identifier in ids):
+            raise CLIError("文档选择不能为空，ID 必须为正整数", code="invalid_arguments")
+        if keys:
+            query["scope_keys"] = keys
+        if ids:
+            query["document_ids"] = ids
+        if args.command == "enhancements":
+            path = f"/api/v1/knowledge/documents/{args.id}/enhancements"
+        else:
+            if args.window_index < 0:
+                raise CLIError("窗口序号不能为负数", code="invalid_arguments")
+            path = f"/api/v1/knowledge/enhancements/{args.id}"
+            query.update(window_index=args.window_index, view=args.view)
+        return client.request("GET", path + "?" + urlencode(query, doseq=True))
     if args.command == "search":
         return client.request(
             "POST",

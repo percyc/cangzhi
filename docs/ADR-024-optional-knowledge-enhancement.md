@@ -55,6 +55,25 @@ GET 只读取产物并分页返回，绝不生成模型调用。外部 REST/MCP 
 
 ## 交付门槛
 
+### 第三批只读契约（2026-09-18）
+
+新增 GET `/api/v1/knowledge/documents/{document_id}/enhancements` 和
+GET `/api/v1/knowledge/enhancements/{run_id}`；对应 MCP
+`knowledge_list_enhancements`、`knowledge_get_enhancement`，要求 knowledge:read。
+沿用普通 PAT/管理员和短期探索凭证，document_selection 只会与凭证边界取交集。
+按 ID 读取也先验证当前空间、活动文档、当前版本和源指纹；旧版本/源变化不返回
+旧产物冒充当前知识。所有输出都不得包括 Scope Key、内部快照全集或密钥。
+
+列表返回当前源有效运行及覆盖摘要，limit 默认20/最多50；读取一次只选择一个
+window_index，view 为 summary/entities/relations/events/evidence，默认 summary。
+各视图 offset/limit 分页（默认5/最多20），附 total、next_offset、next_window_index、
+窗口状态与运行覆盖，实体/证据 ID 仅在该运行窗口内有效。evidence 视图返回原文
+片段及定位，不自动扩展到其他文档；增强解释保留 model_extracted_unverified 标记。
+未处理或空结果必须明确区分，不制造全文理解完成假象。读取不执行模型、不重试任务。
+外部 AI 保留推理与探索职责；本批不改快速/深度问答，不自动引入图谱召回。
+
+### 完整功能验收
+
 开关/预算单测、版本生命周期与并发启用、原文不变、旧引用、范围隔离、失败恢复、
 跨格式与数据集旁路回归；最后才做真实检索质量评估。减少切片或通过结构校验不等于
 质量提高。无维护者新的部署授权，不迁移生产数据库、不重建历史队列。

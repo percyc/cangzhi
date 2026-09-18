@@ -350,6 +350,40 @@ dataset_id + artifact_version + source_rows` 打开下方版本绑定证据接�
 
 ---
 
+### 3.9 已构建的知识增强产物
+
+先检查 `GET /api/v1/capabilities` 中 `features.enhancement_read`。以下接口要求
+`knowledge:read`，普通 PAT、登录 Cookie 和临时探索凭证均可用；**不会调用模型或发起任务**。
+没有记录并不表示原文没有相关事实，可能只是尚未开启/构建增强，仍可使用原文检索。
+
+**`GET /api/v1/knowledge/documents/{document_id}/enhancements`**
+
+- `offset=0`、`limit=20`（1–50）；仅列当前文档版本且原文指纹一致的运行。
+- 返回 `document_id`、`document_version_id`、`items`、`total`、`next_offset`。
+  运行摘要包含 `id`、`status`、`source_fingerprint`、完成窗口/原文字数和调用计数。
+
+**`GET /api/v1/knowledge/enhancements/{run_id}`**
+
+- `window_index=0`（零基）；一次只读取一个窗口。
+- `view=summary`，可选 `entities`、`relations`、`events`、`evidence`。
+- `offset=0`、`limit=5`（1–20），分页作用于当前窗口的指定视图。
+- 返回 `run`、`window_index`、`window_status`、`view`、`items`、`total`、`next_offset`、
+  `next_window_index`。已完成但无信息与尚未分析窗口由状态区分。
+- `summary` 项含 `text`、`evidence_ids`；图谱项中的实体 ID 及整数证据 ID 均局限在
+  当前运行/窗口。按需切换 `view=evidence` 读取对应 `id` 的原文及块/字符/页码定位。
+  不同窗口的同名实体不能自动视为同一对象。
+- 模型解释携带 `evidence_status=model_extracted_unverified`；锚点有效不是语义正确
+  的保证，引用应回到原文。基础切片与增强窗口不是同一个 ID 空间。
+
+两条接口都可用重复查询参数 `scope_keys`、`document_ids` 进一步选择文档，组内及
+两组之间按并集，再与当前空间和探索凭证边界取交集，不能通过猜运行 ID 越界。
+范围外、回收和不存在对象返回404；源版本/结构变化返回409 `enhancement_stale`，
+应重新列出当前有效运行。未开放外部开始、续跑、取消等写操作。
+
+MCP 等价工具为 `knowledge_list_enhancements`、`knowledge_get_enhancement`，选择
+参数使用现有 `document_selection` 对象，其他字段与 REST 相同。建议外部 AI 自行
+决定继续读取哪些窗口及视图，不批量拉取所有图谱或嵌套调用藏知深度分析。
+
 ## 4. MCP Streamable HTTP 参考
 
 接入点：`POST http://localhost:8000/api/mcp`（或经 Next.js 同源代理的
@@ -477,11 +511,17 @@ python -m apps.cli ask "问题" [--deep]                   # 带引用问答
 python -m apps.cli ask "问题" --deep                     # 深度多步检索
 python -m apps.cli document 12                           # 读取文档
 python -m apps.cli chunk 34                              # 读取片段
+python -m apps.cli enhancements 12                       # 列出文档增强记录
+python -m apps.cli enhancement 7 --window-index 0 --view summary
+python -m apps.cli enhancement 7 --window-index 0 --view evidence --limit 5
 ```
 
 通用选项：
 
 - `--url`、`--token`、`--workspace`、`--timeout`、`--compact`（单行 JSON）
+
+增强命令另外支持 `--offset`、`--limit`、`--scope-keys`、`--document-ids`；
+`enhancements` 的位置参数是文档 ID，`enhancement` 的位置参数是增强运行 ID。
 
 检索/问答的范围选项：
 

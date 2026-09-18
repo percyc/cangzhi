@@ -7,7 +7,7 @@ import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
@@ -32,6 +32,10 @@ from ..services.dataset_execution import (
     preview_dataset,
 )
 from ..services.evidence import EvidenceError, EvidenceService
+from ..services.enhancement_read import (
+    list_document_enhancements,
+    read_enhancement,
+)
 from ..services.knowledge_read import (
     KnowledgeReadError,
     list_current_documents,
@@ -227,6 +231,28 @@ class EvidenceRowsArguments(DatasetIdArguments):
     source_rows: list[int] = Field(default_factory=list, max_length=200)
     columns: list[str] = Field(default_factory=list, max_length=64)
     limit: int = Field(default=20, ge=1, le=200)
+
+
+class EnhancementListArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    document_id: int = Field(ge=1)
+    limit: int = Field(default=20, ge=1, le=50)
+    offset: int = Field(default=0, ge=0)
+    document_selection: DocumentSelectionInput = None
+
+
+class EnhancementReadArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    run_id: int = Field(ge=1)
+    window_index: int = Field(default=0, ge=0)
+    view: Literal[
+        "summary", "entities", "relations", "events", "evidence"
+    ] = "summary"
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=5, ge=1, le=20)
+    document_selection: DocumentSelectionInput = None
 
 
 TOOLS = [
@@ -433,6 +459,43 @@ TOOLS = [
             "不放任把整张表装载入上下文。受限 200 行以内，分页由调用方控制。"
         ),
         "inputSchema": EvidenceRowsArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_list_enhancements",
+        "title": "列出文档增强运行",
+        "description": (
+            "仅读取已构建的增强产物，绝不调用模型。按文档 ID 列出当前源有效的增强"
+            "运行及覆盖摘要；可用 document_selection 收窄范围。应使用 "
+            "knowledge_get_enhancement 读取具体窗口。结果只是已构建产物，"
+            "不是全文理解完成的声明。"
+        ),
+        "inputSchema": EnhancementListArguments.model_json_schema(),
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "knowledge_get_enhancement",
+        "title": "读取增强窗口结果",
+        "description": (
+            "读取单个增强运行窗口的解释与原文证据。一次只选择一个 window_index 与"
+            " view（summary/entities/relations/events/evidence，默认 summary）；"
+            "各视图独立 offset/limit 分页。返回的实体与证据 ID 仅在当前运行窗口内"
+            "有效，不在窗口之间复用。解释带有 model_extracted_unverified 标记，"
+            "属于模型解释而非已验证事实；证据锚点存在不等于语义已验证，且不等于"
+            "整个文档已完整理解。先 knowledge_list_enhancements 定位 run，再按 "
+            "window_index 读取。"
+        ),
+        "inputSchema": EnhancementReadArguments.model_json_schema(),
         "annotations": {
             "readOnlyHint": True,
             "destructiveHint": False,
@@ -895,6 +958,40 @@ async def _call_tool(
                     document_boundary=identity.exploration_boundary,
                 )
             )
+        if name == "knowledge_list_enhancements":
+            args = EnhancementListArguments.model_validate(arguments)
+            return _tool_result(
+                await list_document_enhancements(
+                    db,
+                    args.document_id,
+                    limit=args.limit,
+                    offset=args.offset,
+                    document_selection=(
+                        args.document_selection.to_domain()
+                        if args.document_selection is not None
+                        else None
+                    ),
+                    document_boundary=identity.exploration_boundary,
+                )
+            )
+        if name == "knowledge_get_enhancement":
+            args = EnhancementReadArguments.model_validate(arguments)
+            return _tool_result(
+                await read_enhancement(
+                    db,
+                    args.run_id,
+                    window_index=args.window_index,
+                    view=args.view,
+                    offset=args.offset,
+                    limit=args.limit,
+                    document_selection=(
+                        args.document_selection.to_domain()
+                        if args.document_selection is not None
+                        else None
+                    ),
+                    document_boundary=identity.exploration_boundary,
+                )
+            )
     except (TypeError, ValueError, ValidationError):
         return _tool_error(
             "invalid_arguments",
@@ -941,7 +1038,9 @@ async def mcp_post(
                     "按 content_window.next_offset 分页读取，避免大型文档挤占上下文。"
                     "发现表格后先用 knowledge_list_datasets 和 "
                     "knowledge_get_dataset_schema，再用 knowledge_query_dataset 做筛选聚合；"
-                    "不要通过预览工具遍历整个数据集。复杂分析应由当前外部 Agent "
+                    "不要通过预览工具遍历整个数据集。知识增强产物（章节/实体/关系/事件）"
+                    "仅能通过 knowledge_list_enhancements 与 knowledge_get_enhancement 读取；"
+                    "它们是已构建的局部解释，证据未作语义验证，不等于全文理解。复杂分析应由当前外部 Agent "
                     "组合上述工具完成；MCP 不提供藏知内部 deep 编排，以避免双重 "
                     "Agent 和重复模型消耗。"
                 ),

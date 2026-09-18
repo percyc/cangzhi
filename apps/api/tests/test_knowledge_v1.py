@@ -130,6 +130,8 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "knowledge_get_evidence_by_chunk",
         "knowledge_get_evidence_by_dataset",
         "knowledge_preview_evidence_rows",
+        "knowledge_list_enhancements",
+        "knowledge_get_enhancement",
     }
 
 

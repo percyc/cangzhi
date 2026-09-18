@@ -129,6 +129,18 @@ DuckDB 在 Parquet 上下推执行，最多返回 200 行。不要循环调用�
 
 ## 权限边界
 
+### 增强知识的渐进探索
+
+支持 `features.enhancement_read` 的版本提供 `knowledge_list_enhancements` 和
+`knowledge_get_enhancement`。先按文档发现有效运行，再选择窗口的章节摘要、实体、
+关系、事件或原文证据视图，按需分页；外部 AI 自行判断下一步探索，不消耗藏知模型。
+增强解释未经语义验证，证据 ID 只在当前窗口有效；必须核对原文，不能以局部覆盖
+冒充全文结论。没有增强结果时继续原文搜索，不自动触发模型生成。
+所有读取（包括猜运行 ID）受工作空间、文档选择与探索凭证边界约束。
+REST/CLI 参数和示例见 [API 参考 §3.9](API_REFERENCE.md#39-已构建的知识增强产物)。
+
+### 作用域
+
 - `knowledge:read`：读取知识范围、文档和切片。
 - `knowledge:search`：执行知识检索。
 - `knowledge:ask`：调用藏知配置的对话模型生成带引用回答。

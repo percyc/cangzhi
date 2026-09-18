@@ -4,8 +4,10 @@ import argparse
 import json
 
 import httpx
+import pytest
+from urllib.parse import urlsplit, parse_qs
 
-from apps.cli.main import CangzhiClient, _scope_payload, main, run
+from apps.cli.main import CangzhiClient, CLIError, _scope_payload, build_parser, main, run
 
 
 class StubClient(CangzhiClient):
@@ -148,3 +150,34 @@ def test_http_error_preserves_stable_server_code(monkeypatch, capsys):
     assert main(["--token", "cz_pat_test", "capabilities"]) == 3
     error = json.loads(capsys.readouterr().err)
     assert error["error"]["code"] == "insufficient_scope"
+
+
+@pytest.mark.parametrize('view', ['summary', 'entities', 'relations', 'events', 'evidence'])
+def test_enhancement_cli_routes_and_query_encoding(view):
+    client = StubClient()
+    args = build_parser().parse_args(['enhancement', '12', '--window-index', '2', '--view', view,
+        '--offset', '3', '--limit', '4', '--scope-keys', 'sample & a,示例', '--document-ids', '1,2'])
+    run(args, client)
+    method, path, payload = client.calls[0]
+    assert method == 'GET' and payload is None
+    assert urlsplit(path).path == '/api/v1/knowledge/enhancements/12'
+    assert parse_qs(urlsplit(path).query) == {'window_index': ['2'], 'view': [view],
+        'offset': ['3'], 'limit': ['4'], 'scope_keys': ['sample & a', '示例'], 'document_ids': ['1', '2']}
+
+
+def test_enhancement_list_cli():
+    client = StubClient()
+    run(build_parser().parse_args(['enhancements', '7']), client)
+    assert client.calls == [('GET', '/api/v1/knowledge/documents/7/enhancements?offset=0&limit=20', None)]
+
+
+@pytest.mark.parametrize('args', [
+    ['enhancements', '1', '--scope-keys', ''], ['enhancements', '1', '--limit', '51'],
+    ['enhancement', '1', '--limit', '21'], ['enhancement', '1', '--window-index', '-1'],
+    ['enhancements', '0'], ['enhancements', '1', '--document-ids', '-1'],
+    ['enhancements', '1', '--offset', '-1']])
+def test_enhancement_cli_invalid_requests_do_not_fall_back(args):
+    client = StubClient()
+    with pytest.raises(CLIError):
+        run(build_parser().parse_args(args), client)
+    assert client.calls == []

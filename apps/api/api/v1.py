@@ -61,6 +61,10 @@ from ..services.knowledge_read import (
     read_current_chunk,
     read_current_document,
 )
+from ..services.enhancement_read import (
+    list_document_enhancements,
+    read_enhancement,
+)
 from ..services.knowledge_scopes import (
     KnowledgeScopeError,
     KnowledgeScopeResolver,
@@ -581,6 +585,7 @@ async def capabilities(
             "document_catalog": True,
             "mcp_exploration_grants": True,
             "rest_exploration_grants": True,
+            "enhancement_read": True,
         },
     }
 
@@ -592,6 +597,18 @@ def _dataset_http_error(exc: DatasetExecutionError) -> HTTPException:
         "artifact_missing": 409,
         "query_timeout": 408,
     }.get(exc.code, 400)
+    return HTTPException(
+        status_code=status, detail={"code": exc.code, "message": str(exc)}
+    )
+
+
+def _enhancement_http_error(exc: KnowledgeReadError) -> HTTPException:
+    """Map read-side enhancement errors; only built artifacts are served."""
+    status = {
+        "enhancement_stale": 409,
+        "stale": 409,
+        "version_mismatch": 409,
+    }.get(exc.code, 404 if str(exc.code).endswith("_not_found") else 400)
     return HTTPException(
         status_code=status, detail={"code": exc.code, "message": str(exc)}
     )
@@ -1068,6 +1085,77 @@ async def get_knowledge_document(
             },
         )
     return document
+
+
+@router.get(
+    "/knowledge/documents/{document_id}/enhancements",
+    response_model=dict[str, Any],
+)
+async def list_document_enhancements_v1(
+    document_id: int,
+    limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    scope_keys: list[str] | None = Query(default=None, max_length=100),  # noqa: B008
+    document_ids: list[int] | None = Query(default=None, max_length=200),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    """List only built enhancement artifacts; no model call is made."""
+    selection = None
+    if scope_keys is not None or document_ids is not None:
+        selection = _selection(
+            DocumentSelectionPayload(
+                scope_keys=scope_keys or [], document_ids=document_ids or []
+            )
+        )
+    try:
+        return await list_document_enhancements(
+            db,
+            document_id,
+            limit=limit,
+            offset=offset,
+            document_selection=selection,
+            document_boundary=identity.exploration_boundary,
+        )
+    except KnowledgeReadError as exc:
+        raise _enhancement_http_error(exc) from None
+
+
+@router.get("/knowledge/enhancements/{run_id}", response_model=dict[str, Any])
+async def get_enhancement_v1(
+    run_id: int,
+    window_index: int = Query(default=0, ge=0),
+    view: Literal[
+        "summary", "entities", "relations", "events", "evidence"
+    ] = Query(default="summary"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=5, ge=1, le=20),
+    scope_keys: list[str] | None = Query(default=None, max_length=100),  # noqa: B008
+    document_ids: list[int] | None = Query(default=None, max_length=200),  # noqa: B008
+    identity: APIIdentity = Depends(_read_identity),  # noqa: B008
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict[str, Any]:
+    """Read one enhancement window view plus its bounded source evidence."""
+    selection = None
+    if scope_keys is not None or document_ids is not None:
+        selection = _selection(
+            DocumentSelectionPayload(
+                scope_keys=scope_keys or [], document_ids=document_ids or []
+            )
+        )
+    try:
+        return await read_enhancement(
+            db,
+            run_id,
+            window_index=window_index,
+            view=view,
+            offset=offset,
+            limit=limit,
+            document_selection=selection,
+            document_boundary=identity.exploration_boundary,
+        )
+    except KnowledgeReadError as exc:
+        raise _enhancement_http_error(exc) from None
 
 
 async def _document_blob_response(

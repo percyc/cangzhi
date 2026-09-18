@@ -39,7 +39,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 | 主题 | 关联 ID | 状态 | 备注 |
 |---|---|---|---|
 | 增强运行与管理闭环 | `CZ-N01` / `CZ-N03` | 第二批代码与隔离验收完成，未部署 | Codex / OpenCode（M3、ark）；`codex/CZ-N03-enhancement-runs`。迁移0032、版本快照、窗口分析、证据校验、预算/继续/取消、空间设置与详情进度；1081项回归、PostgreSQL并发专项、桌面/手机模拟接口浏览器通过；不更换在线切片，不操作生产数据库 |
-| 可选 AI 知识增强 | `CZ-N01`–`CZ-N06` | 底层首批已发布，完整功能开发中 | `8bdba8e` 已合并 main 并推送 Gitea；第二批持久化、任务和管理UI见上一行，尚未发布。全局层级汇总、公共探索入口、切片产物原子激活仍待接入；基础摘要分类标签保留，未启用历史处理 |
+| 可选 AI 知识增强 | `CZ-N01`–`CZ-N06` | 底层首批已发布，完整功能开发中 | `8bdba8e` 已合并 main 并推送 Gitea；第二批持久化/管理UI与第三批公共增强读取已实现，尚未发布。全局层级汇总、完整文档地图探索、切片产物原子激活仍待接入；基础摘要分类标签保留，未启用历史处理 |
 | 跨格式结构评估与按需切片 | `CZ-N04` | 候选已发布，默认策略未切换 | `2a1d559` / `8bdba8e`。非 PDF 管理预览使用 adaptive-v2；PDF 保留已验证 v1 修正。优先 Worker 不加 adaptive 开关，不重解析、不扩张历史队列；真实黄金集仍待完成 |
 | 新上传优先的维护调度 | `CZ-Q05` | 已授权合并部署 | `27688c3` 已合并推送 main；隔离回归 850 项、发布镜像专项 40 项通过。`cangzhi-priority-worker` 按版本创建时间和 4:1 配额运行；真实新资料 1013 全部 5 阶段完成。普通 Worker 仍停止，旧队列未恢复；心跳/租约待后续 |
 | 显式维护重切 | `CZ-N04` | 开发与小批验证中 | Codex / OpenCode；`codex/CZ-N04-assisted-rebuild`。维护者接受未上线阶段旧引用变化与短暂向量空窗，授权备份后小批真实重建，效果通过才分批全库；默认入库策略不隐式切换 |
@@ -55,11 +55,18 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
+- 2026-09-18 第三批增强产物只读探索在 `codex/CZ-N05-enhancement-exploration` 完成。
+  OpenCode M3/ark 编写服务与适配器，Codex 复核补齐证据结构、参数边界与真实鉴权测试。
+  REST/MCP/CLI/Skill 分窗读取已构建摘要、实体、关系、事件和原文证据；读取不调用模型，
+  当前空间、文档选择和临时凭证边界共同生效。API/Worker 1159 passed、1 skipped
+  （未配置 PostgreSQL 专项）；Web lint/typecheck、Skill 校验、diff 检查通过。
+  未合并、推送、部署或改变生产队列；真实模型质量与完整地图探索仍未验收。
+
 - 2026-09-18 第二批知识增强管理闭环 `b860e1e` 在独立分支完成代码与隔离验证。API/Worker
   1081 passed、1 skipped（PostgreSQL专项另行1 passed）；全新PostgreSQL迁移到0032、
   回退0031再升级通过；Web lint/typecheck与1280px/375px模拟API浏览器交互通过。
   模型输出使用测试替身，未做真实全库质量验收；未部署/推送/迁移生产或恢复旧队列。
-  暂无公共MCP增强工具与原子切片切换。使用说明见 KNOWLEDGE_ENHANCEMENT。
+  该批尚无公共MCP增强工具（后续第三批补齐）；原子切片切换仍未完成。使用说明见 KNOWLEDGE_ENHANCEMENT。
 
 - 2026-09-18 维护者明确授权发布知识增强底层首批：代码 `8bdba8e` 已合并 main、
   推送 Gitea；API `fa04a589faa4`、优先 Worker `c30ed2e16eda` 已部署且 healthy。

@@ -779,3 +779,28 @@
 - README、架构、ADR-024、BACKLOG、状态页与 KNOWLEDGE_ENHANCEMENT 使用说明同步。
   本批不提供跨窗口实体消歧、全篇层级汇总、公共 REST/MCP 增强探索或切片原子切换，
   不宣称检索质量提升。未合并主分支、未推送、未部署或更改任何生产队列。
+
+### 2026-09-18 CZ-N05：增强产物只读探索开工
+
+- Codex / OpenCode，分支 codex/CZ-N05-enhancement-exploration；先补 ADR-024 第三批
+  公共读取契约，再接共享服务与 REST/MCP/CLI/Skill。保持外部 AI 自主探索，无新增模型调用。
+- 当前版本与源指纹、空间/文档选择/探索凭证范围共同约束读取；窗口和视图分页返回，
+  不向外暴露原文快照全集，不修改现有检索/问答，不部署、不重建历史索引。
+
+### 2026-09-18 CZ-N05：增强产物公共读取与隔离验收完成
+
+- OpenCode CLI 使用 minimax-m3 实现共享服务与单测，ark-code-latest 实现 REST/MCP
+  适配器；Codex 复核并修正摘要视图对象结构、原文证据调用、空范围测试及参数边界。
+- 新增 knowledge_list_enhancements / knowledge_get_enhancement，REST 等价读取及
+  CLI enhancements / enhancement；Skill 明确窗口内证据编号、未验证解释、覆盖不足
+  回到原文，外部 AI 自主探索。不增加嵌套深度问答或任何读取时模型调用。
+- 仅返回当前版本和源指纹匹配产物；窗口/视图分页，范围外与不存在同为404，
+  旧源409。未构建文档列表不加载正文或快照；过长参数422，空选择400，MCP拒绝布尔编号。
+- 真实 PAT/临时凭证端到端覆盖跨空间、选择交集、Scope Key 移除立即失效、REST/MCP
+  五视图一致；读前后模型调用计数和任务不变。测试使用合成资料和模型替身。
+- 无网络隔离容器完整 API/Worker：1159 passed、1 skipped、4 条既有警告，209.66秒。
+  跳过的是未配置 PostgreSQL 专项，本批无新迁移；此前第二批独立 PG 专项结果见上条。
+  Web lint/typecheck、Skill quick_validate、git diff --check 通过。
+- README、API参考、接入说明、架构、ADR024、增强说明、BACKLOG和状态同步。
+  完整地图探索、跨窗口层级汇总/实体消歧、切片产物原子切换和真实质量评测仍待完成。
+  本批仅交付开发分支，不合并主分支、不推送、不部署、不迁移或重建生产资料。
