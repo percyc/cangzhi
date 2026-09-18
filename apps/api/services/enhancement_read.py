@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer, undefer
 
 from ..models.documents import Document, DocumentVersion
-from ..models.enhancement import EnhancementRun, EnhancementWindow
+from ..models.enhancement import EnhancementRun, EnhancementWindow, EnhancementNode
 from ..models.workspaces import Workspace
 from . import knowledge_enhancement as domain
 from .document_map import build_document_map
@@ -32,6 +32,7 @@ ALLOWED_VIEWS = frozenset({"summary", "entities", "relations", "events", "eviden
 __all__ = [
     "list_document_enhancements",
     "read_enhancement",
+    "read_overview",
     "MAX_LIST_LIMIT",
     "DEFAULT_LIST_LIMIT",
     "MAX_READ_LIMIT",
@@ -275,6 +276,62 @@ def _paginate(items: list, offset: int, limit: int) -> tuple[list, int, int | No
     sliced = items[offset:offset + limit]
     next_offset = offset + len(sliced) if offset + len(sliced) < total else None
     return sliced, total, next_offset
+
+
+def _entity_candidates(children):
+    """Spelling/alias navigation hints, explicitly NOT identity resolution."""
+    import unicodedata
+    buckets = {}
+    for child in children:
+        if child["kind"] != "window":
+            continue
+        for entity in child["entities"]:
+            mention = {"window_index": child["window_index"], "local_id": entity["id"],
+                       "name": entity["name"], "kind": entity["kind"],
+                       "evidence_ids": entity["evidence_ids"]}
+            labels = {unicodedata.normalize("NFKC", text).strip().casefold()
+                      for text in [entity["name"], *entity.get("aliases", [])] if text.strip()}
+            for label in sorted(labels):
+                buckets.setdefault(label, []).append(mention)
+    candidates = [{"label": label, "mentions": mentions, "identity_status": "unresolved",
+                   "basis": "same_spelling_or_alias"}
+                  for label, mentions in sorted(buckets.items())
+                  if len({m["window_index"] for m in mentions}) > 1]
+    return {"items": candidates[:20], "total": len(candidates),
+            "truncated": len(candidates) > 20, "scope": "direct_child_windows_only"}
+
+
+async def read_overview(db: AsyncSession, run_id: int, *, node_key: str | None = None,
+                        document_selection=None, document_boundary=None) -> dict:
+    _coerce_positive_id("run_id", run_id)
+    if node_key is not None:
+        import re
+        if not isinstance(node_key, str) or not re.fullmatch(r"L[1-9][0-9]{0,2}:[0-9]{1,4}", node_key):
+            raise KnowledgeReadError("invalid_arguments", "概览节点编号无效")
+    run, _, _ = await _authenticate_run(db, run_id,
+        document_selection=document_selection, document_boundary=document_boundary)
+    summary = await _summary_via_domain(db, run)
+    base = {"run": summary, "enabled": summary["hierarchy"]["enabled"], "node": None,
+            "read_only": True, "model_calls": 0, "evidence_status": "model_extracted_unverified"}
+    if not base["enabled"]:
+        return {**base, "status": "not_enabled"}
+    query = select(EnhancementNode).where(EnhancementNode.run_id == run.id)
+    if node_key is not None:
+        query = query.where(EnhancementNode.node_key == node_key)
+    else:
+        query = query.order_by(EnhancementNode.level.desc(), EnhancementNode.ordinal).limit(1)
+    node = await db.scalar(query)
+    if node is None:
+        raise KnowledgeReadError("enhancement_not_found", "概览节点不存在")
+    try:
+        children = await db.run_sync(domain.node_children, run, node)
+    except domain.EnhancementError:
+        raise KnowledgeReadError("enhancement_stale", "概览依赖不完整") from None
+    return {**base, "node": {"node_key": node.node_key, "level": node.level,
+        "status": node.status, "window_start": node.window_start, "window_stop": node.window_stop,
+        "result": node.result if node.status == "completed" else None, "children": children,
+        "entity_candidates": _entity_candidates(children),
+        "evidence_status": "model_extracted_unverified"}}
 
 
 async def read_enhancement(

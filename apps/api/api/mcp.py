@@ -35,6 +35,7 @@ from ..services.evidence import EvidenceError, EvidenceService
 from ..services.enhancement_read import (
     list_document_enhancements,
     read_enhancement,
+    read_overview,
 )
 from ..services.knowledge_read import (
     KnowledgeReadError,
@@ -242,6 +243,13 @@ class EnhancementListArguments(BaseModel):
     document_selection: DocumentSelectionInput = None
 
 
+class EnhancementOverviewArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    run_id: int = Field(ge=1)
+    node_key: str | None = Field(default=None, max_length=40)
+    document_selection: DocumentSelectionInput = None
+
+
 class EnhancementReadArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -256,6 +264,20 @@ class EnhancementReadArguments(BaseModel):
 
 
 TOOLS = [
+    {
+        "name": "knowledge_get_enhancement_overview",
+        "title": "读取分层概览及证据路径",
+        "description": (
+            "只读已构建的全文概览树，默认根节点；node_key 可按 children 中的节点继续下钻。"
+            "每次最多四个子结果，不调用模型。support_refs 指向本节点 children 的 ref，"
+            "沿 n: 节点继续读取，直到 w: 窗口用 knowledge_get_enhancement 的 evidence 视图核对原文。"
+            "树按连续窗口分组，不等于真实章节。未完成节点不等于全文理解完成；"
+            "entity_candidates 仅为当前直接子窗口的同名/别名线索，身份未消歧，禁止自动合并。"
+        ),
+        "inputSchema": EnhancementOverviewArguments.model_json_schema(),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+    },
     {
         "name": "knowledge_list_scopes",
         "title": "列出知识范围",
@@ -958,6 +980,11 @@ async def _call_tool(
                     document_boundary=identity.exploration_boundary,
                 )
             )
+        if name == "knowledge_get_enhancement_overview":
+            args = EnhancementOverviewArguments.model_validate(arguments)
+            return _tool_result(await read_overview(db, args.run_id, node_key=args.node_key,
+                document_selection=args.document_selection.to_domain() if args.document_selection is not None else None,
+                document_boundary=identity.exploration_boundary))
         if name == "knowledge_list_enhancements":
             args = EnhancementListArguments.model_validate(arguments)
             return _tool_result(

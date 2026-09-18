@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy import select
 
 from apps.api.ai.provider import build_provider_from_session
-from apps.api.models.enhancement import EnhancementRun, EnhancementWindow
+from apps.api.models.enhancement import EnhancementRun, EnhancementWindow, EnhancementNode
 from apps.api.models.processing import ProcessingJob
 from apps.api.services import knowledge_enhancement as service
 
@@ -31,6 +31,9 @@ def fail_enhancement_job(session, job_id):
                 for window in session.scalars(select(EnhancementWindow).where(
                         EnhancementWindow.run_id == run.id, EnhancementWindow.status == "running")):
                     window.status, window.last_error = "failed", message
+                for node in session.scalars(select(EnhancementNode).where(
+                        EnhancementNode.run_id == run.id, EnhancementNode.status == "running")):
+                    node.status, node.last_error = "failed", message
     except (ValueError, service.EnhancementError):
         pass
     finish_job(session, job_id, message)
@@ -60,12 +63,9 @@ def process_enhancement_job(session, job):
         finish_job(session, job_id)
         session.commit()
         return True
-    window = session.scalar(select(EnhancementWindow).where(
-        EnhancementWindow.run_id == run.id, EnhancementWindow.status == "pending")
-        .order_by(EnhancementWindow.ordinal).limit(1))
+    window = service.next_unit(session, run)
     if window is None or run.calls_used >= run.call_budget:
-        summary = service.run_summary(session, run)
-        run.status = "completed" if summary["completed_windows"] == run.total_windows else "partial"
+        run.status = "completed" if service.all_units_completed(session, run) else "partial"
         finish_job(session, job_id)
         session.commit()
         return True
@@ -80,10 +80,11 @@ def process_enhancement_job(session, job):
         return False
     if hasattr(provider, "_timeout"):
         provider._timeout = min(float(provider._timeout), 30.0)
+    is_overview = isinstance(window, EnhancementNode)
     identity = {"provider": getattr(provider, "name", ""), "model": getattr(provider, "_model", ""),
-                "prompt_version": "window-analysis:v1"}
-    segments = service.source_segments(run, window)
-    modules = run.config["modules"]
+                "prompt_version": run.config.get("hierarchy_version") if is_overview else "window-analysis:v1"}
+    segments = service.node_children(session, run, window) if is_overview else service.source_segments(run, window)
+    modules = [m for m in run.config["modules"] if m in {"chapter", "graph"}]
     token = str(uuid.uuid4())
     run.active_attempt, run.lease_until = token, service.now() + timedelta(seconds=180)
     run.status, run.last_error = "running", None
@@ -92,10 +93,15 @@ def process_enhancement_job(session, job):
     window_id = window.id
     session.commit()  # No transaction is held while sending document text out.
     try:
-        from apps.api.services.enhancement_analysis import analyze_window
-        model_segments = [{key: segment[key] for key in ("id", "text", "block_id", "start", "stop")}
-                          for segment in segments]
-        result = analyze_window(provider, model_segments, modules)
+        if is_overview:
+            from apps.api.services.enhancement_hierarchy import synthesize_node
+            children = [{"ref": child["ref"], "summary": child["summary"]} for child in segments]
+            result = synthesize_node(provider, children)
+        else:
+            from apps.api.services.enhancement_analysis import analyze_window
+            model_segments = [{key: segment[key] for key in ("id", "text", "block_id", "start", "stop")}
+                              for segment in segments]
+            result = analyze_window(provider, model_segments, modules)
         error = None
     except Exception:
         result, error = None, "模型调用失败或输出证据无效，可追加预算重试"
@@ -109,7 +115,7 @@ def process_enhancement_job(session, job):
         finish_job(session, job_id)
         session.commit()  # Cancelled/recovered attempt; discard late output.
         return True
-    window = session.get(EnhancementWindow, window_id, populate_existing=True)
+    window = session.get(EnhancementNode if is_overview else EnhancementWindow, window_id, populate_existing=True)
     run.active_attempt, run.lease_until = None, None
     if not service.source_is_current(session, run):
         run.status, run.last_error = "stale", "原文已变化，分析结果未发布"
@@ -119,16 +125,15 @@ def process_enhancement_job(session, job):
         window.result, window.last_error = result, error
         session.flush()
         summary = service.run_summary(session, run)
-        pending = session.scalar(select(EnhancementWindow.id).where(
-            EnhancementWindow.run_id == run.id, EnhancementWindow.status == "pending").limit(1))
-        if summary["completed_windows"] == run.total_windows:
+        pending = service.next_unit(session, run)
+        if service.all_units_completed(session, run):
             run.status = "completed"
         elif pending and run.calls_used < run.call_budget:
             run.status = "queued"
             service.enqueue_next(session, run)
         else:
             run.status = "partial" if summary["completed_windows"] else "failed"
-            run.last_error = "存在未完成窗口，可追加预算继续；已完成内容保留"
+            run.last_error = "存在未完成窗口或概览节点，可追加预算继续；已完成内容保留"
     finish_job(session, job_id, error)
     session.commit()
     return error is None

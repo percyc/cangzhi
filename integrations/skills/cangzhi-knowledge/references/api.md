@@ -97,6 +97,7 @@ Supported tools:
 - `knowledge_get_chunk`
 - `knowledge_list_enhancements`
 - `knowledge_get_enhancement`
+- `knowledge_get_enhancement_overview`
 
 Tool results include both text content and `structuredContent`. Prefer the
 structured result.
@@ -137,4 +138,16 @@ CLI examples (no credentials in arguments):
 python -m apps.cli enhancements 42
 python -m apps.cli enhancement 7 --window-index 0 --view summary
 python -m apps.cli enhancement 7 --window-index 0 --view evidence --limit 5
+python -m apps.cli enhancement-overview 7 --node-key L1:0
 ```
+
+For a built hierarchy, GET `/api/v1/knowledge/enhancements/{run_id}/overview`
+(MCP `knowledge_get_enhancement_overview`) defaults to the root. Pass `node_key`
+to read a specific node; each node has at most four children.
+`node.result.summary.support_refs` identifies children by `ref`.
+Follow `n:` references using the child's `node_key`; follow `w:` references with
+`knowledge_get_enhancement(window_index=...,view=evidence)` to read original text.
+`enabled=false,status=not_enabled` means this run did not request overview.
+Pending/failed nodes have no completed result. Current source/version and scope
+checks match window reads. Node `entity_candidates` preserve window/local IDs;
+the list is capped at20 with total/truncated and is explicitly unresolved.

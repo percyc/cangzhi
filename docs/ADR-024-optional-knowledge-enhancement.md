@@ -72,6 +72,23 @@ window_index，view 为 summary/entities/relations/events/evidence，默认 summ
 未处理或空结果必须明确区分，不制造全文理解完成假象。读取不执行模型、不重试任务。
 外部 AI 保留推理与探索职责；本批不改快速/深度问答，不自动引入图谱召回。
 
+### 第四批分层概览（2026-09-18）
+
+新增可选 overview 模块，必须同时开启 chapter；既有 chapter/graph 配置不自动升级。
+新运行保存固定四叉汇总树（连续窗口分组，不冒充真实章节），局部窗口完成后逐层
+归纳直到文档根节点。汇总和窗口共享原有调用预算与租约；预算不足保留局部结果，
+只有窗口及全部概览节点完成才将该运行标记 completed。旧运行不自动补任务。
+节点输入最多四个已完成子结果，输出有限摘要与明确的子结果引用；原文证据通过
+子节点递归回到窗口 evidence 视图，不能把子摘要当成原文或把未覆盖范围称作全文。
+实体保留 window + local_id 身份；跨窗口重名/别名只作为候选线索，绝不自动合并。
+模型归纳不等于语义验证，禁止从同名推定同一主体或丢弃冲突、条件和不确定性。
+
+只读扩展 GET `/api/v1/knowledge/enhancements/{run_id}/overview` 与 MCP
+`knowledge_get_enhancement_overview`，默认返回根节点，可用 node_key 下钻；每次一个
+节点，最多四个子节点摘要及定位。管理员同路径去掉 `/v1/knowledge`；CLI 提供
+enhancement-overview。沿用 knowledge:read、当前源校验、选择与探索凭证交集。
+读取不生成、不补跑；没有开启该模块明确返回 not_enabled。详尽实体消歧另行验收。
+
 ### 完整功能验收
 
 开关/预算单测、版本生命周期与并发启用、原文不变、旧引用、范围隔离、失败恢复、

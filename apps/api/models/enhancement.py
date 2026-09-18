@@ -35,3 +35,20 @@ class EnhancementWindow(BaseModel):
     result = Column(JSON_DATA, nullable=True)
     model_identity = Column(JSON_DATA, nullable=True)
     last_error = Column(Text, nullable=True)
+
+
+class EnhancementNode(BaseModel):
+    """Bounded bottom-up overview nodes; leaves still reference original windows."""
+    __tablename__ = "knowledge_enhancement_nodes"
+    __table_args__ = (UniqueConstraint("run_id", "node_key", name="uq_enhancement_node_key"),)
+    run_id = Column(Integer, ForeignKey("knowledge_enhancement_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    node_key = Column(String(40), nullable=False)
+    level = Column(Integer, nullable=False)
+    ordinal = Column(Integer, nullable=False)
+    window_start = Column(Integer, nullable=False)
+    window_stop = Column(Integer, nullable=False)
+    children = Column(JSON_DATA, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    result = Column(JSON_DATA, nullable=True)
+    model_identity = Column(JSON_DATA, nullable=True)
+    last_error = Column(Text, nullable=True)

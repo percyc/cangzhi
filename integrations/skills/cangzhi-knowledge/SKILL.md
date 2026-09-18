@@ -68,6 +68,14 @@ IDs are window-local, not global entity identities. Empty or partial coverage
 does not prove absence from the document; fall back to source search/read.
 Read [references/api.md](references/api.md) for pagination and stale-version errors.
 
+When `capabilities.features.enhancement_overview` is available, optionally read
+`knowledge_get_enhancement_overview(run_id)` for the built root overview. Follow
+its `support_refs` to child `node_key`s, then child windows and original evidence.
+This tree groups adjacent windows, not necessarily real chapters. `entity_candidates`
+are unresolved spelling/alias hints within direct child windows, never proof that
+two mentions are the same entity. No overview or incomplete coverage means use
+the original retrieval tools, not request generation through this skill.
+
 Example:
 
 ```bash

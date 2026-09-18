@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-ALLOWED_MODULES: frozenset[str] = frozenset({"chapter", "graph", "chunking"})
+ALLOWED_MODULES: frozenset[str] = frozenset({"chapter", "graph", "chunking", "overview"})
 DEFAULT_CALL_BUDGET = 8
 MIN_CALL_BUDGET = 1
 MAX_CALL_BUDGET = 32
@@ -126,6 +126,8 @@ class EnhancementPolicy:
             if not _is_aware(self.effective_at):
                 raise ValueError("effective_at 必须是带时区的时间")
         if self.enabled:
+            if "overview" in self.modules and "chapter" not in self.modules:
+                raise ValueError("全文概览需要同时开启章节理解")
             if not self.cost_acknowledged:
                 raise ValueError("开启知识增强必须确认 cost_acknowledged=true")
             if self.effective_at is None:

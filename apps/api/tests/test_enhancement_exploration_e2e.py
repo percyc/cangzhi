@@ -85,6 +85,11 @@ def test_real_rest_mcp_grant_boundary_and_evidence_parity(client, monkeypatch):
     listing = test_client.get(listing_url, headers=grant_headers)
     assert listing.status_code == 200
     assert listing.json() == mcp('knowledge_list_enhancements', {'document_id': doc_id})['structuredContent']
+    overview = test_client.get(read_url + '/overview', headers=grant_headers)
+    assert overview.status_code == 200
+    assert overview.json()['enabled'] is False and overview.json()['status'] == 'not_enabled'
+    assert overview.json()['node'] is None and overview.json()['model_calls'] == 0
+    assert overview.json() == mcp('knowledge_get_enhancement_overview', {'run_id': run_id})['structuredContent']
     for view in ['summary', 'entities', 'relations', 'events', 'evidence']:
         result = test_client.get(read_url, params={'view': view}, headers=grant_headers)
         assert result.status_code == 200

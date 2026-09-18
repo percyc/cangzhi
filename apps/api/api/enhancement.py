@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.db import get_db
 from ..services import knowledge_enhancement as service
+from ..services.enhancement_read import read_overview
+from ..services.knowledge_read import KnowledgeReadError
 
 router = APIRouter(tags=["knowledge-enhancement"])
 
@@ -11,7 +13,7 @@ router = APIRouter(tags=["knowledge-enhancement"])
 class SettingsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: StrictBool = False
-    modules: list[str] = Field(default_factory=list, max_length=2)
+    modules: list[str] = Field(default_factory=list, max_length=3)
     call_budget: StrictInt = Field(default=8, ge=1, le=32)
     cost_acknowledged: StrictBool = False
 
@@ -65,6 +67,16 @@ async def read_run(run_id: int, offset: int = Query(0, ge=0), limit: int = Query
 @router.post("/enhancements/{run_id}/cancel")
 async def cancel_run(run_id: int, db: AsyncSession = Depends(get_db)):
     return await invoke(db, service.cancel_run, run_id, write=True)
+
+
+@router.get("/enhancements/{run_id}/overview")
+async def overview(run_id: int, node_key: str | None = Query(None, max_length=40),
+                   db: AsyncSession = Depends(get_db)):
+    try:
+        return await read_overview(db, run_id, node_key=node_key)
+    except KnowledgeReadError as exc:
+        status = 404 if exc.code.endswith("_not_found") else 409 if exc.code == "enhancement_stale" else 400
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from None
 
 
 @router.post("/enhancements/{run_id}/resume")

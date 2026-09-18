@@ -64,6 +64,7 @@ from ..services.knowledge_read import (
 from ..services.enhancement_read import (
     list_document_enhancements,
     read_enhancement,
+    read_overview,
 )
 from ..services.knowledge_scopes import (
     KnowledgeScopeError,
@@ -586,6 +587,7 @@ async def capabilities(
             "mcp_exploration_grants": True,
             "rest_exploration_grants": True,
             "enhancement_read": True,
+            "enhancement_overview": True,
         },
     }
 
@@ -1154,6 +1156,25 @@ async def get_enhancement_v1(
             document_selection=selection,
             document_boundary=identity.exploration_boundary,
         )
+    except KnowledgeReadError as exc:
+        raise _enhancement_http_error(exc) from None
+
+
+@router.get("/knowledge/enhancements/{run_id}/overview", response_model=dict[str, Any])
+async def get_enhancement_overview_v1(
+    run_id: int,
+    node_key: str | None = Query(default=None, max_length=40),
+    scope_keys: list[str] | None = Query(default=None, max_length=100),
+    document_ids: list[int] | None = Query(default=None, max_length=200),
+    identity: APIIdentity = Depends(_read_identity),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    selection = None
+    if scope_keys is not None or document_ids is not None:
+        selection = _selection(DocumentSelectionPayload(scope_keys=scope_keys or [], document_ids=document_ids or []))
+    try:
+        return await read_overview(db, run_id, node_key=node_key, document_selection=selection,
+                                   document_boundary=identity.exploration_boundary)
     except KnowledgeReadError as exc:
         raise _enhancement_http_error(exc) from None
 

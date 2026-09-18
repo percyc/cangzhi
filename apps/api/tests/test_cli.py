@@ -171,6 +171,15 @@ def test_enhancement_list_cli():
     assert client.calls == [('GET', '/api/v1/knowledge/documents/7/enhancements?offset=0&limit=20', None)]
 
 
+def test_enhancement_overview_cli():
+    client = StubClient()
+    run(build_parser().parse_args(['enhancement-overview', '7', '--node-key', 'L1:0', '--document-ids', '12']), client)
+    method, path, payload = client.calls[0]
+    assert method == 'GET' and payload is None
+    assert urlsplit(path).path == '/api/v1/knowledge/enhancements/7/overview'
+    assert parse_qs(urlsplit(path).query) == {'node_key': ['L1:0'], 'document_ids': ['12']}
+
+
 @pytest.mark.parametrize('args', [
     ['enhancements', '1', '--scope-keys', ''], ['enhancements', '1', '--limit', '51'],
     ['enhancement', '1', '--limit', '21'], ['enhancement', '1', '--window-index', '-1'],

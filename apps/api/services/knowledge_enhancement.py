@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 
 from ..models.documents import Document, DocumentVersion
-from ..models.enhancement import EnhancementRun, EnhancementWindow
+from ..models.enhancement import EnhancementRun, EnhancementWindow, EnhancementNode
 from ..models.processing import ProcessingJob
 from ..models.workspaces import Workspace
 from .document_map import build_document_map, plan_source_windows
@@ -18,7 +18,7 @@ from .knowledge_enhancement_policy import EnhancementPolicy, POLICY_VERSION
 
 STAGE = "knowledge_enhancement"
 SETTINGS_KEY = "knowledge_enhancement"
-SUPPORTED_MODULES = {"chapter", "graph"}
+SUPPORTED_MODULES = {"chapter", "graph", "overview"}
 MAX_SOURCE_CHARS = 2_000_000
 MAX_SOURCE_BLOCKS = 20000
 MAX_RUN_CALLS = 256
@@ -130,7 +130,68 @@ def run_summary(session, run):
             "completed_windows": completed, "failed_windows": by_status.get("failed", (0, 0))[0],
             "total_source_chars": run.total_source_chars, "completed_source_chars": chars,
             "lease_until": aware(run.lease_until).isoformat() if run.lease_until else None,
-            "last_error": run.last_error, "created_at": run.created_at.isoformat() if run.created_at else None}
+            "last_error": run.last_error, "created_at": run.created_at.isoformat() if run.created_at else None,
+            "hierarchy": hierarchy_summary(session, run)}
+
+
+def hierarchy_summary(session, run):
+    if "overview" not in run.config.get("modules", []):
+        return {"enabled": False, "status": "not_enabled", "total_nodes": 0,
+                "completed_nodes": 0, "root_key": None}
+    counts = dict(session.execute(select(EnhancementNode.status, func.count()).where(
+        EnhancementNode.run_id == run.id).group_by(EnhancementNode.status)).all())
+    root = session.scalar(select(EnhancementNode).where(EnhancementNode.run_id == run.id)
+        .order_by(EnhancementNode.level.desc(), EnhancementNode.ordinal).limit(1))
+    return {"enabled": True, "status": root.status if root else "not_built",
+            "total_nodes": sum(counts.values()), "completed_nodes": counts.get("completed", 0),
+            "root_key": root.node_key if root else None}
+
+
+def all_units_completed(session, run):
+    summary = run_summary(session, run)
+    h = summary["hierarchy"]
+    return summary["completed_windows"] == run.total_windows and (
+        not h["enabled"] or (h["total_nodes"] > 0 and h["completed_nodes"] == h["total_nodes"]))
+
+
+def node_children(session, run, node):
+    """At most four children; preserve window-local identity and citation namespace."""
+    children = []
+    for ref in node.children:
+        kind, key = ref.split(":", 1)
+        if kind == "w":
+            child = session.scalar(select(EnhancementWindow).where(
+                EnhancementWindow.run_id == run.id, EnhancementWindow.ordinal == int(key)))
+        else:
+            child = session.scalar(select(EnhancementNode).where(
+                EnhancementNode.run_id == run.id, EnhancementNode.node_key == key))
+        if child is None:
+            raise EnhancementError(409, "概览依赖不完整")
+        result = child.result or {}
+        children.append({"ref": ref, "kind": "window" if kind == "w" else "node",
+            "window_index": int(key) if kind == "w" else None,
+            "node_key": key if kind != "w" else None, "status": child.status,
+            "summary": result.get("summary", {"text": "", "evidence_ids": []}),
+            "entities": result.get("entities", []) if kind == "w" else []})
+    return children
+
+
+def next_unit(session, run):
+    window = session.scalar(select(EnhancementWindow).where(
+        EnhancementWindow.run_id == run.id, EnhancementWindow.status == "pending")
+        .order_by(EnhancementWindow.ordinal).limit(1))
+    if window is not None:
+        return window
+    if "overview" not in run.config.get("modules", []):
+        return None
+    if session.scalar(select(EnhancementWindow.id).where(EnhancementWindow.run_id == run.id,
+            EnhancementWindow.status != "completed").limit(1)) is not None:
+        return None  # Never label partial source coverage as a whole-document overview.
+    node = session.scalar(select(EnhancementNode).where(EnhancementNode.run_id == run.id,
+        EnhancementNode.status == "pending").order_by(EnhancementNode.level, EnhancementNode.ordinal).limit(1))
+    if node and all(child["status"] == "completed" for child in node_children(session, run, node)):
+        return node
+    return None
 
 
 def enqueue_next(session, run):
@@ -175,6 +236,9 @@ def start_run(session, document_id, *, cost_acknowledged=False, automatic=False)
     fingerprint = docmap["source_fingerprint"]
     config = {"modules": sorted(policy.modules), "policy_version": POLICY_VERSION,
               "analysis_version": "window-analysis:v1"}
+    if "overview" in policy.modules:
+        from .enhancement_hierarchy import HIERARCHY_VERSION
+        config["hierarchy_version"] = HIERARCHY_VERSION
     previous = session.scalars(select(EnhancementRun).where(
         EnhancementRun.document_id == document.id, EnhancementRun.document_version_id == version.id,
         EnhancementRun.source_fingerprint == fingerprint).order_by(EnhancementRun.id.desc())).all()
@@ -190,6 +254,10 @@ def start_run(session, document_id, *, cost_acknowledged=False, automatic=False)
     for ordinal, window in enumerate(windows):
         session.add(EnhancementWindow(run_id=run.id, ordinal=ordinal, status="pending",
             segments=window["segments"], source_chars=window["source_chars"]))
+    if "overview" in policy.modules:
+        from .enhancement_hierarchy import plan_hierarchy
+        for node in plan_hierarchy(len(windows)):
+            session.add(EnhancementNode(run_id=run.id, status="pending", **node))
     enqueue_next(session, run)
     session.flush()
     return run_summary(session, run)
@@ -247,6 +315,9 @@ def cancel_run(session, run_id):
         for window in session.scalars(select(EnhancementWindow).where(
                 EnhancementWindow.run_id == run.id, EnhancementWindow.status == "running")):
             window.status = "pending"
+        for node in session.scalars(select(EnhancementNode).where(
+                EnhancementNode.run_id == run.id, EnhancementNode.status == "running")):
+            node.status = "pending"
         session.flush()
     return run_summary(session, run)
 
@@ -268,6 +339,9 @@ def resume_run(session, run_id, *, additional_calls, cost_acknowledged):
     for window in session.scalars(select(EnhancementWindow).where(
             EnhancementWindow.run_id == run.id, EnhancementWindow.status.in_(["failed", "running"]))):
         window.status, window.last_error = "pending", None
+    for node in session.scalars(select(EnhancementNode).where(
+            EnhancementNode.run_id == run.id, EnhancementNode.status.in_(["failed", "running"]))):
+        node.status, node.last_error = "pending", None
     # A model-free failure may already have consumed this scheduling identity.
     # Resume invalidates pending/stale jobs and uses a fresh budget generation.
     enqueue_resume(session, run)

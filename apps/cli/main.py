@@ -191,7 +191,8 @@ def build_parser() -> argparse.ArgumentParser:
     document.add_argument("id", type=int)
     chunk = commands.add_parser("chunk", help="读取当前知识片段")
     chunk.add_argument("id", type=int)
-    for name, help_text in (("enhancements", "列出文档的已构建增强记录（不调用模型）"),
+    for name, help_text in (("enhancement-overview", "读取已构建的分层概览（不调用模型）"),
+                            ("enhancements", "列出文档的已构建增强记录（不调用模型）"),
                             ("enhancement", "分页读取一个增强窗口及其证据（不调用模型）")):
         enhancement = commands.add_parser(name, help=help_text)
         enhancement.add_argument("id", type=int, help="文档 ID" if name == "enhancements" else "增强运行 ID")
@@ -199,6 +200,8 @@ def build_parser() -> argparse.ArgumentParser:
         enhancement.add_argument("--limit", type=int, default=20 if name == "enhancements" else 5)
         enhancement.add_argument("--scope-keys", help="文档范围键，逗号分隔")
         enhancement.add_argument("--document-ids", help="文档 ID，逗号分隔；与范围键取并集")
+        if name == "enhancement-overview":
+            enhancement.add_argument("--node-key", help="省略时读取根节点，例如 L1:0")
         if name == "enhancement":
             enhancement.add_argument("--window-index", type=int, default=0)
             enhancement.add_argument("--view", choices=["summary", "entities", "relations", "events", "evidence"], default="summary")
@@ -212,7 +215,7 @@ def run(args: argparse.Namespace, client: CangzhiClient) -> dict[str, Any]:
         return client.request("GET", "/api/v1/knowledge/scopes")
     if args.command == "facets":
         return client.request("GET", "/api/v1/knowledge/facets")
-    if args.command in {"enhancements", "enhancement"}:
+    if args.command in {"enhancements", "enhancement", "enhancement-overview"}:
         max_limit = 50 if args.command == "enhancements" else 20
         if args.id <= 0 or args.offset < 0 or not 1 <= args.limit <= max_limit:
             raise CLIError("ID、分页范围无效", code="invalid_arguments")
@@ -228,6 +231,12 @@ def run(args: argparse.Namespace, client: CangzhiClient) -> dict[str, Any]:
             query["document_ids"] = ids
         if args.command == "enhancements":
             path = f"/api/v1/knowledge/documents/{args.id}/enhancements"
+        elif args.command == "enhancement-overview":
+            path = f"/api/v1/knowledge/enhancements/{args.id}/overview"
+            query.pop("offset")
+            query.pop("limit")
+            if args.node_key is not None:
+                query["node_key"] = args.node_key
         else:
             if args.window_index < 0:
                 raise CLIError("窗口序号不能为负数", code="invalid_arguments")

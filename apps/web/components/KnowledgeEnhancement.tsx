@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { withApiBasePath } from '@/lib/paths';
+import EnhancementOverview from '@/components/EnhancementOverview';
 
 type RunStatus =
   | 'queued'
@@ -12,6 +13,14 @@ type RunStatus =
   | 'failed'
   | 'cancelled'
   | 'stale';
+
+type Hierarchy = {
+  enabled: boolean;
+  status: string;
+  total_nodes: number;
+  completed_nodes: number;
+  root_key: string | null;
+};
 
 type Run = {
   id: number;
@@ -28,6 +37,7 @@ type Run = {
   last_error: string | null;
   created_at: string;
   lease_until: string | null;
+  hierarchy: Hierarchy;
 };
 
 type EvidenceResult = {
@@ -238,6 +248,7 @@ export default function KnowledgeEnhancement({ docId }: { docId: string }) {
   const [visible, setVisible] = useState(true);
   const [currentVersion, setCurrentVersion] = useState<number | null>(null);
   const [observedAt, setObservedAt] = useState(0);
+  const [jumpWindow, setJumpWindow] = useState<number | null>(null);
 
   const inFlight = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -484,11 +495,24 @@ export default function KnowledgeEnhancement({ docId }: { docId: string }) {
     }
   };
 
+  const handleOpenWindow = async (windowIndex: number) => {
+    if (!activeRun || busy) return;
+    const pageOffset = Math.floor(windowIndex / PAGE_SIZE) * PAGE_SIZE;
+    setJumpWindow(windowIndex);
+    if (offset !== pageOffset || !detail) await goPage(pageOffset);
+    requestAnimationFrame(() => document.getElementById(
+      `enhancement-window-${activeRun.id}-${windowIndex}`,
+    )?.scrollIntoView({block: 'nearest', behavior: 'smooth'}));
+  };
+
   const allowResume =
     activeRun != null && (RESUMEABLE.includes(activeRun.status) ||
       (activeRun.status === 'running' && activeRun.lease_until != null &&
         new Date(activeRun.lease_until).getTime() <= observedAt));
-  const canStart = !activeRun || activeRun.status === 'stale' ||
+  const canStart =
+    !activeRun ||
+    activeRun.status === 'stale' ||
+    activeRun.status === 'completed' ||
     (currentVersion != null && activeRun.document_version_id !== currentVersion);
   const progress =
     activeRun && activeRun.total_windows > 0
@@ -542,7 +566,9 @@ export default function KnowledgeEnhancement({ docId }: { docId: string }) {
         {canStart && (
           <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/50 p-3">
             <p className="text-sm text-amber-900">
-              本批仅补充章节理解与实体图谱，不修改检索切片或向量索引；辅助切片与原子替换未开放。
+              本批仅补充章节理解、实体图谱与可选分层概览，
+              不修改检索切片或向量索引；辅助切片与原子替换未开放。服务端幂等：
+              当前配置与既有运行一致时复用该运行，否则以当前配置开始新运行。
             </p>
             <button
               type="button"
@@ -573,13 +599,35 @@ export default function KnowledgeEnhancement({ docId }: { docId: string }) {
                 调用：{activeRun.calls_used}/{activeRun.call_budget}
               </span>
               <span>
-                窗口：{activeRun.completed_windows}/{activeRun.total_windows}
+                窗口覆盖：{activeRun.completed_windows}/{activeRun.total_windows}
                 （{progress}%）
               </span>
               <span>
                 原文：{activeRun.completed_source_chars}/{activeRun.total_source_chars} 字
               </span>
             </div>
+            {activeRun.hierarchy?.enabled && activeRun.hierarchy.total_nodes > 0 && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-teal-700">
+                <span>
+                  概览节点：{activeRun.hierarchy.completed_nodes}/
+                  {activeRun.hierarchy.total_nodes}（
+                  {Math.round(
+                    (activeRun.hierarchy.completed_nodes /
+                      activeRun.hierarchy.total_nodes) *
+                      100,
+                  )}
+                  %）
+                </span>
+                <span className="text-slate-400">
+                  窗口覆盖与概览归纳分别统计，均不代表“全文已完整理解”。
+                </span>
+              </div>
+            )}
+            {activeRun.hierarchy?.enabled && activeRun.hierarchy.total_nodes === 0 && (
+              <p className="text-xs text-teal-700">
+                已启用分层概览，待窗口收束后开始归纳。
+              </p>
+            )}
             {activeRun.last_error && (
               <p className="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
                 {activeRun.last_error}
@@ -640,6 +688,15 @@ export default function KnowledgeEnhancement({ docId }: { docId: string }) {
           </div>
         )}
 
+        {activeRun?.hierarchy?.enabled && (
+          <EnhancementOverview
+            key={activeRun.id}
+            run={activeRun}
+            visible={open && visible}
+            onOpenWindow={handleOpenWindow}
+          />
+        )}
+
         {detail && (
           <div className="mt-4 space-y-3">
             {detail.windows.length === 0 && (
@@ -648,6 +705,15 @@ export default function KnowledgeEnhancement({ docId }: { docId: string }) {
             {detail.windows.map((item) => (
               <details
                 key={item.ordinal}
+                id={`enhancement-window-${activeRun?.id}-${item.ordinal}`}
+                open={item.ordinal === jumpWindow}
+                onToggle={(event) => {
+                  if (event.currentTarget.open && jumpWindow !== item.ordinal) {
+                    setJumpWindow(item.ordinal);
+                  } else if (!event.currentTarget.open && jumpWindow === item.ordinal) {
+                    setJumpWindow(null);
+                  }
+                }}
                 className="rounded-lg border border-slate-200"
               >
                 <summary className="cursor-pointer px-3 py-2 text-sm text-slate-700">

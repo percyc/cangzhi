@@ -4,6 +4,7 @@ Never points at application DATABASE_URL. The runner must explicitly provide
 CANGZHI_TEST_POSTGRES_URL with database name cangzhi_enhancement_test.
 """
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from uuid import uuid4
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
+from apps.api.models.enhancement import EnhancementWindow
 from apps.api.models.workspaces import Workspace
 from apps.api.services import knowledge_enhancement as service
 from apps.api.services.workspaces import bind_workspace_context
@@ -22,7 +24,8 @@ from apps.worker.services import enhancement_processor as worker
 
 
 @pytest.mark.skipif(not os.environ.get('CANGZHI_TEST_POSTGRES_URL'), reason='isolated PostgreSQL opt-in')
-def test_postgres_start_and_execution_are_serialized(monkeypatch):
+@pytest.mark.parametrize('overview', [False, True])
+def test_postgres_start_and_execution_are_serialized(monkeypatch, overview):
     url = os.environ['CANGZHI_TEST_POSTGRES_URL']
     assert make_url(url).database == 'cangzhi_enhancement_test'
     engine = create_engine(url)
@@ -32,7 +35,7 @@ def test_postgres_start_and_execution_are_serialized(monkeypatch):
         db.flush()
         space_id = space.id
         bind_workspace_context(db, space_id)
-        service.save_settings(db, {'enabled': True, 'modules': ['chapter'],
+        service.save_settings(db, {'enabled': True, 'modules': ['chapter', 'overview'] if overview else ['chapter'],
                                   'call_budget': 2, 'cost_acknowledged': True})
         doc = Document(title='Concurrency sample', source_type=DocumentSourceType.note, workspace_id=space_id)
         db.add(doc)
@@ -61,6 +64,11 @@ def test_postgres_start_and_execution_are_serialized(monkeypatch):
         jobs = db.scalars(select(ProcessingJob).where(ProcessingJob.document_id == doc_id)).all()
         assert len(jobs) == 1
         job_id = jobs[0].id
+        if overview:
+            window = db.scalar(select(EnhancementWindow).where(EnhancementWindow.run_id == ids[0]))
+            window.status = 'completed'
+            window.result = {'summary': {'text': 'Facts', 'evidence_ids': [0]}}
+            db.commit()
     entered, release = Event(), Event()
     calls = []
     class FakeProvider:
@@ -69,6 +77,9 @@ def test_postgres_start_and_execution_are_serialized(monkeypatch):
             calls.append(True)
             entered.set()
             assert release.wait(timeout=10)
+            if overview:
+                children = json.loads(kwargs['prompt'])['children']
+                return {'summary': {'text': 'Overview', 'support_refs': [c['ref'] for c in children]}}
             return {'summary': {'text': 'Facts', 'evidence_ids': [0]},
                     'entities': [], 'relations': [], 'events': []}
     monkeypatch.setattr(worker, 'build_provider_from_session', lambda _: FakeProvider())

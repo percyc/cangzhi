@@ -19,6 +19,7 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 const MODULE_LABELS: Record<string, string> = {
   chapter: '章节理解',
   graph: '实体关系与事件',
+  overview: '分层概览',
 };
 
 const emptySettings: EnhancementSettings = {
@@ -27,7 +28,7 @@ const emptySettings: EnhancementSettings = {
   call_budget: 8,
   cost_acknowledged: false,
   effective_at: null,
-  supported_modules: ['chapter', 'graph'],
+  supported_modules: ['chapter', 'graph', 'overview'],
 };
 
 export default function EnhancementSettingsPage() {
@@ -75,13 +76,22 @@ export default function EnhancementSettingsPage() {
   const supportedModules = settings?.supported_modules ?? ['chapter', 'graph'];
   const moduleOptions = supportedModules.filter((m) => m in MODULE_LABELS);
 
-  const toggleModule = (module: string) => {
-    setSelectedModules((current) =>
-      current.includes(module)
-        ? current.filter((m) => m !== module)
-        : [...current, module],
-    );
-  };
+const toggleModule = (module: string) => {
+  setSelectedModules((current) => {
+    if (current.includes(module)) {
+      const next = current.filter((m) => m !== module);
+      // 关闭章节理解时同步关闭依赖它的分层概览
+      if (module === 'chapter') return next.filter((m) => m !== 'overview');
+      return next;
+    }
+    const next = [...current, module];
+    // 分层概览依赖章节理解，开启时自动补齐章节（不静默破坏既有配置）
+    if (module === 'overview' && !next.includes('chapter')) {
+      return [...next, 'chapter'];
+    }
+    return next;
+  });
+};
 
   const handleSave = async () => {
     setSaveState('saving');
@@ -92,6 +102,13 @@ export default function EnhancementSettingsPage() {
       }
       if (enabled && !costAcknowledged) {
         throw new Error('开启知识增强前，请先确认额外模型调用费用与内容外发');
+      }
+      if (
+        enabled &&
+        selectedModules.includes('overview') &&
+        !selectedModules.includes('chapter')
+      ) {
+        throw new Error('分层概览必须与章节理解同时开启');
       }
       const payload = {
         enabled,
@@ -203,7 +220,9 @@ export default function EnhancementSettingsPage() {
                           <span className="mt-0.5 block text-xs text-slate-500">
                             {module === 'chapter'
                               ? '按章节生成受限窗口的理解产物'
-                              : '抽取实体、关系与事件，并附原文证据'}
+                              : module === 'graph'
+                                ? '抽取实体、关系与事件，并附原文证据'
+                                : '窗口收束后逐层向上做树形汇总；必须同时开启章节理解'}
                           </span>
                         </span>
                         <input
@@ -217,8 +236,10 @@ export default function EnhancementSettingsPage() {
                   })}
                 </div>
                 <p className="mt-3 text-xs leading-5 text-amber-800">
-                  本批仅补充知识与图谱；辅助切片的原子替换（保留基线、候选校验通过后
-                  <strong>原子启用</strong>并支持回滚）尚未开放，本页面不提供该选项。
+                  分层概览依赖章节理解，需同时开启；它只补充树形汇总，不代表全文已完整理解，
+                  同名实体在各窗口保持独立身份，不做自动合并。本批仅补充知识与图谱，
+                  辅助切片的原子替换（保留基线、候选校验通过后<strong>原子启用</strong>并支持回滚）
+                  尚未开放，本页面不提供该选项。
                 </p>
               </fieldset>
 
@@ -227,7 +248,7 @@ export default function EnhancementSettingsPage() {
                   每份文档的模型调用预算（1–32）
                 </span>
                 <span className="mt-0.5 block text-xs text-slate-500">
-                  所有模块共享；重试也计入预算，预算不是 token 账单。
+                  窗口分析与逐层树形汇总共用同一份预算；重试也计入预算，预算不是 token 账单。
                 </span>
                 <input
                   type="number"

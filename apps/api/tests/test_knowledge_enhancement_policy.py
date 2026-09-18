@@ -91,7 +91,7 @@ def test_policy_is_frozen_dataclass():
 
 
 def test_constants_exposed():
-    assert ALLOWED_MODULES == frozenset({"chapter", "graph", "chunking"})
+    assert ALLOWED_MODULES == frozenset({"chapter", "graph", "chunking", "overview"})
     assert MIN_CALL_BUDGET == 1
     assert MAX_CALL_BUDGET == 32
     assert DEFAULT_CALL_BUDGET == 8

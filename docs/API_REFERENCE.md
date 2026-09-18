@@ -384,6 +384,22 @@ MCP 等价工具为 `knowledge_list_enhancements`、`knowledge_get_enhancement`�
 参数使用现有 `document_selection` 对象，其他字段与 REST 相同。建议外部 AI 自行
 决定继续读取哪些窗口及视图，不批量拉取所有图谱或嵌套调用藏知深度分析。
 
+### 3.10 分层概览读取
+
+`GET /api/v1/knowledge/enhancements/{run_id}/overview`，对应 MCP
+`knowledge_get_enhancement_overview` 和 CLI `enhancement-overview <run_id>`。
+先检查 capabilities.features.enhancement_overview；要求 knowledge:read，选择范围
+和探索凭证约束与窗口读取一致。`node_key` 可省略（根节点）或指定如 `L1:0`。
+每次返回一个 node：状态、层级、覆盖窗口 `[window_start,window_stop)`、模型 result、
+最多四个 children。根节点未完成时不以局部摘要冒充全文概览。
+
+`result.summary.support_refs` 对应 children.ref；`n:` 子节点按 node_key 下钻，
+`w:` 子窗口按 window_index 调用已有 evidence 视图核对原文。树按连续窗口构建，
+不是解析章节树。run.hierarchy 分别列出概览总节点/完成节点；总调用预算包含归纳。
+未启用返回 enabled=false、status=not_enabled、node=null。读取不调用模型。
+直接子窗口的 entity_candidates 仅返回同名/别名线索，最多20组，带 total/truncated，
+身份是 unresolved，不能直接合并同名主体；不是全篇实体消歧或完整图谱查询。
+
 ## 4. MCP Streamable HTTP 参考
 
 接入点：`POST http://localhost:8000/api/mcp`（或经 Next.js 同源代理的

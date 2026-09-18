@@ -55,6 +55,13 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
+- 2026-09-18 第四批分层概览在 `codex/CZ-N03-hierarchical-understanding` 完成。
+  overview 显式开启，窗口/四叉归纳树共享预算、租约及取消/续跑；原文证据逐层下钻，
+  同名实体仅是未消歧线索。完整 API/Worker 1290 passed、1 skipped，随后扩展的
+  PostgreSQL 窗口/概览并发专项2 passed；临时库全新升级0033、回退0032再升级通过。
+  1280px/375px模拟API浏览器验证设置、下钻/返回、证据、错误与旧响应隔离通过。
+  Web lint/typecheck通过。不是生产或真实模型质量验收；未合并、推送、部署。
+
 - 2026-09-18 第三批增强产物只读探索 `d3af04b` 在 `codex/CZ-N05-enhancement-exploration` 完成。
   OpenCode M3/ark 编写服务与适配器，Codex 复核补齐证据结构、参数边界与真实鉴权测试。
   REST/MCP/CLI/Skill 分窗读取已构建摘要、实体、关系、事件和原文证据；读取不调用模型，
