@@ -943,6 +943,23 @@ class QAService:
         terms = normalize_query(question)
 
         selected_rows = list(rows[: max(1, min(evidence_limit, MAX_EVIDENCE_ITEMS))])
+        from .fragment_context import bounded_anchor_context, recover_fragment_contexts
+
+        recovered = await recover_fragment_contexts(
+            db, [chunks[row.chunk_id] for row in selected_rows if row.chunk_id in chunks]
+        )
+        # Several tiny hits on one recovered page are one evidence unit, not
+        # repeated budget consumers that crowd out another source/version.
+        seen_pages = set()
+        distinct_rows = []
+        for row in selected_rows:
+            if row.chunk_id in recovered:
+                key = (row.document_id, row.document_version_id, row.page)
+                if key in seen_pages:
+                    continue
+                seen_pages.add(key)
+            distinct_rows.append(row)
+        selected_rows = distinct_rows
         evidence: list[Evidence] = []
         budget = max(1, evidence_total_chars)
         for index, row in enumerate(selected_rows, start=1):
@@ -950,16 +967,26 @@ class QAService:
                 break
             remaining_items = len(selected_rows) - index + 1
             fair_share = max(1, budget // remaining_items)
-            content = await _expanded_chunk_context(
+            content = recovered.get(row.chunk_id) or await _expanded_chunk_context(
                 db,
                 chunks.get(row.chunk_id),
                 fallback=row.content or "",
             )
-            snippet = _build_snippet(content, terms=terms)
+            snippet = (
+                content if row.chunk_id in recovered
+                else _build_snippet(content, terms=terms)
+            )
             chunk = chunks.get(row.chunk_id)
             item_limit = min(max(1, evidence_item_chars), fair_share)
+            if row.chunk_id in recovered:
+                # Keep a recovered page whole when the global budget permits,
+                # reserving a normal share for each remaining source.
+                reserve = min(max(1, evidence_item_chars), fair_share) * (remaining_items - 1)
+                item_limit = max(item_limit, min(len(snippet), budget - reserve))
             if len(snippet) > item_limit:
-                if item_limit == 1:
+                if row.chunk_id in recovered:
+                    snippet = bounded_anchor_context(snippet, row.content or "", item_limit)
+                elif item_limit == 1:
                     snippet = "…"
                 else:
                     snippet = snippet[: item_limit - 1].rstrip() + "…"
@@ -1415,6 +1442,8 @@ async def _expanded_chunk_context(
                 select(DocumentChunk)
                 .where(
                     DocumentChunk.parent_id == chunk.parent_id,
+                    DocumentChunk.document_id == chunk.document_id,
+                    DocumentChunk.document_version_id == chunk.document_version_id,
                     DocumentChunk.is_current.is_(True),
                     DocumentChunk.role == "child",
                     DocumentChunk.order_index.between(

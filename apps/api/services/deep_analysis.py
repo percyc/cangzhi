@@ -157,6 +157,13 @@ class EvidenceAudit(BaseModel):
     resolved_evidence: list[str] = Field(default_factory=list, max_length=5)
     next_query: str = Field(default="", max_length=MAX_QUESTION_LENGTH)
 
+    @field_validator("next_query", mode="before")
+    @classmethod
+    def normalize_unused_query(cls, value: Any) -> Any:
+        # Many compatible models emit null for an unused optional field.
+        # needs_more still requires a non-empty query in the validator below.
+        return "" if value is None else value
+
     @model_validator(mode="after")
     def require_query_for_more_evidence(self):
         self.next_query = self.next_query.strip()
@@ -834,6 +841,7 @@ class DeepAnalysisService:
             system=(
                 "你是藏知的证据完整性审计器。检查已有证据是否足以直接回答问题。"
                 "只输出结论和可执行的证据缺口，不输出思维链，不使用资料外知识。"
+                "必须仅返回 JSON 对象。"
             ),
             prompt=json.dumps(
                 {
@@ -972,6 +980,7 @@ class DeepAnalysisService:
                         "chunk_type": item.chunk_type,
                         "table_location": item.table_location,
                         "snippet": item.snippet,
+                        "context": item.context,
                     }
                     for item in candidates[:MAX_SEARCH_HITS_IN_OBSERVATION]
                 ],
@@ -1096,6 +1105,14 @@ class DeepAnalysisService:
                 db, chunk_id, **_boundary_kwargs(request)
             )
             content = str(payload.get("content") or "")[:4_000]
+            # The tool's authorized anchor can be a historical PDF fragment.
+            # Use the same source-page recovery as search/quick Q&A; public
+            # get_chunk still returns the unmodified stored chunk.
+            from types import SimpleNamespace
+            from .fragment_context import recover_fragment_contexts
+
+            recovered = await recover_fragment_contexts(db, [SimpleNamespace(**payload)])
+            content = recovered.get(chunk_id, content)
             source = await _chunk_to_evidence(db, chunk_id, content)
             if source is None:
                 raise KnowledgeReadError(
@@ -1391,7 +1408,7 @@ async def _chunk_to_evidence(
 
 
 def _candidate_to_evidence(item: SearchHit) -> Evidence:
-    """Keep a discovery snippet as fallback evidence until it is read fully."""
+    """Keep bounded discovery context as evidence until explicitly read."""
 
     source_type = str(item.source_type or "")
     if item.table_location:
@@ -1425,7 +1442,7 @@ def _candidate_to_evidence(item: SearchHit) -> Evidence:
         paragraph_index=item.paragraph_index,
         source_start=item.source_start,
         source_end=item.source_end,
-        snippet=item.snippet,
+        snippet=item.context or item.snippet,
         score=float(item.score),
         source_type=source_type,
         source_url=item.source_url,
@@ -1506,9 +1523,12 @@ def _unresolved_evidence(audits: list[EvidenceAudit]) -> list[str]:
 def _bound_evidence(items: list[Evidence]) -> list[Evidence]:
     result: list[Evidence] = []
     remaining = MAX_DEEP_EVIDENCE_CHARS
-    seen: set[tuple[int, str]] = set()
+    seen: set[tuple] = set()
     for item in items:
-        marker = (item.chunk_id, item.snippet)
+        marker = (
+            (item.chunk_id, item.snippet) if item.table_location
+            else (item.document_id, item.document_version_id, item.page, item.snippet)
+        )
         if marker in seen:
             continue
         seen.add(marker)

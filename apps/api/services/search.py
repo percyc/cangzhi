@@ -446,7 +446,7 @@ async def _attach_neighbor_context(
     *,
     max_chars: int = SEARCH_CONTEXT_MAX_CHARS,
 ) -> None:
-    """Attach one sibling on each side of prose hits in a bounded field."""
+    """Attach bounded source context, recovering tiny fragmented PDF pages."""
 
     prose_hits = [hit for hit in hits if hit.parent_id and not hit.table_location]
     if not prose_hits:
@@ -462,6 +462,9 @@ async def _attach_neighbor_context(
         .scalars()
         .all()
     }
+    from .fragment_context import recover_fragment_contexts
+
+    recovered = await recover_fragment_contexts(db, centers.values())
     parent_ids = {chunk.parent_id for chunk in centers.values() if chunk.parent_id}
     siblings = (
         (
@@ -484,9 +487,16 @@ async def _attach_neighbor_context(
             by_parent.setdefault(chunk.parent_id, []).append(chunk)
     for hit in prose_hits:
         center = centers.get(hit.chunk_id)
+        if hit.chunk_id in recovered and len(recovered[hit.chunk_id]) <= max_chars:
+            hit.context = recovered[hit.chunk_id]
+            continue
         if center is None or center.parent_id is None:
             continue
-        family = by_parent.get(center.parent_id, [])
+        family = [
+            item for item in by_parent.get(center.parent_id, [])
+            if item.document_id == center.document_id
+            and item.document_version_id == center.document_version_id
+        ]
         index = next((i for i, item in enumerate(family) if item.id == center.id), None)
         if index is None:
             continue
