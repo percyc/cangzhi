@@ -88,6 +88,21 @@ Worker。新上传处理暂停不影响原文件保存。部署前联合备份
 
 ## 处理和风险边界
 
+### 2026-09-19 知识增强与原文导航授权发布
+
+当前运行源码4fe5056（主线），API镜像3bb11b49d89e、Web镜像38fcba1f6977、
+优先Worker镜像95c284c3b3c2，发布标签均为navigation-release-20260919。
+schema0033增加增强运行/窗口/概览节点表，不重建文档或索引，不自动开启增强。
+优先Worker仍使用2026-09-18T08:51:50.105133+00:00及历史名单7/8/389/664/671，
+未开启adaptive-chunking；普通Worker仍停止。不要用普通make upgrade恢复旧队列。
+
+联合备份backups/cangzhi-20260918-231333已校验。发布前API/Worker/Web镜像各自保留
+rollback-before-navigation-20260919标签；旧优先容器保留为
+cangzhi-priority-worker-pre-navigation-20260919（exit0，restart=no）。
+回退时先正常停止新优先Worker，再使用旧镜像与相同维护参数；API/Web可使用各自
+回退镜像。保留0033新增派生表即可，不能自动降级删表或覆盖还原数据库/storage。
+代码回退不会清除已经生成的增强产物。此发布不变更当前切片，不影响旧引用。
+
 ### 2026-09-18 知识增强底层发布后的运行版本
 
 维护者再次授权合并/推送/部署后，运行代码为 `8bdba8e`：API 镜像 `fa04a589faa4`，
