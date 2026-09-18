@@ -88,3 +88,30 @@ def test_endpoint_requires_admin(client):
     http, _ = client
     http.app.dependency_overrides.pop(require_admin, None)
     assert http.post("/api/documents/1/chunking-preview").status_code == 401
+
+
+@pytest.mark.parametrize("kind", ["pdf", "doc", "docx", "markdown", "html", "note", "xlsx"])
+def test_preview_selects_policy_without_changing_deployed_pdf(kind):
+    from apps.api.services import chunking_candidate, chunking_adaptive
+    policy, builder = service.candidate_policy({"document_type": kind})
+    if kind == "pdf":
+        assert policy == chunking_candidate.POLICY_VERSION
+        assert builder is chunking_candidate.build_candidate
+    else:
+        assert policy == chunking_adaptive.POLICY_VERSION
+        assert builder is chunking_adaptive.build_adaptive_candidate
+
+
+def test_pdf_preview_retains_false_heading_repair_without_source_changes():
+    import copy
+    source = payload(kind="pdf")
+    for block in source["blocks"]:
+        block.update(type="heading", level=1, heading_path=[block["text"]])
+    before = copy.deepcopy(source)
+    _, builder = service.candidate_policy(source)
+    result = builder(source, provider=None)
+    assert result["candidate"]["children"] == 1
+    child = next(spec for spec in result["specs"] if spec["role"] == "child")
+    assert child["content"] == "\n\n".join(block["text"] for block in source["blocks"])
+    assert child["heading_path"] == []
+    assert source == before

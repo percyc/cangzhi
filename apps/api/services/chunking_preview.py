@@ -3,8 +3,16 @@ import asyncio
 from sqlalchemy import select
 from ..ai.provider import build_provider_from_db
 from ..models.documents import Document, DocumentVersion
-from .chunking_candidate import source_fingerprint
-from .chunking_adaptive import POLICY_VERSION, build_adaptive_candidate as build_candidate
+from .chunking_candidate import source_fingerprint, POLICY_VERSION as PDF_POLICY, build_candidate as build_pdf_candidate
+from .chunking_adaptive import POLICY_VERSION as ADAPTIVE_POLICY, build_adaptive_candidate
+
+
+def candidate_policy(payload):
+    # Keep the deployed PDF path's historical false-heading repair. Adaptive v2
+    # has not passed PDF quality comparisons and must not silently replace it.
+    if payload.get("document_type") == "pdf":
+        return PDF_POLICY, build_pdf_candidate
+    return ADAPTIVE_POLICY, build_adaptive_candidate
 
 
 class PreviewError(ValueError):
@@ -22,13 +30,14 @@ async def preview_document(db, document_id: int, *, refresh: bool = False):
     if version is None or not version.structured_content:
         raise PreviewError(409, "请先完成正文解析")
     payload = version.structured_content
+    policy_version, build_candidate = candidate_policy(payload)
     fingerprint = source_fingerprint(payload)
     provider = await build_provider_from_db(db)
     if provider is not None and hasattr(provider, "_timeout"):
         provider._timeout = min(float(provider._timeout), 10.0)
     identity = source_fingerprint({"provider": getattr(provider, "name", ""),
         "model": getattr(provider, "_model", ""), "base": getattr(provider, "_base_url", ""),
-        "prompt": getattr(provider, "prompt_version", ""), "policy": POLICY_VERSION})
+        "prompt": getattr(provider, "prompt_version", ""), "policy": policy_version})
     cached = (version.meta or {}).get("chunking_preview")
     if not refresh and isinstance(cached, dict) and cached.get("source_fingerprint") == fingerprint and cached.get("model_fingerprint") == identity:
         return {**cached, "cached": True}

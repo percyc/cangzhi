@@ -38,6 +38,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 | 主题 | 关联 ID | 状态 | 备注 |
 |---|---|---|---|
+| 可选 AI 知识增强 | `CZ-N01`–`CZ-N06` | 开发中 | Codex / OpenCode；`codex/CZ-N01-knowledge-enhancement`。保留基础摘要分类标签；ADR-024、策略/地图纯服务定向回归 116 项通过。持久化、任务、UI 与探索入口尚未接入；未部署、未启用历史处理 |
 | 跨格式结构评估与按需切片 | `CZ-N04` | 开发中 | Codex / OpenCode；`codex/CZ-N04-structure-aware-chunking`。复用结构化原文，风险窗口优先，不全库重解析；先验证候选与无模型降级，不改线上历史队列 |
 | 新上传优先的维护调度 | `CZ-Q05` | 已授权合并部署 | `27688c3` 已合并推送 main；隔离回归 850 项、发布镜像专项 40 项通过。`cangzhi-priority-worker` 按版本创建时间和 4:1 配额运行；真实新资料 1013 全部 5 阶段完成。普通 Worker 仍停止，旧队列未恢复；心跳/租约待后续 |
 | 显式维护重切 | `CZ-N04` | 开发与小批验证中 | Codex / OpenCode；`codex/CZ-N04-assisted-rebuild`。维护者接受未上线阶段旧引用变化与短暂向量空窗，授权备份后小批真实重建，效果通过才分批全库；默认入库策略不隐式切换 |
