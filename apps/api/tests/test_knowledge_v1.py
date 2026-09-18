@@ -122,6 +122,8 @@ def test_access_token_lifecycle_and_scope_enforcement(client):
         "knowledge_search",
         "knowledge_ask",
         "knowledge_get_document",
+        "knowledge_get_document_map",
+        "knowledge_get_document_block",
         "knowledge_get_chunk",
         "knowledge_list_datasets",
         "knowledge_get_dataset_schema",

@@ -32,6 +32,7 @@ from ..services.dataset_execution import (
     preview_dataset,
 )
 from ..services.evidence import EvidenceError, EvidenceService
+from ..services.source_navigation import read_document_map, read_document_block
 from ..services.enhancement_read import (
     list_document_enhancements,
     read_enhancement,
@@ -234,6 +235,24 @@ class EvidenceRowsArguments(DatasetIdArguments):
     limit: int = Field(default=20, ge=1, le=200)
 
 
+class DocumentMapArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    document_id: int = Field(ge=1)
+    view: Literal["outline", "blocks"] = "outline"
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+    limit: int = Field(default=20, ge=1, le=100)
+    document_selection: DocumentSelectionInput = None
+
+
+class DocumentBlockArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    document_id: int = Field(ge=1)
+    block_id: str = Field(min_length=1, max_length=160)
+    offset: int = Field(default=0, ge=0, le=2_000_000)
+    max_chars: int = Field(default=4000, ge=1, le=12000)
+    document_selection: DocumentSelectionInput = None
+
+
 class EnhancementListArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -264,6 +283,33 @@ class EnhancementReadArguments(BaseModel):
 
 
 TOOLS = [
+    {
+        "name": "knowledge_get_document_map",
+        "title": "分页浏览原文结构",
+        "description": (
+            "无需 AI 增强即可读取当前文档的原始结构。outline 仅列解析器识别的标题，"
+            "不是全文摘要；blocks 列出全部原文块元数据。按 next_offset 分页，"
+            "用返回的 id 调用 knowledge_get_document_block 核对原文。"
+            "structure_unavailable/structure_too_large 时使用分页文档读取或数据集工具。"
+            "只读，不调用模型。"
+        ),
+        "inputSchema": DocumentMapArguments.model_json_schema(),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "knowledge_get_document_block",
+        "title": "读取版本绑定的原文块",
+        "description": (
+            "block_id 必须来自当前文档地图的 id，不能猜测。返回原文文本及块内字符分页，"
+            "partial=true 代表不完整（尤其表格，不保证完整行）；按 next_offset 继续。"
+            "source_changed 时重新读取地图，不可沿用旧定位；表格统计使用数据集工具。"
+            "只读，无模型调用。"
+        ),
+        "inputSchema": DocumentBlockArguments.model_json_schema(),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
+    },
     {
         "name": "knowledge_get_enhancement_overview",
         "title": "读取分层概览及证据路径",
@@ -980,6 +1026,14 @@ async def _call_tool(
                     document_boundary=identity.exploration_boundary,
                 )
             )
+        if name in {"knowledge_get_document_map", "knowledge_get_document_block"}:
+            argument_type = DocumentMapArguments if name == "knowledge_get_document_map" else DocumentBlockArguments
+            args = argument_type.model_validate(arguments)
+            selection = args.document_selection.to_domain() if args.document_selection is not None else None
+            params = args.model_dump(exclude={"document_id", "document_selection"})
+            reader = read_document_map if name == "knowledge_get_document_map" else read_document_block
+            return _tool_result(await reader(db, args.document_id, **params,
+                document_selection=selection, document_boundary=identity.exploration_boundary))
         if name == "knowledge_get_enhancement_overview":
             args = EnhancementOverviewArguments.model_validate(arguments)
             return _tool_result(await read_overview(db, args.run_id, node_key=args.node_key,
@@ -1063,6 +1117,9 @@ async def mcp_post(
                     "模型自行分析时使用 knowledge_search。需要完整上下文时，再按"
                     "返回的 chunk.id 读取。完整文档必须通过 knowledge_get_document "
                     "按 content_window.next_offset 分页读取，避免大型文档挤占上下文。"
+                    "也可用 knowledge_get_document_map 浏览标题或原序块，再用 "
+                    "knowledge_get_document_block 按返回的块 ID 核对原文；无需开启增强，"
+                    "source_changed 时重新读地图。"
                     "发现表格后先用 knowledge_list_datasets 和 "
                     "knowledge_get_dataset_schema，再用 knowledge_query_dataset 做筛选聚合；"
                     "不要通过预览工具遍历整个数据集。知识增强产物（章节/实体/关系/事件）"

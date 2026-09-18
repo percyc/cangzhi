@@ -205,6 +205,18 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "enhancement":
             enhancement.add_argument("--window-index", type=int, default=0)
             enhancement.add_argument("--view", choices=["summary", "entities", "relations", "events", "evidence"], default="summary")
+    for name in ("document-map", "document-block"):
+        source = commands.add_parser(name, help="只读原文结构或原文块（不调用模型）")
+        source.add_argument("id", type=int, help="文档 ID")
+        source.add_argument("--offset", type=int, default=0)
+        source.add_argument("--scope-keys", help="逗号分隔的文档范围键")
+        source.add_argument("--document-ids", help="逗号分隔的文档 ID，与范围键取并集")
+        if name == "document-map":
+            source.add_argument("--view", choices=["outline", "blocks"], default="outline")
+            source.add_argument("--limit", type=int, default=20)
+        else:
+            source.add_argument("--block-id", required=True, help="地图返回的原文块 id")
+            source.add_argument("--max-chars", type=int, default=4000)
     return parser
 
 
@@ -215,6 +227,30 @@ def run(args: argparse.Namespace, client: CangzhiClient) -> dict[str, Any]:
         return client.request("GET", "/api/v1/knowledge/scopes")
     if args.command == "facets":
         return client.request("GET", "/api/v1/knowledge/facets")
+    if args.command in {"document-map", "document-block"}:
+        is_map = args.command == "document-map"
+        if args.id <= 0 or not 0 <= args.offset <= (1_000_000 if is_map else 2_000_000):
+            raise CLIError("文档 ID 或分页范围无效", code="invalid_arguments")
+        query = {"offset": args.offset}
+        if is_map:
+            if not 1 <= args.limit <= 100:
+                raise CLIError("limit 必须在 1..100", code="invalid_arguments")
+            query.update(view=args.view, limit=args.limit)
+        else:
+            if not 1 <= args.max_chars <= 12000 or not 1 <= len(args.block_id) <= 160:
+                raise CLIError("原文块 ID 或读取长度无效", code="invalid_arguments")
+            query.update(block_id=args.block_id, max_chars=args.max_chars)
+        keys = _comma_values(args.scope_keys)
+        ids = _comma_values(args.document_ids, integers=True)
+        selected = args.scope_keys is not None or args.document_ids is not None
+        if (selected and not keys and not ids) or any(i <= 0 for i in ids) or len(keys) > 100 or len(ids) > 200:
+            raise CLIError("文档选择无效", code="invalid_arguments")
+        if keys:
+            query["scope_keys"] = keys
+        if ids:
+            query["document_ids"] = ids
+        suffix = "map" if is_map else "block"
+        return client.request("GET", f"/api/v1/knowledge/documents/{args.id}/{suffix}?" + urlencode(query, doseq=True))
     if args.command in {"enhancements", "enhancement", "enhancement-overview"}:
         max_limit = 50 if args.command == "enhancements" else 20
         if args.id <= 0 or args.offset < 0 or not 1 <= args.limit <= max_limit:

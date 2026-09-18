@@ -61,6 +61,7 @@ from ..services.knowledge_read import (
     read_current_chunk,
     read_current_document,
 )
+from ..services.source_navigation import read_document_map, read_document_block
 from ..services.enhancement_read import (
     list_document_enhancements,
     read_enhancement,
@@ -588,6 +589,7 @@ async def capabilities(
             "rest_exploration_grants": True,
             "enhancement_read": True,
             "enhancement_overview": True,
+            "source_navigation": True,
         },
     }
 
@@ -614,6 +616,55 @@ def _enhancement_http_error(exc: KnowledgeReadError) -> HTTPException:
     return HTTPException(
         status_code=status, detail={"code": exc.code, "message": str(exc)}
     )
+
+
+def _source_navigation_error(exc: KnowledgeReadError) -> HTTPException:
+    status = {"source_changed": 409, "structure_unavailable": 409,
+              "structure_too_large": 413}.get(exc.code)
+    if status is None:
+        return _enhancement_http_error(exc)
+    return HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)})
+
+
+@router.get("/knowledge/documents/{document_id}/map", response_model=dict[str, Any])
+async def get_document_map_v1(
+    document_id: int,
+    view: Literal["outline", "blocks"] = "outline",
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+    limit: int = Query(default=20, ge=1, le=100),
+    scope_keys: list[str] | None = Query(default=None, max_length=100),
+    document_ids: list[int] | None = Query(default=None, max_length=200),
+    identity: APIIdentity = Depends(_read_identity),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    selection = _selection(DocumentSelectionPayload(scope_keys=scope_keys or [],
+        document_ids=document_ids or [])) if scope_keys is not None or document_ids is not None else None
+    try:
+        return await read_document_map(db, document_id, view=view, offset=offset, limit=limit,
+            document_selection=selection, document_boundary=identity.exploration_boundary)
+    except KnowledgeReadError as exc:
+        raise _source_navigation_error(exc) from None
+
+
+@router.get("/knowledge/documents/{document_id}/block", response_model=dict[str, Any])
+async def get_document_block_v1(
+    document_id: int,
+    block_id: str = Query(min_length=1, max_length=160),
+    offset: int = Query(default=0, ge=0, le=2_000_000),
+    max_chars: int = Query(default=4000, ge=1, le=12000),
+    scope_keys: list[str] | None = Query(default=None, max_length=100),
+    document_ids: list[int] | None = Query(default=None, max_length=200),
+    identity: APIIdentity = Depends(_read_identity),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    selection = _selection(DocumentSelectionPayload(scope_keys=scope_keys or [],
+        document_ids=document_ids or [])) if scope_keys is not None or document_ids is not None else None
+    try:
+        return await read_document_block(db, document_id, block_id=block_id, offset=offset,
+            max_chars=max_chars, document_selection=selection,
+            document_boundary=identity.exploration_boundary)
+    except KnowledgeReadError as exc:
+        raise _source_navigation_error(exc) from None
 
 
 @router.get("/knowledge/documents", response_model=dict[str, Any])

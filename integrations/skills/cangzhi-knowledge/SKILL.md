@@ -57,6 +57,16 @@ error handling are needed.
 6. Say that the knowledge base has insufficient evidence when retrieval does
    not support a claim. Do not fill gaps from Cangzhi silently.
 
+For source-first navigation, check `capabilities.features.source_navigation`.
+Use `knowledge_get_document_map(document_id, view="outline")` for parser headings
+or `view="blocks"` for all blocks in original order. Read a returned item `id`
+with `knowledge_get_document_block(document_id, block_id=...)`. Follow bounded
+`next_offset` only when needed; block offsets are character positions within that
+block, not PDF coordinates. A partial table is not a complete row set. On
+`source_changed`, reload the map; on `structure_unavailable` or `structure_too_large`,
+use existing bounded document reads or dataset queries. No enhancement is required
+and no model is called. An empty outline does not mean an empty document.
+
 For chapter or relationship exploration, check `capabilities.features.enhancement_read`.
 Use `knowledge_list_enhancements(document_id)` to discover already-built runs,
 then `knowledge_get_enhancement(run_id, window_index, view)` to read the relevant

@@ -434,6 +434,8 @@ MCP 等价工具为 `knowledge_list_enhancements`、`knowledge_get_enhancement`�
 | `knowledge_search` | search | 检索证据片段，适合外部模型自行组织回答 |
 | `knowledge_ask` | ask | 快速检索并回答，返回可核验引用；固定快速模式，不暴露 deep |
 | `knowledge_get_document` | read | 按文档 ID 分页读取正文（默认最多 12000 字符） |
+| `knowledge_get_document_map` | read | 分页读取解析器标题或全部原序块，无需开启增强 |
+| `knowledge_get_document_block` | read | 按版本绑定的块 ID 分页核对原文 |
 | `knowledge_get_chunk` | read | 按片段 ID 读取当前有效片段 |
 | `knowledge_list_datasets` | read | 列出结构化数据集 |
 | `knowledge_get_dataset_schema` | read | 读取字段类型、画像与样例 |
@@ -619,6 +621,32 @@ python -m apps.cli ask "统计各状态缺陷数量" --scope project_x
 - 定位证据：`knowledge_search` + `knowledge_get_chunk`。
 - 逐页读原文：`knowledge_get_document`，按 `content_window.next_offset` 翻页。
 - 不要用 `knowledge_preview_dataset_rows` 抓取整张表。
+
+### 7.5 原文结构探索（不依赖 AI 增强）
+
+需 `knowledge:read`，能力标志 `features.source_navigation`。
+
+| REST GET | MCP | 参数 |
+|---|---|---|
+| `/api/v1/knowledge/documents/{id}/map` | `knowledge_get_document_map` | `view=outline` 或 `blocks`，offset=0，limit=20，最多100 |
+| `/api/v1/knowledge/documents/{id}/block` | `knowledge_get_document_block` | 必填 block_id，offset=0，max_chars=4000，最多12000 |
+
+REST 可重复传 `scope_keys` / `document_ids`，MCP 传 `document_selection`；
+选择范围始终与探索凭证的服务器边界取交集，不可扩大。CLI 对应 `document-map`
+与 `document-block`，支持相同选择和分页。
+
+map 返回 `document_id/document_version_id/source_fingerprint`、`items/total/next_offset`。
+outline 仅为解析器识别的标题（title最多200字）；blocks 包括标题、正文、表格、空块和
+重复块，保留原序。使用 `items[].id` 作为 block_id，禁止猜测。原文在 `block.text`，
+`block.partial/next_offset` 明确片段是否完整；字符偏移属于当前块，不是 PDF 坐标。
+heading_path 最多16层、每层200字，截断时 `heading_path_truncated=true`。
+表格片段不保证完整行，精确筛选/统计继续使用数据集工具。
+
+错误：404 `document_not_found`（包含范围外）；409 `source_changed`（需重读地图）；
+409 `structure_unavailable`（缺结构或数据集）；413 `structure_too_large`（超限）。
+上限：结构序列化800万字符、2万块、正文200万字符；超限使用既有分页原文或数据集工具。
+当前每次读取仍计算有上限的结构指纹，不是大规模块级数据库下推。
+所有成功读取标识 `read_only=true, model_calls=0`，不会隐式解析或生成 AI 任务。
 
 ---
 

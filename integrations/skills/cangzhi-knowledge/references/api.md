@@ -94,6 +94,8 @@ Supported tools:
 - `knowledge_search`
 - `knowledge_ask`（需要 `knowledge:ask`；复用藏知问答、精确表格计算和引用）
 - `knowledge_get_document`
+- `knowledge_get_document_map`
+- `knowledge_get_document_block`
 - `knowledge_get_chunk`
 - `knowledge_list_enhancements`
 - `knowledge_get_enhancement`
@@ -114,6 +116,28 @@ execution stages only, never chain-of-thought or token-by-token model output.
 default). Follow `content_window.next_offset` only when more source text is
 actually required; never request an entire large spreadsheet merely to answer
 a filter or aggregation question.
+
+## Source navigation without enhancement
+
+Capability `source_navigation`, scope `knowledge:read`:
+
+- GET `/api/v1/knowledge/documents/{id}/map`, MCP `knowledge_get_document_map`:
+  `view=outline|blocks` (default outline), `offset=0`, `limit=20` (max100).
+  `items[].id` is a version/fingerprint-bound block ID. Headings are parser output,
+  not inferred chapters; blocks includes headings and empty/repeated source blocks.
+- GET `/api/v1/knowledge/documents/{id}/block`, MCP `knowledge_get_document_block`:
+  required `block_id`, `offset=0`, `max_chars=4000` (max12000). Exact source text is
+  in `block.text`; `block.next_offset` and `block.partial` describe character windows.
+- REST selection parameters and MCP `document_selection` intersect the grant boundary.
+  HTTP409 `source_changed` requires a new map; HTTP409 `structure_unavailable` and
+  HTTP413 `structure_too_large` require bounded document reads or dataset tools.
+  No automatic reparse, job, or model call. Heading titles/path labels may be
+  explicitly truncated; read the original block for exact title text.
+
+```bash
+python -m apps.cli document-map 42 --view blocks --limit 20
+python -m apps.cli document-block 42 --block-id '<id from map>' --max-chars 4000
+```
 
 ## Optional enhancement exploration (no extra model calls)
 

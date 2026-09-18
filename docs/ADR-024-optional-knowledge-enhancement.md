@@ -89,6 +89,22 @@ window_index，view 为 summary/entities/relations/events/evidence，默认 summ
 enhancement-overview。沿用 knowledge:read、当前源校验、选择与探索凭证交集。
 读取不生成、不补跑；没有开启该模块明确返回 not_enabled。详尽实体消歧另行验收。
 
+### 第五批原文地图读取（2026-09-18）
+
+无需启用知识增强，新增 GET `/api/v1/knowledge/documents/{id}/map` 与 `/block`；
+MCP knowledge_get_document_map / knowledge_get_document_block；CLI document-map /
+document-block。沿用 knowledge:read、当前空间/选择/临时凭证交集。map 默认view=outline，
+也可 view=blocks，offset/limit（20，最多100）；outline是解析标题序列，不补造标题。
+block 接受 map 返回的 block_id，字符 offset/max_chars（4000，最多12000），显式partial。
+所有结果固定版本及结构指纹，旧block_id返回409，不猜读新版本同位置文本。
+blocks 包含标题与全部原序块；outline 标题最长200字，路径标签最多16层/每层200字，
+显式 title_truncated / heading_path_truncated，不截断事实原文存储。
+
+本批无读取时缓存写入：先查序列化结构长度上限800万字符，再载入；最多2万块/200万
+正文字符，超限返回 structure_too_large，使用既有分页原文读取或数据集查询。当前为
+有上限的个人规模实现，每次仍计算当前结构指纹，不宣称数据库块级下推或大规模缓存。
+分页限制响应，不将超大JSON全量送入模型；不允许自动重解析/模型外发/历史任务。
+
 ### 完整功能验收
 
 开关/预算单测、版本生命周期与并发启用、原文不变、旧引用、范围隔离、失败恢复、

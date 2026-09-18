@@ -109,6 +109,12 @@ JSON 对象。
 一次读取全文：表格筛选与统计使用 `knowledge_ask`，证据定位使用
 `knowledge_search` / `knowledge_get_chunk`，确需原文时再按窗口逐页读取。
 
+不启用 AI 增强也能按原文结构探索：`knowledge_get_document_map` 的 `outline`
+视图列解析器标题，`blocks` 视图列全部原序块；再使用返回的块 ID 调用
+`knowledge_get_document_block`。这是无额外模型调用的只读路径。旧版本块 ID 失效
+时重读地图；结构缺失/超限时退回分页原文或数据集工具，不能把空目录当作无正文。
+REST 与 CLI 对等接口、分页和错误约定见 [API参考](API_REFERENCE.md#75-原文结构探索不依赖-ai-增强)。
+
 结构化数据也提供独立的发现和执行工具：
 
 - `knowledge_list_documents`：分页发现当前范围内的文档；
