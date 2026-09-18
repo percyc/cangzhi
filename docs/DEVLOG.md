@@ -661,3 +661,23 @@
 - 遵守仓库部署边界：未启动新常驻入口，普通 Worker 仍停止，未提交下一批任务，
   未更新 API/Web 服务。维护者启用指引见 RECHUNK_MAINTENANCE.md；新上传后台
   在启用前仍暂停。强制终止恢复、任务租约等 CZ-Q05 剩余项不在本次完成范围。
+
+### 2026-09-18 CZ-Q05：按本次明确授权合并并启用
+
+- 用户明确授权“合并后直接部署启用”，仅作为本次操作例外，不改变 AGENTS.md 默认
+  部署约束。`27688c3` 连同前序已验证检索修复/维护入口快进合并到 main 并推送。
+- 发布镜像 `cangzhi-worker:priority-release-20260918`（`fa53c6cc240e`）使用已有
+  基础镜像和依赖缓存构建，无代理/镜像源修改；本镜像 40 项专项通过，功能代码已有
+  850 项隔离回归通过。联合备份 `backups/cangzhi-20260918-100748` 完成并校验。
+- 启动 `cangzhi-priority-worker`，截止时间固定为旧 Worker 暂停的
+  `2026-09-18T08:51:50.105133+00:00`，历史白名单 7/8/389/664/671；设置
+  unless-stopped。普通 Worker 保持停止，未增加下一批历史重建、未重置旧失败任务。
+- 真实新上传文档 1013（版本 1014）的任务 75529–75533 从待解析推进至全部 completed：
+  stored、chunking、understanding、dataset_artifact、embedding。没有创建生产测试资料。
+- 旧版本关联的 52614 条任务在启动前后，ID/状态/开始时间/完成时间摘要均为
+  `30061a76d175b2b22c5d8fdf24f397d4`，确认未恢复旧队列；新实例持有 PostgreSQL
+  advisory lock，第二实例 --once 被拒绝（exit 2），源码 SHA-256 与主线一致。
+- API/Web 保持原镜像、readiness/health 正常，schema 仍为 0031；正式搜索 8 条条件
+  与例外均命中，MCP 适配器上下文一致。未改公共接口、迁移和前端。
+- 回退镜像 `cangzhi-worker:rollback-before-priority-20260918` 保留；停止维护入口后
+  新资料后台暂停而原文仍可保存。不得为回退而直接启动会消费全部旧任务的普通 Worker。
