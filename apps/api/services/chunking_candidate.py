@@ -6,7 +6,13 @@ import json
 from dataclasses import asdict, replace
 
 from ..parsers.base import Block, StructuredContent
-from .chunker import build_chunk_specs
+from .chunker import (
+    CHILD_HARD_MAX_CHARS,
+    CHILD_OVERLAP_CHARS,
+    CHILD_TARGET_MAX_CHARS,
+    CHILD_TARGET_MIN_CHARS,
+    build_chunk_specs,
+)
 
 POLICY_VERSION = "ai-boundaries:v1"
 MAX_CALLS = 8
@@ -72,11 +78,25 @@ def _validate_ends(result, start: int, stop: int, blocks: list[Block]) -> list[i
     return ends
 
 
-def build_candidate(payload: dict, *, provider=None, max_calls: int = MAX_CALLS) -> dict:
+def build_candidate(
+    payload: dict,
+    *,
+    provider=None,
+    max_calls: int = MAX_CALLS,
+    child_max_chars: int = CHILD_TARGET_MAX_CHARS,
+    child_hard_max_chars: int = CHILD_HARD_MAX_CHARS,
+    child_min_chars: int = CHILD_TARGET_MIN_CHARS,
+    child_overlap_chars: int = CHILD_OVERLAP_CHARS,
+) -> dict:
     """Build an in-memory candidate and diagnostics, with deterministic fallback.
 
     Full text always comes from original blocks. No calls during read-only search.
     Windows not examined by AI remain rule-based and are counted explicitly.
+
+    The four ``child_*`` kwargs propagate the detected profile's chunk sizing
+    (target, hard, min, overlap) so the candidate uses the same boundaries the
+    profile-driven chunker would. Passing them keeps candidate specs and
+    profile-driven specs on a common shape.
     """
     fingerprint = source_fingerprint(payload)
     if len(payload.get("blocks", [])) > MAX_BLOCKS:
@@ -86,7 +106,14 @@ def build_candidate(payload: dict, *, provider=None, max_calls: int = MAX_CALLS)
         blocks=[Block(**b) for b in payload.get("blocks", [])],
         metadata=dict(payload.get("metadata", {})),
     )
-    baseline = build_chunk_specs(structured, content_hash_seed=fingerprint)
+    baseline = build_chunk_specs(
+        structured,
+        content_hash_seed=fingerprint,
+        child_max_chars=child_max_chars,
+        child_hard_max_chars=child_hard_max_chars,
+        child_min_chars=child_min_chars,
+        child_overlap_chars=child_overlap_chars,
+    )
     # Historical PDF metadata may contain the old all-uppercase false headings.
     # Correct only the candidate, keeping source payload and current index intact.
     if structured.document_type == "pdf":
@@ -133,7 +160,14 @@ def build_candidate(payload: dict, *, provider=None, max_calls: int = MAX_CALLS)
             for end in ends:
                 groups.append({"start": first, "end": end, "mode": mode})
                 part = StructuredContent(document_type=structured.document_type, blocks=blocks[first:end+1], metadata=structured.metadata)
-                specs = build_chunk_specs(part, content_hash_seed=f"{fingerprint}:{POLICY_VERSION}:{first}")
+                specs = build_chunk_specs(
+                    part,
+                    content_hash_seed=f"{fingerprint}:{POLICY_VERSION}:{first}",
+                    child_max_chars=child_max_chars,
+                    child_hard_max_chars=child_hard_max_chars,
+                    child_min_chars=child_min_chars,
+                    child_overlap_chars=child_overlap_chars,
+                )
                 for spec in specs:
                     spec.source_start += offsets[first]
                     spec.source_end += offsets[first]

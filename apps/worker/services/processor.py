@@ -67,6 +67,8 @@ from apps.api.security import (
 )
 from apps.api.security.secrets import decrypt_secret
 from apps.api.services import build_chunk_specs
+from apps.api.services.chunking_candidate import POLICY_VERSION as ASSISTED_CHUNKING_POLICY
+from apps.api.services.chunking_candidate import build_candidate
 from apps.api.services.dataset_execution import (
     DatasetExecutionError,
     build_dataset_parquet,
@@ -99,6 +101,16 @@ PDF_PREVIEW_CONFIG = "pdf-v1"
 PDF_PREVIEW_MAX_BYTES = 100 * 1024 * 1024
 DATASET_ARTIFACT_VERSION = "dataset-parquet:v1"
 CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
+
+# Opt-in rechunk policy for authorized maintenance passes. Only jobs with
+# this exact ``config_version`` ever enter the assisted path; default
+# ingestion still uses ``CHUNKING_IDEMPOTENCY`` and is untouched by this
+# code path. The constant is intentionally distinct from
+# ``CHUNKING_IDEMPOTENCY`` so a job dispatched under the legacy
+# idempotency key cannot accidentally run AI calls.
+ASSISTED_CHUNKING_CONFIG = "chunking:assisted-v1"
+ASSISTED_CHUNKING_MAX_CALLS = 2
+ASSISTED_CHUNKING_TIMEOUT_SECONDS = 10.0
 
 # Each stage gets a turn; stored/parsing share two FIFO slots.
 # Model backlogs cannot monopolize the queue, nor vice versa.
@@ -851,6 +863,12 @@ def _process_chunking(
     The chunk content is derived from ``version.structured_content``
     and a SHA-256 seed so the external_id and content_hash are
     stable across runs.
+
+    Jobs dispatched with ``config_version == ASSISTED_CHUNKING_CONFIG``
+    are recognised as opt-in maintenance rechunks: PDFs take the
+    AI-assisted path and non-PDFs keep the profile-driven chunker.
+    Every other config_version falls through to the default path so
+    ordinary ingestion is unchanged.
     """
 
     structured_payload = version.structured_content or {}
@@ -954,6 +972,24 @@ def _process_chunking(
         chunking_config = get_chunking_config(profile)
         structure_anomaly = f"detection_error: {exc}"
 
+    # Step 1.5: Opt-in AI-assisted rechunk for PDFs. Non-PDF jobs with
+    # the assisted config continue on the default path; the meta below
+    # records the job config so consumers can tell the slices came
+    # from a non-default path.
+    if (
+        job.config_version == ASSISTED_CHUNKING_CONFIG
+        and structured.document_type == "pdf"
+    ):
+        return _process_chunking_assisted_pdf(
+            session,
+            job,
+            document,
+            version,
+            structured,
+            profile,
+            chunking_config,
+        )
+
     # Step 2: Build chunks with detected type's config
     try:
         specs = build_chunk_specs(
@@ -1010,8 +1046,32 @@ def _process_chunking(
     meta["structure_anomaly"] = structure_anomaly
     meta["chunk_count"] = sum(1 for spec in specs if spec.role == "child")
     meta["parent_count"] = sum(1 for spec in specs if spec.role == "parent")
-    meta["chunk_config_version"] = CHUNKING_IDEMPOTENCY
+    meta["chunk_config_version"] = (
+        ASSISTED_CHUNKING_CONFIG
+        if job.config_version == ASSISTED_CHUNKING_CONFIG
+        else CHUNKING_IDEMPOTENCY
+    )
     meta["structured_table_row_count"] = table_row_count
+    if job.config_version == ASSISTED_CHUNKING_CONFIG:
+        # Record that the assisted config reached a non-PDF document; the
+        # candidate path was skipped so accepted/failed stay at zero.
+        meta["assisted_chunking"] = {
+            "policy": ASSISTED_CHUNKING_POLICY,
+            "config_version": ASSISTED_CHUNKING_CONFIG,
+            "max_calls": ASSISTED_CHUNKING_MAX_CALLS,
+            "timeout_seconds": ASSISTED_CHUNKING_TIMEOUT_SECONDS,
+            "provider_available": None,
+            "calls": 0,
+            "accepted": 0,
+            "failed": 0,
+            "assisted_blocks": 0,
+            "total_blocks": 0,
+            "coverage": 0.0,
+            "candidate_used": False,
+            "skipped_dataset": structured.document_type
+            in {"xls", "xlsx", "database_table"},
+            "reason": "non_pdf_baseline",
+        }
     version.meta = meta
     session.add(version)
 
@@ -1040,6 +1100,216 @@ def _process_chunking(
         anomaly=structure_anomaly,
     )
     return True
+
+
+def _process_chunking_assisted_pdf(
+    session: Session,
+    job: ProcessingJob,
+    document: Document,
+    version: DocumentVersion,
+    structured: StructuredContent,
+    profile: DocumentProfile,
+    chunking_config: ChunkingConfig,
+) -> bool:
+    """Bounded AI-assisted rechunk for PDFs.
+
+    The path is opt-in: it only runs for jobs whose ``config_version`` is
+    :data:`ASSISTED_CHUNKING_CONFIG`. The default chunking pipeline never
+    reaches this helper, and a non-PDF job dispatched with the same
+    ``config_version`` continues on the profile-driven path in
+    :func:`_process_chunking`.
+
+    The candidate is built with :func:`build_candidate`
+    (``max_calls=ASSISTED_CHUNKING_MAX_CALLS``) using a provider whose
+    network timeout is bounded by :data:`ASSISTED_CHUNKING_TIMEOUT_SECONDS`.
+    The original ``version.structured_content`` is never mutated, the
+    parser output is never replaced and a failed candidate does not
+    touch the existing chunks. The job retries until
+    :data:`MAX_RETRIES` is exhausted.
+
+    On success the candidate specs replace the served chunks and a
+    bounded diagnostic is written to
+    ``version.meta['assisted_chunking']`` that contains the policy
+    version, call counts, accepted/failed windows, coverage and whether
+    the candidate actually changed the served chunks. Source text and
+    full specs are never written to the diagnostic.
+    """
+
+    provider = build_provider_from_session(session)
+    if provider is not None and hasattr(provider, "_timeout"):
+        try:
+            provider._timeout = min(
+                float(provider._timeout),
+                ASSISTED_CHUNKING_TIMEOUT_SECONDS,
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "assisted_chunking_timeout_adjust_failed",
+                document_id=document.id,
+                version_id=version.id,
+            )
+
+    try:
+        candidate = build_candidate(
+            structured.to_dict(),
+            provider=provider,
+            max_calls=ASSISTED_CHUNKING_MAX_CALLS,
+            child_max_chars=chunking_config.child_target_max_chars,
+            child_hard_max_chars=chunking_config.child_hard_max_chars,
+            child_min_chars=chunking_config.child_target_min_chars,
+            child_overlap_chars=chunking_config.child_overlap_chars,
+        )
+    except ValueError:
+        logger.warning(
+            "assisted_chunking_candidate_invalid",
+            document_id=document.id,
+            version_id=version.id,
+        )
+        return _mark_chunking_assisted_retry(
+            session,
+            job,
+            version,
+            "辅助切片候选校验失败，保留现有切片",
+            {"reason": "candidate_invalid"},
+        )
+    except Exception:
+        logger.warning(
+            "assisted_chunking_candidate_crashed",
+            document_id=document.id,
+            version_id=version.id,
+        )
+        return _mark_chunking_assisted_retry(
+            session,
+            job,
+            version,
+            "辅助切片构建失败，保留现有切片",
+            {"reason": "candidate_crashed"},
+        )
+
+    spec_dicts = candidate.get("specs") or []
+    if not spec_dicts:
+        return _mark_chunking_assisted_retry(
+            session,
+            job,
+            version,
+            "辅助切片未生成任何片段",
+            {"reason": "candidate_empty"},
+        )
+
+    try:
+        from apps.api.services.chunker import ChunkSpec
+    except ImportError:  # pragma: no cover - defensive
+        return _mark_chunking_assisted_retry(
+            session,
+            job,
+            version,
+            "ChunkSpec 不可用",
+            {"reason": "chunker_missing"},
+        )
+
+    specs = [ChunkSpec(**item) for item in spec_dicts]
+
+    _replace_version_chunks(session, document, version, specs, profile, chunking_config)
+    table_row_count = replace_version_table_rows(
+        session,
+        document_id=document.id,
+        document_version_id=version.id,
+        structured_content=structured,
+    )
+
+    total_blocks = int(candidate.get("total_blocks") or 0)
+    assisted_blocks = int(candidate.get("assisted_blocks") or 0)
+    accepted = int(candidate.get("accepted_windows") or 0)
+    failed = int(candidate.get("failed_windows") or 0)
+    calls = int(candidate.get("calls") or 0)
+    coverage = round(assisted_blocks / total_blocks, 4) if total_blocks else 0.0
+    diagnostic = {
+        "policy": ASSISTED_CHUNKING_POLICY,
+        "config_version": ASSISTED_CHUNKING_CONFIG,
+        "max_calls": ASSISTED_CHUNKING_MAX_CALLS,
+        "timeout_seconds": ASSISTED_CHUNKING_TIMEOUT_SECONDS,
+        "provider_available": provider is not None,
+        "calls": calls,
+        "accepted": accepted,
+        "failed": failed,
+        "assisted_blocks": assisted_blocks,
+        "total_blocks": total_blocks,
+        "coverage": coverage,
+        "candidate_used": True,
+        "ai_used": accepted > 0,
+        "skipped_dataset": bool(candidate.get("skipped_dataset")),
+    }
+
+    job.status = "completed"
+    job.finished_at = utc_now()
+    job.next_retry_at = None
+    job.last_error = None
+    job.error_details = None
+    if version.processing_status in ("ready", "chunking", "processing"):
+        version.processing_status = "ready"
+
+    meta = dict(version.meta or {})
+    meta["document_profile"] = profile.to_dict()
+    meta["chunking_config"] = chunking_config.to_dict()
+    meta["chunk_count"] = sum(1 for spec in specs if spec.role == "child")
+    meta["parent_count"] = sum(1 for spec in specs if spec.role == "parent")
+    meta["structured_table_row_count"] = table_row_count
+    meta["chunk_config_version"] = ASSISTED_CHUNKING_CONFIG
+    meta["assisted_chunking"] = diagnostic
+    version.meta = meta
+    session.add_all([job, version])
+
+    session.commit()
+
+    if table_row_count:
+        _enqueue_dataset_artifact_job(session, document, version)
+
+    _enqueue_embedding_jobs_for_new_chunks(session, document, version)
+    session.commit()
+
+    logger.info(
+        "assisted_chunking_completed",
+        document_id=document.id,
+        version_id=version.id,
+        candidate_used=diagnostic["candidate_used"],
+        calls=calls,
+        accepted=accepted,
+        failed=failed,
+        coverage=coverage,
+    )
+    return True
+
+
+def _mark_chunking_assisted_retry(
+    session: Session,
+    job: ProcessingJob,
+    version: DocumentVersion,
+    message: str,
+    details: dict,
+) -> bool:
+    """Mark an assisted chunking job for retry without touching existing chunks.
+
+    The job's retry counter, status and version state mirror the regular
+    chunking failure path so the scheduler treats the job identically.
+    The diagnostic and the served chunks are left untouched so a future
+    run can pick up where this one stopped.
+    """
+
+    job.retry_count += 1
+    job.finished_at = utc_now()
+    job.last_error = message
+    job.error_details = {**details, "config_version": ASSISTED_CHUNKING_CONFIG}
+    if job.retry_count >= (job.max_retries or MAX_RETRIES):
+        job.status = "failed"
+        job.next_retry_at = None
+        version.processing_status = "failed"
+    else:
+        job.status = "retry"
+        job.next_retry_at = calculate_next_retry_at(job.retry_count - 1)
+        version.processing_status = "retry"
+    session.add_all([job, version])
+    session.commit()
+    return False
 
 
 def _enqueue_dataset_artifact_job(

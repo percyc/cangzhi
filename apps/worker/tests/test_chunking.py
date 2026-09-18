@@ -1,6 +1,8 @@
 """Tests for the chunking job wired into the worker pipeline."""
 
+import json
 from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -17,6 +19,10 @@ from apps.api.parsers.base import Block, StructuredContent
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
+    ASSISTED_CHUNKING_CONFIG,
+    ASSISTED_CHUNKING_MAX_CALLS,
+    ASSISTED_CHUNKING_POLICY,
+    ASSISTED_CHUNKING_TIMEOUT_SECONDS,
     CHUNKING_STAGE,
     CHUNKING_IDEMPOTENCY,
     DATASET_CATALOG_STAGE,
@@ -28,6 +34,15 @@ from apps.worker.services.processor import (
     _release_webdav_source_blob,
     process_single_job,
 )
+
+
+def json_safe_dumps(payload):
+    """Serialise any object for substring searches without raising."""
+
+    def _default(_value):
+        return repr(_value)
+
+    return json.dumps(payload, ensure_ascii=False, default=_default)
 
 
 @pytest.fixture
@@ -608,3 +623,578 @@ class TestChunkerIntegration:
             ("编号", "identifier"),
             ("是否完成", "boolean"),
         ]
+
+
+class TestAssistedChunking:
+    """Bounded, opt-in AI-assisted rechunking for authorized maintenance passes.
+
+    The default ``CHUNKING_IDEMPOTENCY`` jobs keep their behaviour; the
+    assisted path is only entered when ``config_version`` matches
+    :data:`ASSISTED_CHUNKING_CONFIG` and the document is a PDF. Non-PDF
+    jobs dispatched with the assisted config continue on the
+    profile-driven path so the dataset catalog and the regular
+    child chunker remain untouched.
+    """
+
+    def _make_pdf_version(self, session, *, content_hash="assisted-pdf", title="辅助 PDF"):
+        structured = StructuredContent(
+            document_type="pdf",
+            blocks=[
+                Block(
+                    type="heading",
+                    text="第一章 范围",
+                    heading_path=["第一章 范围"],
+                    level=1,
+                    paragraph_index=0,
+                ),
+                Block(
+                    type="paragraph",
+                    text="本标准规定了范围条件。",
+                    heading_path=["第一章 范围"],
+                    paragraph_index=1,
+                ),
+                Block(
+                    type="paragraph",
+                    text="本标准适用于相关产品。",
+                    heading_path=["第一章 范围"],
+                    paragraph_index=2,
+                ),
+                Block(
+                    type="paragraph",
+                    text="本标准不适用于其他产品。",
+                    heading_path=["第一章 范围"],
+                    paragraph_index=3,
+                ),
+            ],
+        )
+        document = Document(title=title, source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash=content_hash,
+            structured_content=structured.to_dict(),
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        document.current_version_id = version.id
+        return document, version, structured.to_dict()
+
+    def test_default_pdf_no_model_uses_profile_chunker(
+        self, session, monkeypatch
+    ):
+        """Default ``CHUNKING_IDEMPOTENCY`` jobs never enter the candidate
+        path, even for PDFs and even when no model is configured. The
+        profile-driven chunker is the only writer of the served chunks.
+        """
+
+        provider_called = {"count": 0}
+
+        def fake_provider(_session):
+            provider_called["count"] += 1
+            return None
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor.build_provider_from_session",
+            fake_provider,
+        )
+        document, version, original_payload = self._make_pdf_version(
+            session, content_hash="default-pdf", title="默认 PDF"
+        )
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=f"{version.id}:{CHUNKING_STAGE}:{CHUNKING_IDEMPOTENCY}",
+            config_version=CHUNKING_IDEMPOTENCY,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is True
+
+        session.refresh(job)
+        session.refresh(version)
+
+        # Provider was never consulted from the regular path.
+        assert provider_called["count"] == 0
+        assert job.status == "completed"
+        # Default config marker; the assisted config key is intentionally
+        # absent so a future opt-in run can be detected.
+        assert version.meta["chunk_config_version"] == CHUNKING_IDEMPOTENCY
+        assert "assisted_chunking" not in version.meta
+        # Source structured_content untouched.
+        assert version.structured_content == original_payload
+        # Profile-driven chunks still produced.
+        chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            )
+        ).all()
+        assert any(chunk.role == "child" for chunk in chunks)
+        assert any(chunk.role == "parent" for chunk in chunks)
+
+    def test_assisted_pdf_candidate_replaces_chunks_and_preserves_structured(
+        self, session, monkeypatch
+    ):
+        """PDF job with ``ASSISTED_CHUNKING_CONFIG`` enters the candidate
+        path: a valid provider is bounded, the candidate specs replace
+        the served chunks and the stored ``structured_content`` is left
+        untouched. The diagnostic records policy, call counts, coverage
+        and the ``candidate_used`` flag.
+        """
+
+        provider = SimpleNamespace(
+            _timeout=30.0,
+            generate_json=lambda **_kwargs: {"ends": [3]},
+        )
+        monkeypatch.setattr(
+            "apps.worker.services.processor.build_provider_from_session",
+            lambda _session: provider,
+        )
+        document, version, original_payload = self._make_pdf_version(session)
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=(
+                f"{version.id}:{CHUNKING_STAGE}:{ASSISTED_CHUNKING_CONFIG}"
+            ),
+            config_version=ASSISTED_CHUNKING_CONFIG,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is True
+
+        session.refresh(job)
+        session.refresh(version)
+
+        # Source structured_content is not modified.
+        assert version.structured_content == original_payload
+        assert job.status == "completed"
+        assert version.meta["chunk_config_version"] == ASSISTED_CHUNKING_CONFIG
+        diag = version.meta["assisted_chunking"]
+        assert diag["policy"] == ASSISTED_CHUNKING_POLICY
+        assert diag["config_version"] == ASSISTED_CHUNKING_CONFIG
+        assert diag["max_calls"] == ASSISTED_CHUNKING_MAX_CALLS
+        assert diag["timeout_seconds"] == ASSISTED_CHUNKING_TIMEOUT_SECONDS
+        assert diag["provider_available"] is True
+        assert diag["calls"] >= 1
+        assert diag["accepted"] >= 1
+        assert diag["failed"] == 0
+        assert diag["assisted_blocks"] == diag["total_blocks"] == 4
+        assert diag["coverage"] == 1.0
+        assert diag["candidate_used"] is True
+        assert diag["skipped_dataset"] is False
+        # The provider timeout was bounded by the worker to a small value.
+        assert provider._timeout == ASSISTED_CHUNKING_TIMEOUT_SECONDS
+        # Candidate specs were persisted as the new served chunks.
+        chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            ).order_by(DocumentChunk.order_index)
+        ).all()
+        assert any(chunk.role == "child" for chunk in chunks)
+        # Diagnostics must not contain source text or full specs.
+        assert "specs" not in diag
+        for forbidden in ("本标准", "原文"):
+            assert forbidden not in json_safe_dumps(diag)
+
+    def test_assisted_pdf_malformed_model_falls_back_to_rules(
+        self, session, monkeypatch
+    ):
+        """A provider that returns an invalid boundary proposal causes the
+        candidate to fall back to rules. The job still completes, the
+        diagnostic shows ``failed >= 1``, ``accepted == 0`` and
+        ``candidate_used`` is False. The structured_content is preserved.
+        """
+
+        def crash(**_kwargs):
+            raise RuntimeError("credential-and-private-text")
+
+        provider = SimpleNamespace(_timeout=30.0, generate_json=crash)
+        monkeypatch.setattr(
+            "apps.worker.services.processor.build_provider_from_session",
+            lambda _session: provider,
+        )
+        document, version, original_payload = self._make_pdf_version(
+            session, content_hash="malformed", title="模型故障 PDF"
+        )
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=(
+                f"{version.id}:{CHUNKING_STAGE}:{ASSISTED_CHUNKING_CONFIG}"
+            ),
+            config_version=ASSISTED_CHUNKING_CONFIG,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is True
+
+        session.refresh(job)
+        session.refresh(version)
+
+        assert version.structured_content == original_payload
+        assert job.status == "completed"
+        diag = version.meta["assisted_chunking"]
+        assert diag["provider_available"] is True
+        assert diag["calls"] >= 1
+        assert diag["failed"] >= 1
+        assert diag["accepted"] == 0
+        assert diag["candidate_used"] is True
+        assert diag["ai_used"] is False
+        # The provider's exception message (which could carry tokens) is
+        # never persisted in the diagnostic.
+        assert "credential-and-private-text" not in json_safe_dumps(diag)
+        chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            )
+        ).all()
+        assert any(chunk.role == "child" for chunk in chunks)
+
+    def test_assisted_pdf_no_provider_falls_back_to_rules(
+        self, session, monkeypatch
+    ):
+        """When no model is configured the candidate is still built but
+        the windows remain rules-based. The diagnostic records
+        ``provider_available=False`` and ``candidate_used=False``.
+        """
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor.build_provider_from_session",
+            lambda _session: None,
+        )
+        document, version, original_payload = self._make_pdf_version(
+            session, content_hash="no-provider", title="无模型 PDF"
+        )
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=(
+                f"{version.id}:{CHUNKING_STAGE}:{ASSISTED_CHUNKING_CONFIG}"
+            ),
+            config_version=ASSISTED_CHUNKING_CONFIG,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is True
+
+        session.refresh(job)
+        session.refresh(version)
+
+        assert version.structured_content == original_payload
+        assert job.status == "completed"
+        diag = version.meta["assisted_chunking"]
+        assert diag["provider_available"] is False
+        assert diag["calls"] == 0
+        assert diag["accepted"] == 0
+        assert diag["failed"] == 0
+        assert diag["candidate_used"] is True
+        assert diag["ai_used"] is False
+        chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            )
+        ).all()
+        assert any(chunk.role == "child" for chunk in chunks)
+
+    def test_assisted_pdf_explicit_failure_preserves_existing_chunks(
+        self, session, monkeypatch
+    ):
+        """A value error from ``build_candidate`` is treated as an
+        explicit failure: the existing served chunks are not touched and
+        the job is set to ``retry`` with the assisted config in the
+        error details.
+        """
+
+        def fake_build_candidate(*_args, **_kwargs):
+            raise ValueError("too_many_blocks")
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor.build_candidate",
+            fake_build_candidate,
+        )
+        document, version, original_payload = self._make_pdf_version(
+            session, content_hash="explicit-fail", title="失败 PDF"
+        )
+        # Plant an existing served chunk set so we can verify it survives.
+        existing = DocumentChunk(
+            document_id=document.id,
+            document_version_id=version.id,
+            parent_id=None,
+            external_id="preexisting-parent",
+            search_text="既有父片段",
+            role="parent",
+            chunk_type="section",
+            content="既有父片段，不能丢失。",
+            content_hash="preexisting-parent-hash",
+            heading_path=["历史"],
+            page=1,
+            paragraph_index=0,
+            source_start=0,
+            source_end=10,
+            char_count=10,
+            token_estimate=4,
+            language="zh",
+            extra={"document_profile": {"detected_type": "general"}},
+            is_current=True,
+        )
+        session.add(existing)
+        session.flush()
+        child = DocumentChunk(
+            document_id=document.id,
+            document_version_id=version.id,
+            parent_id=existing.id,
+            external_id="preexisting-child",
+            search_text="既有子片段",
+            role="child",
+            chunk_type="paragraph",
+            content="既有子片段。",
+            content_hash="preexisting-child-hash",
+            heading_path=["历史"],
+            page=1,
+            paragraph_index=1,
+            source_start=0,
+            source_end=6,
+            char_count=6,
+            token_estimate=3,
+            language="zh",
+            extra={"document_profile": {"detected_type": "general"}},
+            is_current=True,
+        )
+        session.add(child)
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=(
+                f"{version.id}:{CHUNKING_STAGE}:{ASSISTED_CHUNKING_CONFIG}"
+            ),
+            config_version=ASSISTED_CHUNKING_CONFIG,
+            retry_count=0,
+            max_retries=3,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is False
+
+        session.refresh(job)
+        session.refresh(version)
+
+        # The structured_content is preserved.
+        assert version.structured_content == original_payload
+        # The job is queued for retry with the assisted config marker.
+        assert job.status == "retry"
+        assert job.retry_count == 1
+        assert "辅助切片" in (job.last_error or "")
+        assert job.error_details["config_version"] == ASSISTED_CHUNKING_CONFIG
+        assert job.error_details["reason"] == "candidate_invalid"
+        assert version.processing_status == "retry"
+        # The pre-existing chunks are still there, untouched.
+        surviving = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            ).order_by(DocumentChunk.external_id)
+        ).all()
+        assert {chunk.external_id for chunk in surviving} == {
+            "preexisting-child",
+            "preexisting-parent",
+        }
+
+    def test_assisted_non_pdf_uses_profile_chunker(self, session, monkeypatch):
+        """A non-PDF job dispatched with the assisted config still runs
+        the profile-driven chunker. ``build_provider_from_session`` is
+        not called, the meta reflects the assisted config, and the
+        diagnostic notes the baseline reason.
+        """
+
+        provider_called = {"count": 0}
+
+        def fake_provider(_session):
+            provider_called["count"] += 1
+            return None
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor.build_provider_from_session",
+            fake_provider,
+        )
+        structured = StructuredContent(
+            document_type="markdown",
+            blocks=[
+                Block(
+                    type="heading",
+                    text="引言",
+                    heading_path=["引言"],
+                    level=1,
+                    paragraph_index=0,
+                ),
+                Block(
+                    type="paragraph",
+                    text="一句话介绍本节。",
+                    heading_path=["引言"],
+                    paragraph_index=1,
+                ),
+            ],
+        )
+        original_payload = structured.to_dict()
+        document = Document(title="非 PDF", source_type=DocumentSourceType.note)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="non-pdf-assisted",
+            structured_content=original_payload,
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=(
+                f"{version.id}:{CHUNKING_STAGE}:{ASSISTED_CHUNKING_CONFIG}"
+            ),
+            config_version=ASSISTED_CHUNKING_CONFIG,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is True
+
+        session.refresh(job)
+        session.refresh(version)
+
+        # No model was consulted for a non-PDF job.
+        assert provider_called["count"] == 0
+        assert job.status == "completed"
+        assert version.structured_content == original_payload
+        assert version.meta["chunk_config_version"] == ASSISTED_CHUNKING_CONFIG
+        diag = version.meta["assisted_chunking"]
+        assert diag["reason"] == "non_pdf_baseline"
+        assert diag["candidate_used"] is False
+        assert diag["calls"] == 0
+        assert diag["accepted"] == 0
+        assert diag["failed"] == 0
+        assert diag["skipped_dataset"] is False
+        # Regular profile-driven chunks are produced.
+        chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            )
+        ).all()
+        assert any(chunk.role == "child" for chunk in chunks)
+
+    def test_assisted_xlsx_uses_dataset_catalog_not_row_vectors(
+        self, session, monkeypatch
+    ):
+        """XLSX jobs dispatched with the assisted config do not call the
+        AI model and do not create per-row vectors. The dataset catalog
+        spec is produced exactly as in the default path.
+        """
+
+        provider_called = {"count": 0}
+
+        def fake_provider(_session):
+            provider_called["count"] += 1
+            return None
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor.build_provider_from_session",
+            fake_provider,
+        )
+        structured = StructuredContent(
+            document_type="xlsx",
+            blocks=[
+                Block(
+                    type="table",
+                    text="行 2｜品类=水果｜金额=12\n行 3｜品类=蔬菜｜金额=9",
+                    heading_path=["明细", "数据区域 1"],
+                    paragraph_index=0,
+                    extra={
+                        "sheet_name": "明细",
+                        "region_index": 1,
+                        "row_start": 2,
+                        "row_end": 3,
+                        "column_names": ["品类", "金额"],
+                    },
+                )
+            ],
+        )
+        original_payload = structured.to_dict()
+        document = Document(title="采购表", source_type=DocumentSourceType.file)
+        session.add(document)
+        session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            version_number=1,
+            content_hash="xlsx-assisted",
+            structured_content=original_payload,
+            processing_status="ready",
+        )
+        session.add(version)
+        session.flush()
+        document.current_version_id = version.id
+        job = ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage=CHUNKING_STAGE,
+            idempotency_key=(
+                f"{version.id}:{CHUNKING_STAGE}:{ASSISTED_CHUNKING_CONFIG}"
+            ),
+            config_version=ASSISTED_CHUNKING_CONFIG,
+        )
+        session.add(job)
+        session.commit()
+
+        assert _process_chunking(session, job, document, version) is True
+
+        session.refresh(job)
+        session.refresh(version)
+
+        # The provider is never consulted for spreadsheets.
+        assert provider_called["count"] == 0
+        assert job.status == "completed"
+        assert version.structured_content == original_payload
+        assert version.meta["chunk_config_version"] == ASSISTED_CHUNKING_CONFIG
+        diag = version.meta["assisted_chunking"]
+        assert diag["reason"] == "non_pdf_baseline"
+        assert diag["skipped_dataset"] is True
+        assert diag["candidate_used"] is False
+        assert diag["calls"] == 0
+
+        chunks = session.scalars(
+            select(DocumentChunk).where(
+                DocumentChunk.document_version_id == version.id
+            ).order_by(DocumentChunk.order_index)
+        ).all()
+        # The dataset catalog spec is produced; no per-row child chunks.
+        roles = {chunk.role for chunk in chunks}
+        chunk_types = {chunk.chunk_type for chunk in chunks}
+        assert "dataset_catalog" in chunk_types
+        assert "dataset" in chunk_types
+        # No per-row vector child chunk is created; the only child is
+        # the dataset catalog one.
+        children = [chunk for chunk in chunks if chunk.role == "child"]
+        assert len(children) == 1
+        assert children[0].chunk_type == "dataset_catalog"
+        # The catalog chunk summarises the rows; raw row values are
+        # stored in ``structured_table_rows``, not in the vector child.
+        rows = session.scalars(
+            select(StructuredTableRow).where(
+                StructuredTableRow.document_version_id == version.id
+            ).order_by(StructuredTableRow.row_number)
+        ).all()
+        assert [row.row_number for row in rows] == [2, 3]
+        assert version.meta["structured_table_row_count"] == 2
