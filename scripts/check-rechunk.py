@@ -1,6 +1,6 @@
 """Opt-in read-only checks of known local fixtures; no source text in output.
 
-Use before and after maintenance. These five questions are smoke checks, not a
+Use before and after maintenance. These five (optionally seven) questions are smoke checks, not a
 full retrieval golden set. Runs installed API code against the serving index.
 """
 import argparse
@@ -8,6 +8,7 @@ import subprocess
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--strict", action="store_true")
+parser.add_argument("--include-structural", action="store_true", help="Include two local structural trial PDFs")
 args = parser.parse_args()
 program = r'''
 import asyncio, json, unicodedata
@@ -23,6 +24,13 @@ CASES = [
     (1, 7, '2026年5月8日AI智能体大赛总结会有多少个作品？', ['23', '100']),
     (1, 8, '实习计划的基础建设期要多久，阶段产出是什么？', ['1.5', '2', 'Demo']),
 ]
+if INCLUDE_STRUCTURAL:
+    CASES.extend([
+        (8, 992, '声环境质量标准的1类声环境功能区主要包括哪些区域？',
+         ['居民住宅', '医疗卫生', '文化教育', '科研设计', '行政办公']),
+        (8, 994, '国家危险废物名录中感染性、损伤性和病理性废物的代码分别是什么？',
+         ['感染性废物', '841-001-01', '损伤性废物', '841-002-01', '病理性废物', '841-003-01']),
+    ])
 normalize = lambda value: ''.join(unicodedata.normalize('NFKC', value).split()).lower()
 async def main():
     outcomes = []
@@ -42,7 +50,7 @@ async def main():
     if STRICT and not all(outcomes):
         raise SystemExit(1)
 asyncio.run(main())
-'''.replace('STRICT', repr(args.strict))
+'''.replace('STRICT', repr(args.strict)).replace('INCLUDE_STRUCTURAL', repr(args.include_structural))
 result = subprocess.run(["docker", "compose", "exec", "-T", "api", "python", "-"],
                         input=program, text=True, timeout=240)
 raise SystemExit(result.returncode)

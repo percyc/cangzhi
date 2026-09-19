@@ -185,3 +185,20 @@ PDF 的 439 份中，438 份有非空正文和结构，1 份（文档 499）为�
   原文件、raw_content、structured_content、分类和标签不被此命令修改。
 - 回滚本次数据变更需要维护者按备份恢复流程处理；只回滚镜像不能还原旧 chunk ID。
 - 命令不输出文档正文、密钥或凭证。`--backup-verified` 是操作者确认，不能替代备份校验。
+
+### 2026-09-19 structural-v3 小批部署记录
+
+维护者本轮授权合并部署。运行代码 `89fd360`，API 镜像 `0d58cfe3df92`、优先 Worker
+`21474f9ecc30`，schema0033、Web保持不变。联合备份
+`backups/cangzhi-20260919-085012` 已完成校验；代码回退镜像：
+`cangzhi-api:rollback-before-structural-20260919`、
+`cangzhi-worker:rollback-before-structural-20260919`。旧优先容器正常退出并保留为
+`cangzhi-priority-worker-pre-structural-20260919`，restart=no。
+
+实际执行仅 `--ids 7 992 994 --strategy structural-v3`，预览、apply和run分开执行，
+备份验证后处理143个任务全部成功；子片段592→140，profile6哈希匹配及2048维覆盖140/140。
+原文/结构化内容哈希、分类/标签计数、名单外52020个任务状态摘要均不变。
+普通Worker继续停止，新优先Worker使用原截止时间及7/8/389/664/671名单，不加adaptive开关。
+
+七问前后均5/7：992由未命中文档变为命中错误段落，389既有缺口不变；不扩大重建。
+本次选中资料旧chunk ID已变化。只回退镜像不会恢复旧引用和向量；不要自动覆盖恢复数据库。
