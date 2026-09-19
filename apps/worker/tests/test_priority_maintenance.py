@@ -35,6 +35,7 @@ from sqlalchemy.pool import StaticPool
 
 import apps.api.models  # noqa: F401 - register all mapped tables
 from apps.api.core.db import Base
+from apps.api.models.auth import AIRuntimeConfig
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.workspaces import Workspace
@@ -48,6 +49,10 @@ from apps.worker.priority_maintenance import (
     FOREGROUND_WEIGHT,
     HISTORY_WEIGHT,
     PDF_DOCUMENT_TYPE,
+    RESUME_STAGES,
+    _active_embedding_profile_id,
+    _claim_one_resume_job,
+    _run_resume_step,
     acquire_daemon_lock,
     is_shutdown_requested,
     parse_iso8601_utc,
@@ -57,6 +62,7 @@ from apps.worker.priority_maintenance import (
     run_priority_iteration,
 )
 from apps.worker.services.processor import CHUNKING_IDEMPOTENCY, utc_now
+from apps.api.models.auth import AIRuntimeConfig
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +171,8 @@ def _job(
     config_version=CHUNKING_IDEMPOTENCY,
     next_retry_at=None,
     created_at=None,
+    embedding_profile_id=None,
+    embedding_chunk_id=None,
 ):
     job = ProcessingJob(
         document_id=document.id,
@@ -178,6 +186,8 @@ def _job(
         retry_count=0,
         max_retries=3,
         next_retry_at=next_retry_at,
+        embedding_profile_id=embedding_profile_id,
+        embedding_chunk_id=embedding_chunk_id,
     )
     if created_at is not None:
         job.created_at = created_at
@@ -193,6 +203,82 @@ def _cutoff(delta_minutes=60):
 # ---------------------------------------------------------------------------
 # Foreground selection
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize('stage', ['parsing', 'stored', 'chunking', 'understanding', 'preview', 'dataset_catalog', 'dataset_artifact'])
+def test_resume_pipeline_opt_in_and_downstream(session, stage):
+    ws = _workspace(session)
+    doc, version = _document(session, ws, created_at=_cutoff(200))
+    job = _job(session, doc, version, stage=stage)
+    assert priority_maintenance._claim_one_resume_job(session, [], stage) is None
+    assert priority_maintenance._claim_one_resume_job(session, [doc.id + 100], stage) is None
+    assert priority_maintenance._claim_one_resume_job(session, [doc.id], stage) == job.id
+    assert job.config_version == CHUNKING_IDEMPOTENCY
+    job.status = 'completed'
+    session.commit()
+    downstream = _job(session, doc, version, stage='understanding')
+    assert priority_maintenance._claim_one_resume_job(session, [doc.id], 'understanding') == downstream.id
+
+
+@pytest.mark.parametrize('boundary', ['deleted', 'archived', 'old_version', 'failed', 'processing', 'completed', 'future_retry', 'enhancement'])
+def test_resume_boundaries(session, boundary):
+    ws = _workspace(session, status='archived' if boundary == 'archived' else 'active')
+    doc, version = _document(session, ws, is_deleted=boundary == 'deleted')
+    stage = 'knowledge_enhancement' if boundary == 'enhancement' else 'parsing'
+    status = boundary if boundary in {'failed', 'processing', 'completed'} else 'created'
+    job = _job(session, doc, version, stage=stage, status=status,
+               next_retry_at=utc_now()+datetime.timedelta(hours=1) if boundary == 'future_retry' else None)
+    if boundary == 'old_version':
+        _second_version(session, doc)
+        session.commit()
+    assert priority_maintenance._claim_one_resume_job(session, [doc.id], stage) is None
+    session.refresh(job)
+    assert job.status == status
+
+
+def test_resume_active_profile_only_and_due_retry(session):
+    ws = _workspace(session)
+    doc, version = _document(session, ws)
+    old = _job(session, doc, version, stage='embedding')
+    old.embedding_profile_id = 4
+    current = _job(session, doc, version, stage='embedding', status='retry')
+    current.embedding_profile_id = 6
+    session.commit()
+    assert priority_maintenance._claim_one_resume_job(session, [doc.id], 'embedding') is None
+    session.add(AIRuntimeConfig(singleton_key='singleton', provider='disabled', active_embedding_profile_id=6))
+    session.commit()
+    assert priority_maintenance._claim_one_resume_job(session, [doc.id], 'embedding') == current.id
+    session.refresh(old)
+    assert old.status == 'created'
+
+
+def test_resume_stage_rotation(session, monkeypatch):
+    ws = _workspace(session)
+    doc, version = _document(session, ws)
+    first = _job(session, doc, version, stage='parsing')
+    _job(session, doc, version, stage='parsing')
+    second = _job(session, doc, version, stage='chunking')
+    calls = []
+    monkeypatch.setattr(priority_maintenance, '_dispatch', lambda s, job_id, **kw: calls.append(job_id))
+    state = {}
+    assert priority_maintenance._run_resume_step(session, state, [doc.id])
+    assert priority_maintenance._run_resume_step(session, state, [doc.id])
+    assert calls == [first.id, second.id]
+
+
+def test_resume_preserves_foreground_weight_and_history_fairness(session, monkeypatch):
+    reset_shutdown_flag()
+    calls = []
+    def mark(name):
+        calls.append(name)
+        return True
+    monkeypatch.setattr(priority_maintenance, '_run_foreground_step', lambda *args: mark('new'))
+    monkeypatch.setattr(priority_maintenance, '_run_resume_step', lambda *args: mark('resume'))
+    monkeypatch.setattr(priority_maintenance, '_run_history_step', lambda *args: mark('assisted'))
+    state = {'fg_cursor': 0, 'resume_ids': [1]}
+    for _ in range(2):
+        assert run_priority_iteration(session, cutoff=_cutoff(), history_ids=[2], state=state) == 5
+    assert calls == ['new'] * 4 + ['resume'] + ['new'] * 4 + ['assisted']
 
 
 class TestForegroundCutoff:

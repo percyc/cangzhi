@@ -19,23 +19,38 @@ chunking job to ``ASSISTED_CHUNKING_CONFIG`` so the shared chunker
 takes the assisted path; the ``idempotency_key`` is preserved. Oversized
 PDFs retain profile rules and record a fallback diagnostic in version metadata.
 
-Two selection profiles are honoured:
+Three selection profiles are honoured:
 
 * Foreground — current version, ``version.created_at >= cutoff``,
   stages listed in :data:`FOREGROUND_STAGES`. Old version jobs are
   excluded even when they are newly created retries, by joining the
   job's ``document_version_id`` to the document's current version.
-* Background — only jobs belonging to documents named by ``--history-ids``,
-  restricted to chunking jobs whose ``config_version`` is
-  ``ASSISTED_CHUNKING_CONFIG`` or embedding jobs whose version
-  stamped ``chunk_config_version`` is the same constant. No other
-  legacy jobs ever run on this scheduler.
+* Background (assisted) — only jobs belonging to documents named by
+  ``--history-ids``, restricted to chunking jobs whose
+  ``config_version`` is ``ASSISTED_CHUNKING_CONFIG`` or embedding jobs
+  whose version stamped ``chunk_config_version`` is the same constant.
+  No other legacy jobs ever run on this scheduler.
+* Background (resume) — only jobs belonging to documents named by
+  the opt-in ``--resume-history-ids`` allow-list. The allow-list is
+  explicit positive document IDs; the default is empty so the
+  resume pool is dormant unless the operator opts in. The pool is
+  restricted to current, non-deleted documents in active workspaces
+  and to due ``created``/``retry`` tasks, with stages
+  parsing/stored/chunking/understanding/preview/
+  dataset_catalog/dataset_artifact/embedding (``knowledge_enhancement``
+  is never resumed on this path). Embedding jobs additionally require
+  ``embedding_profile_id`` to match the current active profile as
+  recorded by ``AIRuntimeConfig.active_embedding_profile_id``. The
+  resume pool never resets ``failed`` or ``processing`` jobs and
+  never mutates source payloads. The pool round-robins through its
+  eight stages so a vector backlog cannot starve parsing.
 
 A weighted schedule (4 foreground, 1 history) keeps both pipelines
 moving whenever both are non-empty; one pool draining lets the other
-take over. The foreground itself round-robins through the stage
-cycle, starting at parsing so endless uploads cannot starve
-chunking and embedding.
+take over. The single history slot alternates resume and assisted
+work when both pools are present, falling back when one is empty. The foreground
+itself round-robins through the stage cycle, starting at parsing so
+endless uploads cannot starve chunking and embedding.
 
 At most one daemon is allowed at a time: the CLI takes a
 session-level advisory lock on a dedicated connection and exits
@@ -68,6 +83,7 @@ from sqlalchemy import and_, create_engine, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from apps.api.models.auth import AIRuntimeConfig
 from apps.api.models.documents import Document, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.workspaces import Workspace
@@ -98,6 +114,23 @@ FOREGROUND_STAGES: tuple[str, ...] = (
     EMBEDDING_STAGE,
     "stored",
     "knowledge_enhancement",
+)
+
+# Background resume pool runs the same eight production stages as the
+# foreground cycle, but never the optional ``knowledge_enhancement``
+# extension. The cycle order keeps parsing first so a vector backlog
+# cannot starve parsing work, then rotates through chunking,
+# dataset_catalog, dataset_artifact, preview, understanding, embedding
+# and the legacy ``stored`` alias.
+RESUME_STAGES: tuple[str, ...] = (
+    "parsing",
+    CHUNKING_STAGE,
+    "dataset_catalog",
+    "dataset_artifact",
+    "preview",
+    "understanding",
+    EMBEDDING_STAGE,
+    "stored",
 )
 
 FOREGROUND_WEIGHT = 4
@@ -321,6 +354,88 @@ def _claim_one_background_job(
     return job.id
 
 
+def _active_embedding_profile_id(session: Session) -> int | None:
+    """Return the currently active embedding profile ID, or ``None``.
+
+    The resume pool only runs embedding work for the active profile
+    so a build in progress or a freshly retired profile cannot pick
+    up new resume candidates. A missing or empty ``AIRuntimeConfig``
+    row disables the embedding slot of the resume pool but does not
+    raise: parsing, chunking and the other stages keep draining.
+    """
+
+    row = session.scalar(select(AIRuntimeConfig.active_embedding_profile_id).limit(1))
+    if row is None:
+        return None
+    return int(row)
+
+
+def _claim_one_resume_job(
+    session: Session,
+    resume_ids: Sequence[int],
+    stage: str,
+) -> int | None:
+    """Claim exactly one resume-pool job; commit before invoking the worker.
+
+    The pool never resets ``failed`` or ``processing`` jobs and never
+    mutates the source payload or the job's ``config_version``:
+    everything is funneled through the shared processor and the same
+    ``FOR UPDATE SKIP LOCKED`` discipline used elsewhere.
+    """
+
+    clear_workspace_context(session)
+    if not resume_ids or stage not in RESUME_STAGES:
+        return None
+    now = utc_now()
+    active_profile_id = _active_embedding_profile_id(session) if stage == EMBEDDING_STAGE else None
+    if stage == EMBEDDING_STAGE and active_profile_id is None:
+        # No active profile means retrieval has no vector space to
+        # read from; resume embedding would be a no-op for the
+        # operator and could leave the chunk stranded in
+        # ``processing`` if a crash happened mid-call. Skip the slot
+        # for this iteration; the other seven stages keep draining.
+        return None
+    conditions = [
+        Document.id.in_(tuple(resume_ids)),
+        Document.is_deleted.is_(False),
+        Workspace.status == "active",
+        Document.current_version_id == DocumentVersion.id,
+        DocumentVersion.document_id == Document.id,
+        ProcessingJob.status.in_(("created", "retry")),
+        _due_filter(now),
+    ]
+    if stage in ("parsing", "stored"):
+        conditions.append(ProcessingJob.stage.in_(("parsing", "stored")))
+    else:
+        conditions.append(ProcessingJob.stage == stage)
+    if stage == EMBEDDING_STAGE:
+        conditions.append(
+            ProcessingJob.embedding_profile_id == active_profile_id
+        )
+    job = session.scalar(
+        select(ProcessingJob)
+        .join(Document, Document.id == ProcessingJob.document_id)
+        .join(
+            DocumentVersion,
+            DocumentVersion.id == ProcessingJob.document_version_id,
+        )
+        .join(Workspace, Workspace.id == Document.workspace_id)
+        .where(*conditions)
+        .order_by(ProcessingJob.id)
+        .with_for_update(of=ProcessingJob, skip_locked=True)
+        .limit(1)
+    )
+    if job is None:
+        session.rollback()
+        return None
+    job.status = "processing"
+    job.started_at = now
+    job.finished_at = None
+    session.add(job)
+    session.commit()
+    return job.id
+
+
 def _dispatch(session: Session, job_id: int, *, pool: str) -> bool:
     try:
         outcome = process_single_job(session, job_id)
@@ -385,6 +500,31 @@ def _run_history_step(
     return True
 
 
+def _run_resume_step(
+    session: Session,
+    state: dict,
+    resume_ids: Sequence[int],
+) -> bool:
+    """Try to claim one resume-pool job; advance the round-robin cursor.
+
+    The cursor is held in ``state["resume_cursor"]`` so a long-lived
+    serve loop rotates through the eight production stages and a
+    vector backlog cannot starve parsing.
+    """
+
+    if not resume_ids:
+        return False
+    for _ in RESUME_STAGES:
+        cursor = state.get("resume_cursor", 0)
+        stage = RESUME_STAGES[cursor % len(RESUME_STAGES)]
+        state["resume_cursor"] = (cursor + 1) % len(RESUME_STAGES)
+        job_id = _claim_one_resume_job(session, resume_ids, stage=stage)
+        if job_id is not None:
+            _dispatch(session, job_id, pool="resume")
+            return True
+    return False
+
+
 def run_priority_iteration(
     session: Session,
     *,
@@ -394,17 +534,31 @@ def run_priority_iteration(
 ) -> int:
     """One weighted cycle: up to 4 foreground claims, then 1 history claim.
 
+    The history slot alternates the opt-in resume pool
+    (``state["resume_ids"]``) and the assisted
+    pool (``history_ids``), so an empty resume allow-list keeps the
+    original assisted-only behaviour. ``resume_ids`` is carried in
+    the ``state`` dict so the public signature stays stable for
+    tests that monkeypatch this function directly.
+
     Returns the number of jobs processed in this iteration. The cycle
     falls back to the other pool when the preferred one is empty so a
     one-sided backlog keeps moving instead of idling.
     """
     history_ids = list(history_ids or [])
+    resume_ids = list(state.get("resume_ids") or [])
     processed = 0
     for slot in range(FOREGROUND_WEIGHT + HISTORY_WEIGHT):
         if is_shutdown_requested():
             break
         foreground = lambda: _run_foreground_step(session, cutoff, state)
-        history = lambda: _run_history_step(session, history_ids)
+        def history():
+            resume = lambda: _run_resume_step(session, state, resume_ids)
+            assisted = lambda: _run_history_step(session, history_ids)
+            prefer_resume = not state.get("history_prefer_assisted", False)
+            state["history_prefer_assisted"] = prefer_resume
+            first, second = (resume, assisted) if prefer_resume else (assisted, resume)
+            return first() or second()
         preferred, fallback = (foreground, history) if slot < FOREGROUND_WEIGHT else (history, foreground)
         if preferred() or fallback():
             processed += 1
@@ -462,11 +616,15 @@ def run_priority_daemon(
     install_signal_handlers: bool = True,
     lock_connection: Connection | None = None,
     adaptive: bool = False,
+    resume_ids: Sequence[int] | None = None,
 ) -> int:
     """Main loop: claim a job, hand it to the worker, repeat until shutdown.
 
     ``install_signal_handlers`` is exposed so tests can drive the loop
-    without fighting the real signal infrastructure.
+    without fighting the real signal infrastructure. ``resume_ids`` is
+    the opt-in allow-list for the new background resume pool; it
+    defaults to ``None`` so the pool stays dormant unless the
+    operator passes it via the CLI (``--resume-history-ids``).
     """
     if install_signal_handlers:
         try:
@@ -477,7 +635,13 @@ def run_priority_daemon(
             # thread; secondary callers should use the flag directly.
             pass
     Session = sessionmaker(bind=engine)
-    state = {"fg_cursor": 0, "fg_weight": 0, "adaptive": adaptive}
+    state = {
+        "fg_cursor": 0,
+        "fg_weight": 0,
+        "adaptive": adaptive,
+        "resume_ids": list(resume_ids or []),
+        "resume_cursor": 0,
+    }
     processed = 0
     with Session() as session:
         while not is_shutdown_requested():
@@ -525,8 +689,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=_positive_int,
         default=[],
         help="Optional positive document IDs the maintenance scheduler "
-        "is allowed to drain in the background. Without this argument "
-        "the background pool is empty and only foreground work runs.",
+        "is allowed to drain in the assisted history pool (chunking "
+        "with the new config and embedding whose version stamped "
+        "chunk_config_version is the same constant). Without this "
+        "argument the assisted background pool is empty.",
+    )
+    parser.add_argument(
+        "--resume-history-ids",
+        nargs="*",
+        type=_positive_int,
+        default=[],
+        help="Optional positive document IDs the maintenance scheduler "
+        "is allowed to drain in the opt-in resume pool. The resume "
+        "pool is dormant by default; the allow-list is a separate "
+        "set of document IDs from --history-ids. Only current, "
+        "non-deleted documents in active workspaces are eligible, "
+        "only due created/retry tasks run, and only the production "
+        "stages (parsing/stored/chunking/understanding/preview/"
+        "dataset_catalog/dataset_artifact/embedding) are claimed; "
+        "knowledge_enhancement never resumes on this path. Embedding "
+        "tasks additionally require the active embedding profile. "
+        "Failed and processing jobs are never reset and source "
+        "payloads are never mutated.",
     )
     parser.add_argument(
         "--once",
@@ -563,6 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             poll_interval=args.poll_interval,
             lock_connection=connection,
             adaptive=args.adaptive_chunking,
+            resume_ids=args.resume_history_ids,
         )
     finally:
         release_daemon_lock(connection)
