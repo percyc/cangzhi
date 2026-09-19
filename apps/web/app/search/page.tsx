@@ -52,6 +52,13 @@ type SearchHit = {
   };
   categories: { id: number; slug: string; name: string }[];
   tags: { id: number; slug: string; name: string }[];
+  supporting_evidence?: {
+    document_id: number;
+    document_version_id: number;
+    chunk: SearchHit['chunk'];
+    snippet: string;
+    context: string | null;
+  }[];
 };
 
 type SearchResponse = {
@@ -454,6 +461,23 @@ function Results({ payload }: { payload: SearchResponse }) {
             <ResultHeader hit={hit} />
             <ResultSnippet hit={hit} />
             <ResultMeta hit={hit} />
+            {hit.supporting_evidence?.slice(0, 1).map((evidence) => (
+              <details key={evidence.chunk.id} className="mt-3 border-t border-slate-100 pt-3">
+                <summary className="cursor-pointer text-sm font-medium text-slate-700">
+                  同文档的补充证据
+                  {evidence.chunk.page ? ` · 第 ${evidence.chunk.page} 页` : ''}
+                </summary>
+                <p className="mt-2 text-xs text-slate-500">
+                  独立原文片段，与上方预览不一定连续。
+                </p>
+                <p className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
+                  {evidence.context || evidence.snippet}
+                </p>
+                <Link href={`/documents/${evidence.document_id}?chunk_id=${evidence.chunk.id}${evidence.chunk.page ? `&page=${evidence.chunk.page}` : ''}`} className="mt-2 inline-block text-sm text-slate-700 underline">
+                  查看来源文档
+                </Link>
+              </details>
+            ))}
           </li>
         ))}
       </ol>

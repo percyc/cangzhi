@@ -13,8 +13,9 @@ The search is intentionally narrow for the M3 first cut:
   source span. A short highlight snippet is included so the UI can
   render the hit without a second round-trip.
 
-Embedding, vector recall, RRF fusion and Reranker are explicitly
-out of scope here (see ``docs/ROADMAP.md`` M3 later items).
+Document-level RRF preserves discovery ranking and the primary anchor. Bounded
+lexical/vector candidates may supply one separately located supporting anchor;
+no model reranking or extra embeddings are needed for this selection step.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from ..models.taxonomy import (
     Tag,
 )
 from .scope_keys import DocumentSelection
+from .evidence_selection import choose_evidence_row
 
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
@@ -106,6 +108,22 @@ class SearchHit:
     tags: list[dict]
     context: str | None = None
     retrieval_channels: list[str] = field(default_factory=list)
+    supporting_hits: list[SearchHit] = field(default_factory=list, repr=False)
+
+    def evidence_dict(self) -> dict:
+        """Source identity without taxonomy, scores or recursive supplements."""
+        return {
+            "document_id": self.document_id,
+            "document_version_id": self.document_version_id,
+            "chunk": {
+                "id": self.chunk_id, "parent_id": self.parent_id,
+                "type": self.chunk_type, "heading_path": list(self.heading_path),
+                "page": self.page, "paragraph_index": self.paragraph_index,
+                "source_start": self.source_start, "source_end": self.source_end,
+                "table_location": dict(self.table_location),
+            },
+            "snippet": self.snippet, "context": self.context,
+        }
 
     def to_dict(self) -> dict:
         return {
@@ -137,6 +155,7 @@ class SearchHit:
             "highlights": self.highlights,
             "categories": self.categories,
             "tags": self.tags,
+            "supporting_evidence": [hit.evidence_dict() for hit in self.supporting_hits],
         }
 
 
@@ -150,6 +169,8 @@ class SearchResult:
     offset: int
     filters: dict
     retrieval: dict | None = None
+    # Request-local authorized rows only; deliberately absent from to_dict().
+    candidate_rows: dict[int, list[Any]] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict:
         public_filters = dict(self.filters)
@@ -399,7 +420,9 @@ async def search_documents(
         ]
         for hit in lexical.hits:
             hit.retrieval_channels = ["lexical"]
+        await _select_document_evidence(db, lexical, query=query, vector_rows=[])
         await _attach_neighbor_context(db, lexical.hits)
+        _prune_redundant_support(lexical.hits)
         return lexical
 
     lexical_document_ids = [hit.document_id for hit in lexical.hits]
@@ -436,8 +459,58 @@ async def search_documents(
     lexical.limit = requested_limit
     lexical.offset = requested_offset
     lexical.hits = best_documents[requested_offset : requested_offset + requested_limit]
+    await _select_document_evidence(db, lexical, query=query, vector_rows=vector_rows)
     await _attach_neighbor_context(db, lexical.hits)
+    _prune_redundant_support(lexical.hits)
     return lexical
+
+
+def _retain_document_candidates(rows, document_ids):
+    """Keep at most eight already-filtered rows per recalled document."""
+    retained = {identifier: [] for identifier in document_ids}
+    for row in rows:
+        bucket = retained.get(row.document_id)
+        if bucket is not None and len(bucket) < 8:
+            bucket.append(row)
+    return retained
+
+
+async def _select_document_evidence(db, result, *, query, vector_rows):
+    """Add at most one support anchor; never replace primary source evidence."""
+    semantic = _retain_document_candidates(vector_rows, [h.document_id for h in result.hits])
+    chosen = []
+    for hit in result.hits:
+        lexical = result.candidate_rows.get(hit.document_id, [])
+        # Dataset/catalog hits keep their existing precise-query navigation.
+        if hit.table_location:
+            continue
+        row = choose_evidence_row(query, hit.title, lexical, semantic.get(hit.document_id, []))
+        if (row is not None and row.chunk_id != hit.chunk_id
+                and row.document_id == hit.document_id
+                and row.document_version_id == hit.document_version_id
+                and not table_location_from_extra(row.chunk_extra)):
+            chosen.append(row)
+    support = await _build_hits(db, chosen, normalize_query(query)) if chosen else []
+    await _attach_neighbor_context(db, support)
+    by_document = {hit.document_id: hit for hit in support}
+    for hit in result.hits:
+        extra = by_document.get(hit.document_id)
+        if extra is not None:
+            hit.supporting_hits = [extra]
+
+
+def _prune_redundant_support(hits):
+    for hit in hits:
+        primary = hit.context or hit.snippet or ""
+        hit.supporting_hits = [extra for extra in hit.supporting_hits
+            if (extra.context or extra.snippet or "") not in primary]
+
+
+def iter_search_evidence(hits):
+    """Main hits first, then bounded separately addressable support hits."""
+    yield from hits
+    for hit in hits:
+        yield from hit.supporting_hits[:1]
 
 
 async def _attach_neighbor_context(
@@ -822,6 +895,7 @@ async def _search_postgres(
         limit=limit,
         offset=offset,
         filters=filters,
+        candidate_rows=_retain_document_candidates(matching_rows, [row.document_id for row in rows]),
     )
 
 
@@ -910,6 +984,7 @@ async def _search_like(
         limit=limit,
         offset=offset,
         filters=filters,
+        candidate_rows=_retain_document_candidates(matching_rows, [row.document_id for row in rows]),
     )
 
 

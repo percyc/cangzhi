@@ -373,7 +373,9 @@ TOOLS = [
         "title": "检索藏知",
         "description": (
             "从藏知检索相关证据片段；适合由外部模型自行组织回答。hits[].context "
-            "是包含相邻片段的完整证据窗口，snippet 仅用于命中预览；"
+            "是包含相邻片段的有界原文窗口，snippet 仅用于命中预览；"
+            "supporting_evidence 至多提供一条同文档同版本的补充证据，"
+            "请同时查看其 context，并使用其独立 chunk.id 继续读取或引用；"
             "retrieval_channels 同时包含 lexical 和 vector 时表示两个检索通道共同支持。"
             "document_selection 将多个 scope key 与明确文档 ID 合并为一次候选集合。"
             "标准请求应传对象；若 Dify 将嵌套参数序列化为 JSON 字符串，服务端也兼容解析。"

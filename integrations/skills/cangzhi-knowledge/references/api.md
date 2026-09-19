@@ -175,3 +175,11 @@ Follow `n:` references using the child's `node_key`; follow `w:` references with
 Pending/failed nodes have no completed result. Current source/version and scope
 checks match window reads. Node `entity_candidates` preserve window/local IDs;
 the list is capped at20 with total/truncated and is explicitly unresolved.
+
+Search responses may include `hits[].supporting_evidence` (at most one item).
+Read its `context` as well as the primary hit; preserve its own `document_id`,
+`document_version_id`, and `chunk.id` when reading or citing it. These are
+separately located source windows, not contiguous text. Each context is capped
+at1800 characters; no extra model call is made to return this evidence. The
+primary search hit and document ranking remain unchanged. Older servers may
+omit the field. An empty array does not prove there are no other relevant chunks.

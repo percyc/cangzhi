@@ -74,6 +74,7 @@ from .qa import (
 from .scope_keys import DocumentSelection
 from .search import (
     SearchHit,
+    iter_search_evidence,
     search_documents,
     table_location_from_extra,
 )
@@ -966,7 +967,8 @@ class DeepAnalysisService:
             allowed_dataset_documents.update(
                 item.document_id for item in candidates
             )
-            allowed_chunk_ids.update(item.chunk_id for item in candidates)
+            evidence_candidates = list(iter_search_evidence(candidates[:MAX_SEARCH_HITS_IN_OBSERVATION]))
+            allowed_chunk_ids.update(item.chunk_id for item in evidence_candidates)
             output = {
                 "query": query,
                 "planner_query": planner_query if planner_query != query else None,
@@ -981,13 +983,14 @@ class DeepAnalysisService:
                         "table_location": item.table_location,
                         "snippet": item.snippet,
                         "context": item.context,
+                        "supporting_evidence": [extra.evidence_dict() for extra in item.supporting_hits[:1]],
                     }
                     for item in candidates[:MAX_SEARCH_HITS_IN_OBSERVATION]
                 ],
             }
             evidence = [
                 _candidate_to_evidence(item)
-                for item in candidates[:MAX_SEARCH_HITS_IN_OBSERVATION]
+                for item in evidence_candidates
             ]
             return (
                 {

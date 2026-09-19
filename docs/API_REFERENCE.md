@@ -197,6 +197,13 @@ curl -H "Authorization: Bearer $TOKEN" \
 `document_version_id`、`title`、`source_type`、`score`、`chunk`、
 `snippet`、`highlights`、`categories`、`tags`）、`scope`、`retrieval`。
 
+搜索结果还可包含 `hits[].supporting_evidence`（最多1项），补充同文档同版本的另一处
+证据。每项含 `document_id`、`document_version_id`、独立 `chunk` 定位、`snippet` 与
+`context`。主证据不被替换；两处context各最多1800字符，不能视为连续原文。
+外部AI应同时核对主证据与补充证据，需要全文时按各自 `chunk.id` 读取、分别引用。
+空数组表示没有提供补充，不代表文档只有一个相关段落。无需额外模型调用或配置。
+该字段的运行版本以 PROJECT_STATUS 为准，旧服务可能不返回。
+
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"query":"服务可用性预算","limit":10}' \
