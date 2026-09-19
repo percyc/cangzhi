@@ -20,7 +20,29 @@ from apps.api.models.processing import ProcessingJob
 from apps.api.models.workspaces import Workspace
 from apps.api.parsers.base import StructuredContent
 from apps.worker.rechunk import enqueue_batch, run_selected
-from apps.worker.services.processor import ASSISTED_CHUNKING_CONFIG
+from apps.worker.services.processor import ASSISTED_CHUNKING_CONFIG, STRUCTURAL_CHUNKING_CONFIG
+
+
+def test_structural_policy_is_explicit_and_idempotent(session):
+    workspace = _make_workspace(session)
+    document, version = _make_document(session, workspace)
+    _make_job(session, version, status="completed")
+    preview = enqueue_batch(session, document_ids=[document.id], policy=STRUCTURAL_CHUNKING_CONFIG)
+    assert preview["count"] == 1 and not preview["applied"]
+    result = enqueue_batch(session, document_ids=[document.id], apply=True,
+                           policy=STRUCTURAL_CHUNKING_CONFIG)
+    session.flush()
+    assert result["policy"] == STRUCTURAL_CHUNKING_CONFIG
+    assert enqueue_batch(session, policy=STRUCTURAL_CHUNKING_CONFIG)["count"] == 0
+    assert session.scalar(select(ProcessingJob).where(
+        ProcessingJob.config_version == STRUCTURAL_CHUNKING_CONFIG)) is not None
+
+
+def test_unknown_policy_is_rejected(session):
+    with pytest.raises(ValueError, match="unsupported"):
+        enqueue_batch(session, policy="untrusted")
+    with pytest.raises(ValueError, match="unsupported"):
+        run_selected(session, [1], policy="untrusted")
 
 
 @pytest.fixture

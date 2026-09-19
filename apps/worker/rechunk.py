@@ -16,10 +16,22 @@ from apps.api.models.documents import Document, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.workspaces import Workspace
 from apps.api.services.workspaces import clear_workspace_context
-from apps.worker.services.processor import ASSISTED_CHUNKING_CONFIG, process_single_job, utc_now
+from apps.worker.services.processor import (
+    ASSISTED_CHUNKING_CONFIG, STRUCTURAL_CHUNKING_CONFIG, process_single_job, utc_now,
+)
+
+POLICIES = {"assisted-v1": ASSISTED_CHUNKING_CONFIG,
+            "structural-v3": STRUCTURAL_CHUNKING_CONFIG}
 
 
-def enqueue_batch(session: Session, *, document_ids=None, limit=10, apply=False):
+def _validate_policy(policy):
+    if policy not in POLICIES.values():
+        raise ValueError("unsupported maintenance policy")
+
+
+def enqueue_batch(session: Session, *, document_ids=None, limit=10, apply=False,
+                  policy=ASSISTED_CHUNKING_CONFIG):
+    _validate_policy(policy)
     if not 1 <= limit <= 20:
         raise ValueError("batch limit must be between 1 and 20")
     if apply and session.bind.dialect.name == "postgresql":
@@ -36,7 +48,7 @@ def enqueue_batch(session: Session, *, document_ids=None, limit=10, apply=False)
     already = exists(select(ProcessingJob.id).where(
         ProcessingJob.document_version_id == DocumentVersion.id,
         ProcessingJob.stage == "chunking",
-        ProcessingJob.config_version == ASSISTED_CHUNKING_CONFIG,
+        ProcessingJob.config_version == policy,
     ))
     statement = (
         select(Document.id, DocumentVersion.id.label("version_id"), file_type.label("file_type"))
@@ -61,21 +73,23 @@ def enqueue_batch(session: Session, *, document_ids=None, limit=10, apply=False)
             session.add(ProcessingJob(
                 document_id=row.id, document_version_id=row.version_id,
                 stage="chunking", status="created", retry_count=0, max_retries=3,
-                config_version=ASSISTED_CHUNKING_CONFIG,
-                idempotency_key=f"{row.version_id}:chunking:{ASSISTED_CHUNKING_CONFIG}",
+                config_version=policy,
+                idempotency_key=f"{row.version_id}:chunking:{policy}",
             ))
         results.append({"document_id": row.id, "version_id": row.version_id,
                         "file_type": row.file_type})
     return {"applied": apply, "selected": results, "count": len(results),
-            "policy": ASSISTED_CHUNKING_CONFIG}
+            "policy": policy}
 
 
-def run_selected(session: Session, document_ids: list[int], *, max_jobs=100):
+def run_selected(session: Session, document_ids: list[int], *, max_jobs=100,
+                 policy=ASSISTED_CHUNKING_CONFIG):
     """Run only explicit maintenance chunks and their new embeddings.
 
     Used while the normal Worker is stopped; never consumes the old parse queue.
     Claims one row at a time so an interrupted command leaves no preclaimed batch.
     """
+    _validate_policy(policy)
     if not document_ids or any(type(i) is not int or i <= 0 for i in document_ids):
         raise ValueError("positive document IDs required")
     if not 1 <= max_jobs <= 1000:
@@ -94,9 +108,9 @@ def run_selected(session: Session, document_ids: list[int], *, max_jobs=100):
                    ProcessingJob.status.in_(("created", "retry")),
                    or_(ProcessingJob.next_retry_at.is_(None), ProcessingJob.next_retry_at <= now),
                    or_(and_(ProcessingJob.stage == "chunking",
-                            ProcessingJob.config_version == ASSISTED_CHUNKING_CONFIG),
+                            ProcessingJob.config_version == policy),
                        and_(ProcessingJob.stage == "embedding",
-                            DocumentVersion.meta["chunk_config_version"].as_string() == ASSISTED_CHUNKING_CONFIG)))
+                            DocumentVersion.meta["chunk_config_version"].as_string() == policy)))
             .order_by(ProcessingJob.id).limit(1)
             .with_for_update(of=ProcessingJob, skip_locked=True))
         if job is None:
@@ -124,6 +138,7 @@ def main():
     parser.add_argument("--backup-verified", action="store_true")
     parser.add_argument("--run", action="store_true", help="Run only selected new-policy jobs; normal Worker must be stopped")
     parser.add_argument("--max-jobs", type=int, default=100)
+    parser.add_argument("--strategy", choices=tuple(POLICIES), default="assisted-v1")
     args = parser.parse_args()
     if args.apply and not args.backup_verified:
         parser.error("verify a fresh database + storage backup before --apply --backup-verified")
@@ -133,9 +148,11 @@ def main():
     engine = create_engine(settings.database_url)
     with Session(engine) as session:
         if args.run:
-            print(json.dumps(run_selected(session, args.ids, max_jobs=args.max_jobs)))
+            print(json.dumps(run_selected(session, args.ids, max_jobs=args.max_jobs,
+                                          policy=POLICIES[args.strategy])))
             return
-        result = enqueue_batch(session, document_ids=args.ids, limit=args.limit, apply=args.apply)
+        result = enqueue_batch(session, document_ids=args.ids, limit=args.limit, apply=args.apply,
+                               policy=POLICIES[args.strategy])
         if args.apply:
             session.commit()
         else:

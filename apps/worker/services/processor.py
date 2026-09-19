@@ -108,6 +108,7 @@ CHUNKING_IDEMPOTENCY = "chunking:m3-v7-dataset-catalog"
 # preserving that identity, preventing a second pending ingestion job.
 # Explicit historical rebuilds have their own policy-specific identity.
 ASSISTED_CHUNKING_CONFIG = "chunking:assisted-v1"
+STRUCTURAL_CHUNKING_CONFIG = "chunking:structural-v3"
 ADAPTIVE_CHUNKING_CONFIG = "chunking:adaptive-v2"
 ASSISTED_CHUNKING_MAX_CALLS = 2
 ASSISTED_CHUNKING_TIMEOUT_SECONDS = 10.0
@@ -975,7 +976,7 @@ def _process_chunking(
 
     # Explicit v1 retains its PDF-only semantics; v2 evaluates structure
     # across text formats. Normal ingestion config remains unchanged.
-    if job.config_version == ADAPTIVE_CHUNKING_CONFIG or (
+    if job.config_version in {ADAPTIVE_CHUNKING_CONFIG, STRUCTURAL_CHUNKING_CONFIG} or (
         job.config_version == ASSISTED_CHUNKING_CONFIG
         and structured.document_type == "pdf"
     ):
@@ -1134,7 +1135,7 @@ def _process_chunking_assisted(
     full specs are never written to the diagnostic.
     """
 
-    provider = build_provider_from_session(session)
+    provider = None if job.config_version == STRUCTURAL_CHUNKING_CONFIG else build_provider_from_session(session)
     if provider is not None and hasattr(provider, "_timeout"):
         try:
             provider._timeout = min(
@@ -1153,10 +1154,13 @@ def _process_chunking_assisted(
         if job.config_version == ADAPTIVE_CHUNKING_CONFIG:
             from apps.api.services.chunking_adaptive import build_adaptive_candidate
             candidate_builder = build_adaptive_candidate
+        options = dict(provider=provider, max_calls=ASSISTED_CHUNKING_MAX_CALLS)
+        if job.config_version == STRUCTURAL_CHUNKING_CONFIG:
+            from apps.api.services.chunking_structural import build_structural_candidate
+            candidate_builder = build_structural_candidate
+            options = {}
         candidate = candidate_builder(
-            structured.to_dict(),
-            provider=provider,
-            max_calls=ASSISTED_CHUNKING_MAX_CALLS,
+            structured.to_dict(), **options,
             child_max_chars=chunking_config.child_target_max_chars,
             child_hard_max_chars=chunking_config.child_hard_max_chars,
             child_min_chars=chunking_config.child_target_min_chars,
@@ -1190,6 +1194,31 @@ def _process_chunking_assisted(
         )
 
     spec_dicts = candidate.get("specs") or []
+    if (job.config_version == STRUCTURAL_CHUNKING_CONFIG
+            and not candidate.get("skipped_dataset")
+            and (candidate.get("source_content_complete") is not True
+                 or candidate.get("unverified_spans") != 0)):
+        return _reject_structural_candidate(
+            session, job, version, "结构候选未通过原文覆盖或定位校验，保留现有切片",
+            {"reason": "source_coverage_incomplete"},
+        )
+    if job.config_version == STRUCTURAL_CHUNKING_CONFIG and not candidate.get("skipped_dataset"):
+        from apps.api.services.chunking_structural import fragmentation_regressed
+        total, short = session.execute(select(
+            func.count(DocumentChunk.id),
+            func.count(DocumentChunk.id).filter(DocumentChunk.char_count < 100),
+        ).where(DocumentChunk.document_version_id == version.id,
+                DocumentChunk.role == "child", DocumentChunk.is_current.is_(True))).one()
+        serving_metrics = {"children": total, "short_children": short}
+        children = [item for item in spec_dicts if item.get("role") == "child"]
+        candidate_metrics = {"children": len(children),
+                             "short_children": sum(item["char_count"] < 100 for item in children)}
+        if fragmentation_regressed(serving_metrics, candidate_metrics):
+            return _reject_structural_candidate(
+                session, job, version, "结构候选碎片化指标退步，保留现有切片，需人工评估",
+                {"reason": "candidate_fragmentation_regression",
+                 "serving": serving_metrics, "candidate": candidate_metrics},
+            )
     if not spec_dicts:
         return _mark_chunking_assisted_retry(
             session,
@@ -1247,6 +1276,14 @@ def _process_chunking_assisted(
         diagnostic["reasons"] = candidate.get("reasons", [])
         diagnostic["quality_rejected"] = candidate.get("quality_rejected", False)
         diagnostic["validated_windows"] = candidate.get("validated_windows", 0)
+    if job.config_version == STRUCTURAL_CHUNKING_CONFIG:
+        diagnostic.update(max_calls=0, decision="structural_rules", ai_used=False,
+                          source_fingerprint=candidate.get("source_fingerprint"),
+                          source_content_complete=candidate.get("source_content_complete"),
+                          parent_text_complete=candidate.get("parent_text_complete"),
+                          uncovered_nonspace_chars=candidate.get("uncovered_nonspace_chars"),
+                          unverified_spans=candidate.get("unverified_spans"),
+                          baseline=candidate.get("baseline"), candidate=candidate.get("candidate"))
 
     job.status = "completed"
     job.finished_at = utc_now()
@@ -1286,6 +1323,19 @@ def _process_chunking_assisted(
         coverage=coverage,
     )
     return True
+
+
+def _reject_structural_candidate(session, job, version, message, details):
+    """Reject a deterministic candidate once; the serving version stays usable."""
+    job.status = "failed"
+    job.finished_at = utc_now()
+    job.next_retry_at = None
+    job.last_error = message
+    job.error_details = {**details, "config_version": job.config_version,
+                         "serving_preserved": True}
+    session.add(job)
+    session.commit()
+    return False
 
 
 def _mark_chunking_assisted_retry(

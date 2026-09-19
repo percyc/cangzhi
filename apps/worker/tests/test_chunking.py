@@ -734,7 +734,79 @@ class TestAssistedChunking:
             )
         ).all()
         assert any(chunk.role == "child" for chunk in chunks)
+
         assert any(chunk.role == "parent" for chunk in chunks)
+
+    def test_structural_maintenance_never_constructs_ai_provider(self, session, monkeypatch):
+        from apps.worker.services.processor import STRUCTURAL_CHUNKING_CONFIG
+
+        def forbidden(_session):
+            raise AssertionError("structural maintenance must not construct an AI provider")
+
+        monkeypatch.setattr("apps.worker.services.processor.build_provider_from_session", forbidden)
+        document, version, payload = self._make_pdf_version(
+            session, content_hash="structural-test", title="结构维护测试")
+        job = ProcessingJob(document_id=document.id, document_version_id=version.id,
+                            stage=CHUNKING_STAGE, config_version=STRUCTURAL_CHUNKING_CONFIG,
+                            idempotency_key=f"{version.id}:structural-test")
+        session.add(job)
+        session.commit()
+        assert _process_chunking(session, job, document, version) is True
+        assert version.structured_content == payload
+        assert version.meta["chunk_config_version"] == STRUCTURAL_CHUNKING_CONFIG
+        diagnostic = version.meta["assisted_chunking"]
+        assert diagnostic["calls"] == 0 and not diagnostic["ai_used"]
+        assert diagnostic["decision"] == "structural_rules"
+        assert job.status == "completed"
+
+    @pytest.mark.parametrize("coverage,unverified", [(False, 0), (True, 1)])
+    def test_structural_incomplete_candidate_is_not_activated(self, session, monkeypatch, coverage, unverified):
+        from apps.worker.services.processor import STRUCTURAL_CHUNKING_CONFIG
+
+        document, version, payload = self._make_pdf_version(
+            session, content_hash="incomplete-structural", title="覆盖校验")
+        monkeypatch.setattr(
+            "apps.api.services.chunking_structural.build_structural_candidate",
+            lambda *_args, **_kwargs: {"source_content_complete": coverage,
+                                     "unverified_spans": unverified, "specs": []})
+        monkeypatch.setattr(
+            "apps.worker.services.processor._replace_version_chunks",
+            lambda *_args, **_kwargs: pytest.fail("must preserve serving chunks"))
+        job = ProcessingJob(document_id=document.id, document_version_id=version.id,
+                            stage=CHUNKING_STAGE, config_version=STRUCTURAL_CHUNKING_CONFIG,
+                            idempotency_key=f"{version.id}:incomplete-structural")
+        session.add(job)
+        session.commit()
+        assert _process_chunking(session, job, document, version) is False
+        assert job.status == "failed"
+        assert version.processing_status == "ready"
+        assert version.structured_content == payload
+        assert job.error_details["reason"] == "source_coverage_incomplete"
+
+    def test_structural_regression_preserves_serving_version(self, session, monkeypatch):
+        from apps.worker.services.processor import STRUCTURAL_CHUNKING_CONFIG
+        document, version, _ = self._make_pdf_version(
+            session, content_hash="regression-structural", title="候选对比")
+        old = DocumentChunk(document_id=document.id, document_version_id=version.id,
+            external_id="serving", role="child", chunk_type="paragraph", order_index=0,
+            content="原文" * 100, search_text="原文" * 100, content_hash="old-hash",
+            char_count=200, token_estimate=100, is_current=True)
+        session.add(old)
+        job = ProcessingJob(document_id=document.id, document_version_id=version.id,
+            stage=CHUNKING_STAGE, config_version=STRUCTURAL_CHUNKING_CONFIG,
+            idempotency_key=f"{version.id}:structural-regression")
+        session.add(job)
+        session.commit()
+        old_id = old.id
+        monkeypatch.setattr("apps.api.services.chunking_structural.build_structural_candidate",
+            lambda *_args, **_kwargs: {"source_content_complete": True, "unverified_spans": 0,
+                "specs": [{"role": "child", "char_count": 20} for _ in range(4)]})
+        assert _process_chunking(session, job, document, version) is False
+        assert job.status == "failed" and job.next_retry_at is None
+        assert job.error_details["reason"] == "candidate_fragmentation_regression"
+        assert job.error_details["serving_preserved"] is True
+        assert version.processing_status == "ready"
+        assert session.get(DocumentChunk, old_id).content == "原文" * 100
 
     def test_assisted_pdf_candidate_replaces_chunks_and_preserves_structured(
         self, session, monkeypatch

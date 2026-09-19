@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from bisect import bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -104,6 +105,7 @@ def build_chunk_specs(
     child_hard_max_chars: int = CHILD_HARD_MAX_CHARS,
     child_min_chars: int = CHILD_TARGET_MIN_CHARS,
     child_overlap_chars: int = CHILD_OVERLAP_CHARS,
+    preserve_source_spans: bool = False,
 ) -> list[ChunkSpec]:
     """Return the parent and child chunks for a structured document.
 
@@ -185,6 +187,7 @@ def build_chunk_specs(
                 child_hard_max_chars - child_overlap_chars,
             ),
             min_chars=child_min_chars,
+            preserve_source_spans=preserve_source_spans,
         )
         _apply_child_overlap(
             children,
@@ -517,6 +520,7 @@ def _split_section_into_children(
     target_max: int,
     hard_max: int,
     min_chars: int,
+    preserve_source_spans: bool = False,
 ) -> list[ChunkSpec]:
     """Split a section's body into child chunks.
 
@@ -625,6 +629,41 @@ def _split_section_into_children(
         text_len = len(text)
         if text_len > hard_max:
             flush_buffer()
+            if preserve_source_spans:
+                row_matches = list(_TABLE_ROW_RE.finditer(text)) if block.type == "table" else []
+                row_starts = [match.start() for match in row_matches]
+                for piece_start, piece_end in _split_source_spans(
+                    text, target=target_max, hard_max=hard_max,
+                    table=block.type in {"table", "code_block"}
+                ):
+                    sub_text = text[piece_start:piece_end]
+                    extra = dict(block.extra)
+                    if block.type == "table":
+                        # Serialized row labels remain source text, never
+                        # manufacture a repeated label in continuation pieces.
+                        first = max(0, bisect_right(row_starts, piece_start) - 1)
+                        last = bisect_right(row_starts, piece_end - 1)
+                        rows = [int(match.group(1)) for match in row_matches[first:last]]
+                        if rows:
+                            extra.update(row_start=min(rows), row_end=max(rows))
+                        if (piece_start and text[piece_start - 1] != "\n") or (
+                            piece_end < len(text) and text[piece_end - 1] != "\n"
+                            and text[piece_end] not in "\r\n"
+                        ):
+                            extra["row_fragmented"] = True
+                    extra["source_span_kind"] = "exact_core"
+                    children.append(_make_child_chunk(
+                        external_id=f"{parent_external_id}:c:{child_index}",
+                        content=sub_text, chunk_type=block.type,
+                        heading_path=section.heading_path,
+                        page=block.page if block.page is not None else section.page,
+                        paragraph_index=block.paragraph_index,
+                        source_start=section.source_start + start + piece_start,
+                        source_end=section.source_start + start + piece_end,
+                        extra=extra,
+                    ))
+                    child_index += 1
+                continue
             sub_pieces = (
                 _split_table_text(
                     text,
@@ -675,6 +714,38 @@ def _split_section_into_children(
 
     flush_buffer()
     return children
+
+
+def _split_source_spans(text: str, *, target: int, hard_max: int, table: bool = False):
+    """Bounded, monotonic original-text ranges; never rejoin normalized sentences.
+
+    Prefer row ends for tables and paragraph/sentence ends for prose. Split an
+    oversized atomic unit only as a last resort. Preserve whitespace (including
+    code indentation); only an entirely whitespace-only piece is not indexed.
+    Enabled by structural candidates, not existing ingestion strategies.
+    """
+    if hard_max <= 0 or target <= 0:
+        raise ValueError("positive split sizes required")
+    pattern = r"\r?\n" if table else r"\n\s*\n|[。！？!?；;]\s*|[.!?]\s+"
+    boundaries = [match.end() for match in re.finditer(pattern, text)]
+    cursor = 0
+    while cursor < len(text):
+        limit = min(len(text), cursor + hard_max)
+        if limit == len(text):
+            end = limit
+        else:
+            goal = min(limit, cursor + target)
+            before = bisect_right(boundaries, goal) - 1
+            after = bisect_right(boundaries, goal)
+            if before >= 0 and boundaries[before] > cursor:
+                end = boundaries[before]
+            elif after < len(boundaries) and boundaries[after] <= limit:
+                end = boundaries[after]
+            else:
+                end = limit
+        if text[cursor:end].strip():
+            yield cursor, end
+        cursor = end
 
 
 def _apply_child_overlap(
