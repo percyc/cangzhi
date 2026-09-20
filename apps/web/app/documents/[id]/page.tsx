@@ -9,6 +9,7 @@ import remarkGfm from 'remark-gfm';
 
 import { withApiBasePath } from '@/lib/paths';
 import ChunkingPreview from '@/components/ChunkingPreview';
+import CurrentChunkPreview from '@/components/CurrentChunkPreview';
 import KnowledgeEnhancement from '@/components/KnowledgeEnhancement';
 
 type DocumentCategory = {
@@ -732,6 +733,7 @@ export default function DocumentDetailPage() {
             </span>
           </summary>
           <PipelineStatus pipeline={pipeline} />
+          <CurrentChunkPreview key={`current-${params.id}`} documentId={params.id} />
           {!spreadsheetProcessing && (
             <ChunkingPreview key={params.id} documentId={params.id} />
           )}

@@ -108,6 +108,29 @@ async def chunking_preview(document_id: int, refresh: bool = False, db: AsyncSes
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
 
+@router.get("/{document_id}/chunks-preview")
+async def chunks_preview(
+    document_id: int,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=5, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    from ..services.chunk_inspection import (
+        ChunkInspectionError,
+        inspect_current_chunks,
+    )
+
+    try:
+        return await inspect_current_chunks(
+            db,
+            document_id,
+            offset=offset,
+            limit=limit,
+        )
+    except ChunkInspectionError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+
+
 def _download_response(
     stream,
     *,

@@ -69,6 +69,11 @@ from apps.api.security.secrets import decrypt_secret
 from apps.api.services import build_chunk_specs
 from apps.api.services.chunking_candidate import POLICY_VERSION as ASSISTED_CHUNKING_POLICY
 from apps.api.services.chunking_candidate import build_candidate
+from apps.api.services.chunking_baseline import (
+    assess_chunk_quality,
+    page_safe_structured,
+    prepare_structured_for_chunking,
+)
 from apps.api.services.dataset_execution import (
     DatasetExecutionError,
     build_dataset_parquet,
@@ -992,14 +997,50 @@ def _process_chunking(
 
     # Step 2: Build chunks with detected type's config
     try:
+        serving_structured, structure_preparation = prepare_structured_for_chunking(
+            structured
+        )
         specs = build_chunk_specs(
-            structured,
+            serving_structured,
             content_hash_seed=content_hash_seed,
             child_max_chars=chunking_config.child_target_max_chars,
             child_hard_max_chars=chunking_config.child_hard_max_chars,
             child_min_chars=chunking_config.child_target_min_chars,
             child_overlap_chars=chunking_config.child_overlap_chars,
         )
+        chunk_quality = assess_chunk_quality(
+            serving_structured,
+            specs,
+            structure_preparation,
+            minimum_chars=chunking_config.child_target_min_chars,
+        )
+        if (
+            serving_structured.document_type == "pdf"
+            and chunk_quality["quality_level"] == "fallback"
+        ):
+            serving_structured = page_safe_structured(serving_structured)
+            specs = build_chunk_specs(
+                serving_structured,
+                content_hash_seed=content_hash_seed,
+                child_max_chars=chunking_config.child_target_max_chars,
+                child_hard_max_chars=chunking_config.child_hard_max_chars,
+                child_min_chars=chunking_config.child_target_min_chars,
+                child_overlap_chars=chunking_config.child_overlap_chars,
+            )
+            fallback_quality = assess_chunk_quality(
+                serving_structured,
+                specs,
+                {
+                    **structure_preparation,
+                    "mode": "page_safe_fallback",
+                },
+                minimum_chars=chunking_config.child_target_min_chars,
+            )
+            chunk_quality = {
+                **fallback_quality,
+                "quality_level": "fallback",
+                "fallback_reason": "unsafe_section_boundaries",
+            }
     except Exception as exc:
         logger.exception(
             "chunking_failed",
@@ -1052,6 +1093,7 @@ def _process_chunking(
         else CHUNKING_IDEMPOTENCY
     )
     meta["structured_table_row_count"] = table_row_count
+    meta["chunk_quality"] = chunk_quality
     if job.config_version == ASSISTED_CHUNKING_CONFIG:
         # Record that the assisted config reached a non-PDF document; the
         # candidate path was skipped so accepted/failed stay at zero.

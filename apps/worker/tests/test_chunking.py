@@ -725,6 +725,9 @@ class TestAssistedChunking:
         # absent so a future opt-in run can be detected.
         assert version.meta["chunk_config_version"] == CHUNKING_IDEMPOTENCY
         assert "assisted_chunking" not in version.meta
+        assert version.meta["chunk_quality"]["policy_version"] == "baseline-structure:v1"
+        assert version.meta["chunk_quality"]["model_calls"] == 0
+        assert version.meta["chunk_quality"]["mode"] == "normalized_rules"
         # Source structured_content untouched.
         assert version.structured_content == original_payload
         # Profile-driven chunks still produced.

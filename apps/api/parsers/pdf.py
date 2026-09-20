@@ -599,7 +599,10 @@ def native_heading_level(text: str) -> int | None:
     if re.match(r"^(?:Chapter|Section)\s+(?:\d+|[IVX]+)\b\s*[:. -]?\s+[A-Za-z]", value, re.I):
         return 2 if value.lower().startswith("section") else 1
     numbered = re.match(r"^(\d{1,2}(?:\.\d{1,2}){0,3})[\s、)]+([^\W\d].*)$", value)
-    if numbered and not re.search(r"[=<>≤≥%/^]|\d{3,}", numbered.group(2)):
+    if numbered and not re.search(
+        r"[=<>≤≥%/^]|\d{3,}|(?<![A-Za-z])\d+\.\d+|\s\d{1,2}(?:\s|$)",
+        numbered.group(2),
+    ):
         return min(3, numbered.group(1).count(".") + 1)
     # Uppercase alone is not a heading signal: require a phrase, not an acronym,
     # standard number, Roman numeral, unit, formula, or CJK line with one Latin letter.

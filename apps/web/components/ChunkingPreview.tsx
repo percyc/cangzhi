@@ -28,7 +28,7 @@ export default function ChunkingPreview({ documentId }: { documentId: string }) 
   }
   return <details className="border-t border-slate-100 px-4 py-3">
     <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm text-slate-600 hover:text-slate-900">
-      <span className="font-medium">高级实验：切片候选对比</span>
+      <span className="font-medium">高级诊断：AI 切片候选</span>
       <span className="shrink-0 text-xs text-slate-400">仅评估，不影响当前索引</span>
     </summary>
     <div className="mt-3 rounded-lg bg-slate-50 p-3">
