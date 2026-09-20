@@ -78,6 +78,14 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
+- 2026-09-20 `75c6786` 已从 Gitea 快进到维护者指定的独立 Compose 实例；该实例
+  原运行旧镜像与 schema0031，和前述大库优先 Worker 现场不是同一环境。联合备份
+  校验后，以本地主线重建 API/Web/普通 Worker，迁移至 schema0033，四项服务均
+  healthy。隔离 API/Worker 回归1445 passed、2 skipped，表格关键路径89项、Web
+  lint与生产构建通过；已有排队派生任务完成且未新增失败。未执行全库重建、历史
+  失败重置或模型批处理。标准二维表继续由 Parquet/DuckDB 精确查询，非规则 Excel
+  仍是保守全文证据路径，CZ-X01–X03 尚未因此完成。
+
 - 2026-09-19 `0d12980` 经维护者授权快进并入main并部署API/Web/优先Worker，均healthy。
   发布镜像1410 passed、2 skipped，API专项27 passed，备份123042通过校验。
   正式REST/MCP HTTP证据一致，1280/375px真实浏览器展开/定位/返回通过，临时会话已清除。
