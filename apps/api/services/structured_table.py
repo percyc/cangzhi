@@ -235,6 +235,8 @@ def extract_table_row_payloads(
         if block.type != "table":
             continue
         extra = block.extra or {}
+        if extra.get("dataset_eligible") is False:
+            continue
         columns = [str(item) for item in extra.get("column_names") or [] if item]
         sheet_name = str(extra.get("sheet_name") or "工作表")
         region_index = int(extra.get("region_index") or 1)

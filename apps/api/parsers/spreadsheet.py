@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import date, datetime, time
@@ -11,17 +12,25 @@ from io import BytesIO
 from itertools import zip_longest
 from typing import Any
 
+from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
+
 from .base import BaseParser, Block, ParserResult, StructuredContent
+from .spreadsheet_layout import region_risks
 
 MAX_ARCHIVE_ENTRIES = 10_000
 MAX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
 MAX_SHEETS = 100
 MAX_ROWS_PER_SHEET = 150_000
 MAX_CELLS_TOTAL = 2_000_000
+MAX_TEXT_CHARS_TOTAL = 32_000_000
 MAX_REGIONS_PER_SHEET = 1_000
 MAX_CELL_CHARS = 10_000
 MAX_TABLE_BLOCK_CHARS = 12_000
 MAX_ROWS_PER_BLOCK = 200
+MAX_MERGE_RANGES = 10_000
+
+# The XML namespace for sheet data; openpyxl emits this exact URI.
+_SHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 _NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
 _HEADER_HINT_RE = re.compile(
@@ -174,12 +183,14 @@ def _sheet_blocks(
     rows: Iterable[Sequence[object]],
     *,
     paragraph_offset: int,
+    merged_ranges: Sequence[tuple[int, int, int, int]] = (),
 ) -> tuple[list[Block], dict[str, Any], int]:
     blocks: list[Block] = []
     non_empty_rows = 0
     non_empty_cells = 0
     formula_cells = 0
     visited_cells = 0
+    text_chars = 0
 
     collected_rows: list[tuple[int, list[str]]] = []
     for row_number, values in enumerate(rows, start=1):
@@ -193,6 +204,9 @@ def _sheet_blocks(
                 f"工作表“{sheet_name}”超过 {MAX_CELLS_TOTAL} 个单元格限制"
             )
         cells = _trim_row(values)
+        text_chars += sum(len(cell) for cell in cells)
+        if text_chars > MAX_TEXT_CHARS_TOTAL:
+            raise SpreadsheetLimitError(f"工作表“{sheet_name}”文本总量超过 {MAX_TEXT_CHARS_TOTAL} 字符限制")
         collected_rows.append((row_number, cells))
         if not cells or not any(cells):
             continue
@@ -208,6 +222,16 @@ def _sheet_blocks(
     region_metadata: list[dict[str, Any]] = []
     for region_index, region in enumerate(regions, start=1):
         columns, header_row = _column_names(region)
+        risks = region_risks(region, merged_ranges)
+        if header_row is None:
+            risks.append("unconfirmed_header")
+        layout_extra: dict[str, Any] = {}
+        if risks:
+            # No guessed header or forward-filled values for irregular content.
+            # Keep all original rows and absolute column labels as evidence.
+            header_row = None
+            columns = [_excel_column_name(i) + "列" for i in range(max(len(cells) for _, cells in region))]
+            layout_extra = {"dataset_eligible": False, "layout_risks": risks}
         data_rows = [item for item in region if item[0] != header_row]
         region_metadata.append(
             {
@@ -216,6 +240,7 @@ def _sheet_blocks(
                 "row_end": region[-1][0],
                 "header_row": header_row,
                 "column_names": columns,
+                **layout_extra,
             }
         )
         if not data_rows:
@@ -228,6 +253,7 @@ def _sheet_blocks(
             current_region_index: int = region_index,
             current_header_row: int | None = header_row,
             current_columns: list[str] = columns,
+            current_layout_extra: dict[str, Any] = layout_extra,
         ) -> None:
             nonlocal buffered, buffered_chars
             if not buffered:
@@ -247,6 +273,7 @@ def _sheet_blocks(
                         "row_end": row_end,
                         "header_row": current_header_row,
                         "column_names": current_columns,
+                        **current_layout_extra,
                     },
                 )
             )
@@ -281,6 +308,7 @@ def _sheet_blocks(
             "non_empty_rows": non_empty_rows,
             "non_empty_cells": non_empty_cells,
             "formula_cells": formula_cells,
+            "text_chars": text_chars,
             "data_region_count": len(regions),
             "regions": region_metadata,
         },
@@ -300,6 +328,126 @@ def _validate_xlsx_archive(content: bytes) -> None:
         raise ValueError("文件不是有效的 XLSX 工作簿") from exc
 
 
+def _xlsx_sheet_preflight(sheet: object) -> dict[str, Any]:
+    """Stream a worksheet XML to find effective bounds and structural metadata.
+
+    The XLSX format stores a ``<dimension>`` element that often reports the
+    full styled extent of a sheet, including cells that carry formatting
+    without any value, formula, or inline string. Treating that metadata as
+    truth causes a single styled cell in column ``XFD`` to expand the
+    worksheet to 16k columns and trip the cell limit.
+
+    This preflight ignores style-only cells. It walks the XML once with
+    :func:`xml.etree.ElementTree.iterparse`, tracking only cells that have a
+    real payload (``<v>``, ``<f>``, or ``<is>``). The dimension element is
+    read but not trusted: ``declared_dimension`` and the derived
+    ``actual_dimension`` are both kept so the owner can later classify
+    irregular structures (phantom cells, underreported extents).
+
+    The stream is consumed linearly and every element is cleared after it is
+    processed, so the in-memory tree never grows with the sheet size. The
+    archive entry is opened through the parent workbook's ``ZipFile`` so the
+    lifetime is tied to the workbook and no extra file handle is leaked.
+    """
+
+    path = getattr(sheet, "_worksheet_path", None)
+    archive = getattr(getattr(sheet, "parent", None), "_archive", None)
+
+    if not path or archive is None:
+        raise ValueError("无法读取工作表结构")
+
+    min_row = max_row = min_col = max_col = None
+    real_cell_count = 0
+    declared_dimension: str | None = None
+    merge_ranges: list[str] = []
+
+    row_index = 0
+    col_index = 0
+    stack: list[Any] = []
+    with archive.open(path) as stream:
+        for event, elem in ET.iterparse(stream, events=("start", "end")):
+            tag = elem.tag
+            if event == "start":
+                stack.append(elem)
+                if tag == f"{_SHEET_NS}row":
+                    row_index = int(elem.get("r", row_index + 1))
+                    col_index = 0
+                continue
+            if tag == f"{_SHEET_NS}c":
+                ref = elem.get("r")
+                if ref:
+                    match = re.fullmatch(r"([A-Z]+)([1-9][0-9]*)", ref)
+                    if not match:
+                        raise ValueError("无效单元格坐标")
+                    col_index = column_index_from_string(match[1])
+                    cell_row = int(match[2])
+                    if cell_row != row_index:
+                        raise ValueError("单元格行号与工作表行号不一致")
+                else:
+                    col_index += 1
+                    cell_row = row_index
+                has_real = any(
+                    child.tag == f"{_SHEET_NS}f"
+                    or (child.tag == f"{_SHEET_NS}v" and child.text not in (None, ""))
+                    or (child.tag == f"{_SHEET_NS}is" and any(
+                        node.text not in (None, "") for node in child.iter(f"{_SHEET_NS}t")
+                    ))
+                    for child in elem
+                )
+                if has_real:
+                    real_cell_count += 1
+                    if real_cell_count > MAX_CELLS_TOTAL:
+                        raise SpreadsheetLimitError("工作表有效单元格数量超过限制")
+                    if not 1 <= cell_row <= MAX_ROWS_PER_SHEET or not 1 <= col_index <= 16384:
+                        raise SpreadsheetLimitError("工作表有效行列坐标超过限制")
+                    min_row = cell_row if min_row is None else min(min_row, cell_row)
+                    max_row = cell_row if max_row is None else max(max_row, cell_row)
+                    min_col = col_index if min_col is None else min(min_col, col_index)
+                    max_col = col_index if max_col is None else max(max_col, col_index)
+                elem.clear()
+            elif tag == f"{_SHEET_NS}mergeCell":
+                ref = elem.get("ref")
+                if ref:
+                    merge_ranges.append(ref)
+                    if len(merge_ranges) > MAX_MERGE_RANGES:
+                        raise SpreadsheetLimitError("工作表合并范围数量超过限制")
+                elem.clear()
+            elif tag == f"{_SHEET_NS}dimension":
+                ref = elem.get("ref")
+                if ref:
+                    declared_dimension = ref
+                elem.clear()
+            elif tag in (
+                f"{_SHEET_NS}row",
+                f"{_SHEET_NS}sheetData",
+                f"{_SHEET_NS}mergeCells",
+                f"{_SHEET_NS}worksheet",
+            ):
+                # Container elements: clear children once we are past them so
+                # the iterparse cursor does not retain the whole document.
+                elem.clear()
+            if tag in {f"{_SHEET_NS}c", f"{_SHEET_NS}row", f"{_SHEET_NS}mergeCell"} and len(stack) > 1:
+                stack[-2].remove(elem)
+            stack.pop()
+
+    effective_bounds: tuple[int, int, int, int] | None = None
+    actual_dimension: str | None = None
+    if min_row is not None:
+        effective_bounds = (min_row, max_row, min_col, max_col)
+        actual_dimension = (
+            f"{get_column_letter(min_col)}{min_row}:"
+            f"{get_column_letter(max_col)}{max_row}"
+        )
+
+    return {
+        "effective_bounds": effective_bounds,
+        "real_cell_count": real_cell_count,
+        "declared_dimension": declared_dimension,
+        "merge_ranges": merge_ranges,
+        "actual_dimension": actual_dimension,
+    }
+
+
 class XlsxParser(BaseParser):
     def can_parse(self, content_type: str | None, file_name: str | None = None) -> bool:
         return bool(
@@ -310,6 +458,9 @@ class XlsxParser(BaseParser):
     def parse(self, content: bytes | str, content_type: str | None = None) -> ParserResult:
         if isinstance(content, str):
             content = content.encode()
+        workbook: Any = None
+        values_workbook: Any = None
+        rows: Any = None
         try:
             _validate_xlsx_archive(content)
             from openpyxl import load_workbook
@@ -335,19 +486,52 @@ class XlsxParser(BaseParser):
                 "non_empty_rows": 0,
                 "non_empty_cells": 0,
                 "formula_cells": 0,
+                "text_chars": 0,
                 "data_region_count": 0,
             }
             workbook_regions: list[dict[str, Any]] = []
+            sheet_dimensions: list[dict[str, Any]] = []
             visited_cells = 0
             sheet_names = list(workbook.sheetnames)
             for sheet, values_sheet in zip(
                 workbook.worksheets,
                 values_workbook.worksheets,
             ):
+                sheet_name = sheet.title
+                preflight = _xlsx_sheet_preflight(sheet)
+                bounds = preflight["effective_bounds"]
+                if bounds is not None:
+                    min_r, max_r, min_c, max_c = bounds
+                    if max_r > MAX_ROWS_PER_SHEET:
+                        raise SpreadsheetLimitError(
+                            f"工作表“{sheet_name}”有效行 {max_r} 超过 {MAX_ROWS_PER_SHEET} 上限"
+                        )
+                    # Absolute coordinates are retained: no rebasing C5 to A1.
+                    span = max_r * max_c
+                    if span > MAX_CELLS_TOTAL:
+                        raise SpreadsheetLimitError(
+                            f"工作表“{sheet_name}”有效跨度 {span} 个单元格，"
+                            f"超过 {MAX_CELLS_TOTAL} 上限"
+                        )
+                    rows = _xlsx_rows(
+                        sheet,
+                        values_sheet,
+                        min_row=1,
+                        max_row=max_r,
+                        min_col=1,
+                        max_col=max_c,
+                    )
+                else:
+                    rows = iter([])
+
                 sheet_blocks, sheet_totals, sheet_cells = _sheet_blocks(
-                    sheet.title,
-                    _xlsx_rows(sheet, values_sheet),
+                    sheet_name,
+                    rows,
                     paragraph_offset=visited_cells,
+                    merged_ranges=[
+                        (r1, c1, r2, c2)
+                        for c1, r1, c2, r2 in map(range_boundaries, preflight["merge_ranges"])
+                    ],
                 )
                 visited_cells += sheet_cells
                 if visited_cells > MAX_CELLS_TOTAL:
@@ -357,12 +541,35 @@ class XlsxParser(BaseParser):
                 blocks.extend(sheet_blocks)
                 for key in totals:
                     totals[key] += sheet_totals[key]
+                if totals["text_chars"] > MAX_TEXT_CHARS_TOTAL:
+                    raise SpreadsheetLimitError("工作簿文本总量超过限制")
                 workbook_regions.extend(
-                    {"sheet_name": sheet.title, **region}
+                    {"sheet_name": sheet_name, **region}
                     for region in sheet_totals["regions"]
                 )
-            workbook.close()
-            values_workbook.close()
+                sheet_dimensions.append(
+                    {
+                        "sheet_name": sheet_name,
+                        "declared_dimension": preflight["declared_dimension"],
+                        "actual_dimension": preflight["actual_dimension"],
+                        "bounds": (
+                            {
+                                "min_row": bounds[0],
+                                "max_row": bounds[1],
+                                "min_col": bounds[2],
+                                "max_col": bounds[3],
+                            }
+                            if bounds is not None
+                            else None
+                        ),
+                        "real_cell_count": preflight["real_cell_count"],
+                        "merge_ranges": list(preflight["merge_ranges"]),
+                        "dimensions_match": (
+                            preflight["declared_dimension"]
+                            == preflight["actual_dimension"]
+                        ),
+                    }
+                )
             return ParserResult(
                 success=True,
                 structured_content=StructuredContent(
@@ -373,6 +580,7 @@ class XlsxParser(BaseParser):
                         "spreadsheet_schema_version": 2,
                         "sheet_count": len(sheet_names),
                         "sheet_names": sheet_names,
+                        "sheet_dimensions": sheet_dimensions,
                         "regions": workbook_regions,
                         **totals,
                     },
@@ -390,40 +598,70 @@ class XlsxParser(BaseParser):
                 error_message=f"Excel 解析失败：{exc}",
                 error_details={"reason": "xlsx_parse_failed"},
             )
+        finally:
+            if rows is not None and hasattr(rows, "close"):
+                rows.close()
+            for handle in (workbook, values_workbook):
+                if handle is None:
+                    continue
+                close = getattr(handle, "close", None)
+                if close is None:
+                    continue
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - close failures must not mask results
+                    pass
 
 
-def _xlsx_rows(sheet: object, values_sheet: object) -> Iterator[list[object]]:
-    """Yield formulas and include cached results when the producer stored them."""
-    formula_rows = sheet.iter_rows()
-    value_rows = values_sheet.iter_rows()
-    for formula_row, value_row in zip_longest(
-        formula_rows,
-        value_rows,
-        fillvalue=(),
-    ):
-        combined: list[object] = []
-        for formula_cell, value_cell in zip_longest(
-            formula_row,
-            value_row,
-            fillvalue=None,
-        ):
-            formula = getattr(formula_cell, "value", None)
-            cached = getattr(value_cell, "value", None)
-            number_format = getattr(formula_cell, "number_format", None)
-            if isinstance(formula, str) and formula.startswith("="):
-                cached_display = _xlsx_display_value(cached, number_format)
-                combined.append(
-                    f"{formula} ⇒ {cached_display}"
-                    if cached is not None
-                    else formula
-                )
-            else:
-                combined.append(
-                    _xlsx_display_value(formula, number_format)
-                    if formula is not None
-                    else ""
-                )
-        yield combined
+def _xlsx_rows(
+    sheet: object,
+    values_sheet: object,
+    *,
+    min_row: int | None = None,
+    max_row: int | None = None,
+    min_col: int | None = None,
+    max_col: int | None = None,
+) -> Iterator[list[object]]:
+    """Yield formulas and include cached results when the producer stored them.
+
+    The bounds are derived from the streaming XML preflight and exclude
+    style-only cells. ``min_row``/``max_row``/``min_col``/``max_col`` mirror
+    the keyword arguments of :meth:`openpyxl.worksheet.worksheet.Worksheet.iter_rows`;
+    passing them keeps the iteration to cells that actually carry a value,
+    formula, or inline string, independent of any false ``<dimension>`` extent.
+    """
+    if min_row is None or max_row is None:
+        return
+    formula_rows = sheet.iter_rows(
+        min_row=min_row,
+        max_row=max_row,
+        min_col=min_col,
+        max_col=max_col,
+    )
+    value_rows = values_sheet.iter_rows(
+        min_row=min_row,
+        max_row=max_row,
+        min_col=min_col,
+        max_col=max_col,
+    )
+    try:
+        for formula_row, value_row in zip_longest(formula_rows, value_rows, fillvalue=()):
+            combined: list[object] = []
+            for formula_cell, value_cell in zip_longest(formula_row, value_row, fillvalue=None):
+                formula = getattr(formula_cell, "value", None)
+                cached = getattr(value_cell, "value", None)
+                number_format = getattr(formula_cell, "number_format", None)
+                if isinstance(formula, str) and formula.startswith("="):
+                    cached_display = _xlsx_display_value(cached, number_format)
+                    combined.append(f"{formula} ⇒ {cached_display}" if cached is not None else formula)
+                else:
+                    combined.append(_xlsx_display_value(formula, number_format) if formula is not None else "")
+            yield combined
+    finally:
+        for iterator in (formula_rows, value_rows):
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close()
 
 
 def _xlsx_display_value(value: object, number_format: str | None) -> str:
@@ -456,6 +694,7 @@ class XlsParser(BaseParser):
             workbook = xlrd.open_workbook(
                 file_contents=content,
                 on_demand=True,
+                formatting_info=True,
             )
             if workbook.nsheets > MAX_SHEETS:
                 raise SpreadsheetLimitError(
@@ -466,6 +705,7 @@ class XlsParser(BaseParser):
                 "non_empty_rows": 0,
                 "non_empty_cells": 0,
                 "formula_cells": 0,
+                "text_chars": 0,
                 "data_region_count": 0,
             }
             workbook_regions: list[dict[str, Any]] = []
@@ -475,6 +715,7 @@ class XlsParser(BaseParser):
                     sheet.name,
                     _xls_rows(sheet, workbook),
                     paragraph_offset=visited_cells,
+                    merged_ranges=[(r1 + 1, c1 + 1, r2, c2) for r1, r2, c1, c2 in sheet.merged_cells],
                 )
                 visited_cells += sheet_cells
                 if visited_cells > MAX_CELLS_TOTAL:
@@ -484,6 +725,8 @@ class XlsParser(BaseParser):
                 blocks.extend(sheet_blocks)
                 for key in totals:
                     totals[key] += sheet_totals[key]
+                if totals["text_chars"] > MAX_TEXT_CHARS_TOTAL:
+                    raise SpreadsheetLimitError("工作簿文本总量超过限制")
                 workbook_regions.extend(
                     {"sheet_name": sheet.name, **region}
                     for region in sheet_totals["regions"]

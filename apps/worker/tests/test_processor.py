@@ -1019,7 +1019,8 @@ class TestEnqueueEmbeddingJobsForNewChunks:
             chunks[1].id,
         }
 
-    def test_large_table_sampled_strategy_only_enqueues_sample(self, session):
+    @pytest.mark.parametrize("has_source_fallback", [False, True])
+    def test_large_table_sampled_strategy_only_enqueues_sample(self, session, has_source_fallback):
         """When the version marks a large structured table, the
         helper enqueues jobs for the sampled slice and stamps
         the same strategy on ``version.meta`` so the API side
@@ -1045,6 +1046,8 @@ class TestEnqueueEmbeddingJobsForNewChunks:
         chunks = _make_child_chunks(
             session, version=version, count=1_500, content_hash_prefix="h"
         )
+        if has_source_fallback:
+            chunks[0].extra = {"dataset_eligible": False}
         version.meta = {
             "structured_table_row_count": 10_000,
         }
@@ -1064,7 +1067,7 @@ class TestEnqueueEmbeddingJobsForNewChunks:
             ).all()
         )
         # The helper samples 256 chunks out of 1_500.
-        assert len(jobs) == 256
+        assert len(jobs) == (1_500 if has_source_fallback else 256)
         covered_chunk_ids = {job.embedding_chunk_id for job in jobs}
         assert covered_chunk_ids.issubset({chunk.id for chunk in chunks})
         # The strategy block is stamped on the version so the
@@ -1072,9 +1075,9 @@ class TestEnqueueEmbeddingJobsForNewChunks:
         # same sampled slice.
         session.refresh(version)
         strategy = (version.meta or {}).get("embedding_strategy") or {}
-        assert strategy.get("mode") == "sampled"
+        assert strategy.get("mode") == ("full" if has_source_fallback else "sampled")
         assert strategy.get("total_child_chunks") == 1_500
-        assert strategy.get("selected_chunks") == 256
+        assert strategy.get("selected_chunks") == (1_500 if has_source_fallback else 256)
         assert strategy.get("structured_table_rows") == 10_000
 
     def test_small_corpus_uses_full_strategy(self, session):

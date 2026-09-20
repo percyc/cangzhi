@@ -1456,6 +1456,9 @@ def _enqueue_embedding_jobs_for_new_chunks(
     use_sampling = (
         table_row_count > LARGE_TABLE_EMBEDDING_THRESHOLD
         and total_child_chunks > LARGE_TABLE_EMBEDDING_THRESHOLD
+        # Irregular spreadsheet regions have no exact-query backing rows.
+        # Sampling them as if they were redundant dataset rows loses evidence.
+        and not any((chunk.extra or {}).get("dataset_eligible") is False for chunk in child_chunks)
     )
     selected_chunks = (
         evenly_sample_chunks(child_chunks, LARGE_TABLE_EMBEDDING_SAMPLE_SIZE)
