@@ -244,7 +244,7 @@ export default function DocumentDetailPage() {
   const [pipelineExpanded, setPipelineExpanded] = useState(false);
   const [returnToAsk, setReturnToAsk] = useState(false);
   const [datasets, setDatasets] = useState<KnowledgeDataset[]>([]);
-  const [previewMode, setPreviewMode] = useState<'original' | 'parsed'>('parsed');
+  const [previewMode, setPreviewMode] = useState<'original' | 'parsed' | 'chunks' | 'compare'>('parsed');
   const [citationTarget, setCitationTarget] = useState<{
     chunkId: number;
     page: number | null;
@@ -328,13 +328,12 @@ export default function DocumentDetailPage() {
         ''
       ).toLowerCase();
       const contentType = documentBody.current_version?.blob?.content_type?.toLowerCase() ?? '';
-      if (
+      const opensWithPaginatedPreview = (
         filename.endsWith('.pdf') ||
         contentType === 'application/pdf' ||
         documentBody.current_version?.preview_blob
-      ) {
-        setPreviewMode('original');
-      }
+      );
+      setPreviewMode(opensWithPaginatedPreview ? 'original' : 'parsed');
       setLatestJob(await jobResponse.json());
       setPipeline((await pipelineResponse.json()) as ProcessingPipeline);
       const categoryBody = (await categoriesResponse.json()) as CategoryOption[];
@@ -733,10 +732,6 @@ export default function DocumentDetailPage() {
             </span>
           </summary>
           <PipelineStatus pipeline={pipeline} />
-          <CurrentChunkPreview key={`current-${params.id}`} documentId={params.id} />
-          {!spreadsheetProcessing && (
-            <ChunkingPreview key={params.id} documentId={params.id} />
-          )}
         </details>
       )}
 
@@ -768,22 +763,21 @@ export default function DocumentDetailPage() {
         </section>
       )}
 
-      {hasPaginatedPreview && (
-        <section className="mt-6">
-          <div className="mb-3 flex items-center justify-between gap-3">
+      <section className="mt-6">
+          <div className="mb-4 flex flex-col gap-3 border-b border-slate-200 pb-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <h2 className="font-semibold text-slate-900">文档预览</h2>
+              <h2 className="font-semibold text-slate-900">内容与切片</h2>
               <p className="mt-1 text-xs text-slate-500">
-                {hasConvertedPreview && !isPdf
-                  ? '版式预览由原 Word 转换为 PDF；解析版用于检索核对。'
-                  : '原文版保持 PDF 排版；解析版用于检索核对。'}
+                在同一区域核对原始版式、解析正文和检索实际使用的边界。
               </p>
             </div>
-            <div className="flex rounded-lg bg-slate-100 p-1 text-sm">
-              <button type="button" onClick={() => setPreviewMode('original')} className={`rounded-md px-3 py-1.5 ${previewMode === 'original' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
+            <div className="flex max-w-full gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 text-sm" role="tablist" aria-label="内容预览方式">
+              {hasPaginatedPreview && <button type="button" role="tab" aria-selected={previewMode === 'original'} onClick={() => setPreviewMode('original')} className={`shrink-0 rounded-lg px-3 py-2 ${previewMode === 'original' ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>
                 {hasConvertedPreview && !isPdf ? '版式预览' : '原文版'}
-              </button>
-              <button type="button" onClick={() => setPreviewMode('parsed')} className={`rounded-md px-3 py-1.5 ${previewMode === 'parsed' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>解析版</button>
+              </button>}
+              <button type="button" role="tab" aria-selected={previewMode === 'parsed'} onClick={() => setPreviewMode('parsed')} className={`shrink-0 rounded-lg px-3 py-2 ${previewMode === 'parsed' ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>解析版</button>
+              {pipeline && !spreadsheetProcessing && <button type="button" role="tab" aria-selected={previewMode === 'chunks'} onClick={() => setPreviewMode('chunks')} className={`shrink-0 rounded-lg px-3 py-2 ${previewMode === 'chunks' ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>在线切片</button>}
+              {pipeline && !spreadsheetProcessing && <button type="button" role="tab" aria-selected={previewMode === 'compare'} onClick={() => setPreviewMode('compare')} className={`shrink-0 rounded-lg px-3 py-2 ${previewMode === 'compare' ? 'bg-white font-medium text-blue-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>候选对比</button>}
             </div>
           </div>
           {previewMode === 'original' && (
@@ -793,8 +787,13 @@ export default function DocumentDetailPage() {
               className="h-[72vh] min-h-[560px] w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
             />
           )}
+          {previewMode === 'chunks' && pipeline && !spreadsheetProcessing && (
+            <CurrentChunkPreview key={`current-${params.id}`} documentId={params.id} />
+          )}
+          {previewMode === 'compare' && pipeline && !spreadsheetProcessing && (
+            <ChunkingPreview key={`compare-${params.id}`} documentId={params.id} />
+          )}
         </section>
-      )}
 
       {isWord && !hasConvertedPreview && (
         <div className="mt-6 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
@@ -804,7 +803,7 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
-      {hasPaginatedPreview && previewMode === 'original' ? null : datasets.length > 0 ? (
+      {previewMode !== 'parsed' ? null : datasets.length > 0 ? (
         <DatasetWorkspace datasets={datasets} />
       ) : document.content_kind === 'spreadsheet' ? (
         <SpreadsheetGovernanceSummary processing={spreadsheetProcessing} />
