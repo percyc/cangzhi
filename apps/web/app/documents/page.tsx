@@ -47,7 +47,7 @@ type Document = {
   description: string | null;
   source_type: string;
   source_url: string | null;
-  content_kind: 'document' | 'dataset' | 'note';
+  content_kind: 'document' | 'dataset' | 'spreadsheet' | 'note';
   origin: {
     kind: string;
     label: string;
@@ -87,6 +87,7 @@ const sourceTypeLabels: Record<string, string> = {
 const contentKindLabels: Record<string, string> = {
   document: '文档',
   dataset: '数据集',
+  spreadsheet: '待治理表格',
   note: '随手记',
 };
 
@@ -440,7 +441,13 @@ export default function DocumentsListPage() {
                     )}
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                    <span className={`rounded-full px-2 py-0.5 ${doc.content_kind === 'dataset' ? 'bg-cyan-100 text-cyan-800' : 'bg-slate-100 text-slate-600'}`}>
+                    <span className={`rounded-full px-2 py-0.5 ${
+                      doc.content_kind === 'dataset'
+                        ? 'bg-cyan-100 text-cyan-800'
+                        : doc.content_kind === 'spreadsheet'
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-slate-100 text-slate-600'
+                    }`}>
                       {contentKindLabels[doc.content_kind] || '文档'}
                     </span>
                     <span className="rounded-full bg-slate-100 px-2 py-0.5">
@@ -452,7 +459,11 @@ export default function DocumentsListPage() {
                     {view === 'active' && doc.pipeline && (
                       <>
                         <span className={doc.pipeline.keyword_searchable ? 'text-emerald-700' : 'text-slate-400'}>
-                          {doc.pipeline.keyword_searchable ? '正文可检索' : '正文未就绪'}
+                          {doc.pipeline.keyword_searchable
+                            ? '正文可检索'
+                            : doc.content_kind === 'spreadsheet'
+                              ? '等待数据治理'
+                              : '正文未就绪'}
                         </span>
                         <span className={doc.pipeline.vector_searchable ? 'text-violet-700' : 'text-slate-400'}>
                           {doc.pipeline.vector_searchable

@@ -1,4 +1,62 @@
+import asyncio
 from io import BytesIO
+
+from apps.api.core.db import get_db
+from apps.api.main import app
+from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
+
+
+def test_governance_spreadsheet_response_is_bounded_and_labeled(client):
+    test_client, _storage = client
+    created = test_client.post(
+        "/api/notes", json={"title": "复杂表格", "content": "临时内容"}
+    ).json()
+    document_id = created["id"]
+    version_id = created["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def mark_as_spreadsheet():
+        dependency = db_dependency()
+        session = await anext(dependency)
+        try:
+            document = await session.get(Document, document_id)
+            version = await session.get(DocumentVersion, version_id)
+            document.source_type = DocumentSourceType.file
+            version.raw_content = "大量单元格事实"
+            version.structured_content = {
+                "document_type": "xlsx",
+                "schema_version": "1",
+                "metadata": {
+                    "regions": [
+                        {
+                            "dataset_eligible": False,
+                            "layout_risks": ["merged_cells"],
+                        }
+                    ]
+                },
+                "blocks": [{"text": "不应发送到浏览器的全部单元格"}],
+            }
+            version.meta = {
+                "spreadsheet_processing": {
+                    "mode": "governance",
+                    "governance_required": True,
+                }
+            }
+            await session.commit()
+        finally:
+            await dependency.aclose()
+
+    asyncio.run(mark_as_spreadsheet())
+
+    detail = test_client.get(f"/api/documents/{document_id}")
+    overview = test_client.get("/api/documents/overview?limit=10")
+
+    assert detail.status_code == 200
+    assert detail.json()["content_kind"] == "spreadsheet"
+    assert detail.json()["current_version"]["raw_content"] is None
+    assert "blocks" not in detail.json()["current_version"]["structured_content"]
+    overview_item = next(item for item in overview.json() if item["id"] == document_id)
+    assert overview_item["content_kind"] == "spreadsheet"
 
 
 def test_document_trash_restore_and_batch_management(client):

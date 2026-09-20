@@ -561,6 +561,65 @@ def test_overview_includes_pipeline_only_when_requested(client):
     assert next(row for row in enriched if row["id"] == document_id)["pipeline"]
 
 
+def test_governance_spreadsheet_skips_chunk_and_vector_stages(client):
+    test_client, _ = client
+    created = test_client.post(
+        "/api/notes", json={"title": "待治理表格", "content": "原始事实仍保留。"}
+    ).json()
+    document_id = created["id"]
+    version_id = created["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def seed_governance_status():
+        dependency = db_dependency()
+        session = await _session(dependency)
+        try:
+            version = await session.get(DocumentVersion, version_id)
+            version.meta = {
+                **(version.meta or {}),
+                "spreadsheet_processing": {
+                    "mode": "governance",
+                    "governance_required": True,
+                },
+            }
+            jobs = list(
+                (
+                    await session.execute(
+                        select(ProcessingJob).where(
+                            ProcessingJob.document_version_id == version_id
+                        )
+                    )
+                ).scalars()
+            )
+            chunking = next((job for job in jobs if job.stage == "chunking"), None)
+            if chunking is None:
+                session.add(
+                    ProcessingJob(
+                        document_id=document_id,
+                        document_version_id=version_id,
+                        stage="chunking",
+                        status="completed",
+                        idempotency_key=f"governance:{version_id}:chunking",
+                        config_version="test",
+                    )
+                )
+            else:
+                chunking.status = "completed"
+            await session.commit()
+            return (await load_pipeline_statuses(session, [version_id]))[version_id]
+        finally:
+            await dependency.aclose()
+
+    status = asyncio.run(seed_governance_status())
+
+    assert status["keyword_searchable"] is False
+    assert status["vector_searchable"] is False
+    assert status["stages"]["chunking"]["status"] == "skipped"
+    assert status["stages"]["chunking"]["child_chunks"] == 0
+    assert status["stages"]["embedding"]["status"] == "skipped"
+    assert status["stages"]["embedding"]["total"] == 0
+
+
 def test_overview_exposes_total_for_pagination(client):
     test_client, _ = client
     for index in range(3):

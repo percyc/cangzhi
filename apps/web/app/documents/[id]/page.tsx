@@ -43,6 +43,14 @@ type DocumentVersion = {
       reason?: string;
       message?: string;
     };
+    spreadsheet_processing?: {
+      policy_version?: string;
+      mode?: 'dataset' | 'mixed' | 'governance' | 'empty';
+      dataset_regions?: number;
+      governance_regions?: number;
+      governance_required?: boolean;
+      layout_risks?: string[];
+    };
   };
   structured_content: {
     document_type?: string;
@@ -50,6 +58,14 @@ type DocumentVersion = {
       author?: string | null;
       published_at?: string | null;
       canonical_url?: string | null;
+      regions?: Array<{
+        sheet_name?: string;
+        region_index?: number;
+        row_start?: number;
+        row_end?: number;
+        dataset_eligible?: boolean;
+        layout_risks?: string[];
+      }>;
     };
   } | null;
   blob: {
@@ -131,7 +147,7 @@ type Document = {
   description: string | null;
   source_type: string;
   source_url: string | null;
-  content_kind: 'document' | 'dataset' | 'note';
+  content_kind: 'document' | 'dataset' | 'spreadsheet' | 'note';
   origin: {
     kind: string;
     label: string;
@@ -437,6 +453,13 @@ export default function DocumentDetailPage() {
   const status = version?.processing_status || 'created';
   const canRetry = ['failed', 'unsupported'].includes(status);
   const metadata = version?.structured_content?.metadata;
+  const spreadsheetProcessing = version?.meta?.spreadsheet_processing;
+  const spreadsheetNeedsGovernance = Boolean(
+    spreadsheetProcessing?.governance_required,
+  );
+  const spreadsheetOnlyNeedsGovernance = ['governance', 'empty'].includes(
+    spreadsheetProcessing?.mode || '',
+  );
   const rendersAsMarkdown =
     document.source_type === 'note' ||
     version?.structured_content?.document_type === 'markdown' ||
@@ -462,8 +485,9 @@ export default function DocumentDetailPage() {
   const previewUrl = isPdf
     ? withApiBasePath(`/api/documents/${document.id}/original?inline=true`)
     : withApiBasePath(`/api/documents/${document.id}/preview`);
-  const knowledgeStatus =
-    pipeline?.overall_status === 'completed'
+  const knowledgeStatus = spreadsheetOnlyNeedsGovernance
+    ? '等待数据治理'
+    : pipeline?.overall_status === 'completed'
       ? '知识库已就绪'
       : pipeline?.overall_status === 'failed'
         ? '知识库部分失败'
@@ -504,10 +528,15 @@ export default function DocumentDetailPage() {
         {document.content_kind === 'dataset' && (
           <span className="rounded-full bg-cyan-100 px-2.5 py-1 text-cyan-800">结构化数据集</span>
         )}
+        {document.content_kind === 'spreadsheet' && (
+          <span className="rounded-full bg-amber-100 px-2.5 py-1 text-amber-800">待治理表格</span>
+        )}
         {pipeline && (
           <span
             className={`rounded-full px-2.5 py-1 ${
-              pipeline.overall_status === 'completed'
+              spreadsheetOnlyNeedsGovernance
+                ? 'bg-amber-100 text-amber-800'
+                : pipeline.overall_status === 'completed'
                 ? 'bg-emerald-100 text-emerald-800'
                 : pipeline.overall_status === 'failed'
                   ? 'bg-red-100 text-red-800'
@@ -522,6 +551,24 @@ export default function DocumentDetailPage() {
           {new Date(document.created_at).toLocaleDateString('zh-CN')}
         </span>
       </div>
+
+      {spreadsheetNeedsGovernance && (
+        <section className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-5 text-amber-950">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-700">Spreadsheet governance</p>
+          <h2 className="mt-1 text-lg font-semibold">这个工作簿没有被强行解释为二维数据集</h2>
+          <p className="mt-2 text-sm leading-6 text-amber-900/90">
+            原文件、单元格坐标和结构诊断已经保留；无法可靠识别的区域不会进入全文切片或向量索引。
+            请先整理为稳定表头和逐行记录，再重新上传治理后的版本。
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            <span className="rounded-full bg-white/80 px-2.5 py-1">可查询区域 {spreadsheetProcessing?.dataset_regions ?? 0}</span>
+            <span className="rounded-full bg-white/80 px-2.5 py-1">待治理区域 {spreadsheetProcessing?.governance_regions ?? 0}</span>
+            {(spreadsheetProcessing?.layout_risks || []).map((risk) => (
+              <span key={risk} className="rounded-full bg-amber-100 px-2.5 py-1">{spreadsheetRiskLabel(risk)}</span>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
         <button type="button" onClick={() => setEditingMetadata((value) => !value)} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
@@ -685,7 +732,9 @@ export default function DocumentDetailPage() {
             </span>
           </summary>
           <PipelineStatus pipeline={pipeline} />
-          <ChunkingPreview key={params.id} documentId={params.id} />
+          {!spreadsheetProcessing && (
+            <ChunkingPreview key={params.id} documentId={params.id} />
+          )}
         </details>
       )}
 
@@ -755,6 +804,8 @@ export default function DocumentDetailPage() {
 
       {hasPaginatedPreview && previewMode === 'original' ? null : datasets.length > 0 ? (
         <DatasetWorkspace datasets={datasets} />
+      ) : document.content_kind === 'spreadsheet' ? (
+        <SpreadsheetGovernanceSummary processing={spreadsheetProcessing} />
       ) : version?.raw_content ? (
         rendersAsMarkdown ? (
           <MarkdownBody content={version.raw_content} />
@@ -775,6 +826,40 @@ export default function DocumentDetailPage() {
       )}
 
     </main>
+  );
+}
+
+function spreadsheetRiskLabel(risk: string) {
+  const labels: Record<string, string> = {
+    merged_cells: '存在合并单元格',
+    mixed_single_cell_rows: '标题/说明与数据混排',
+    unconfirmed_header: '未确认稳定表头',
+    separated_columns: '存在并排区域',
+    summary_rows: '明细与汇总混排',
+  };
+  return labels[risk] || risk;
+}
+
+function SpreadsheetGovernanceSummary({ processing }: { processing: DocumentVersion['meta']['spreadsheet_processing'] }) {
+  return (
+    <section className="mx-auto mt-6 max-w-4xl rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h2 className="text-lg font-semibold text-slate-900">表格治理建议</h2>
+      <p className="mt-2 text-sm leading-6 text-slate-600">
+        藏知目前只把可验证的二维区域作为数据集处理。这个文件仍可下载和整理，
+        但不会把复杂排版转换成长文本后参与知识问答。
+      </p>
+      <ul className="mt-4 list-disc space-y-2 pl-5 text-sm text-slate-700">
+        <li>每个数据区域保留一组稳定、唯一的字段名。</li>
+        <li>标题、单位和备注放在数据区域之外，或放入明确的备注列。</li>
+        <li>一行表示一条记录，避免把层级、包含项和不包括项只编码在缩进或符号中。</li>
+        <li>治理完成后作为新版本重新上传，原文件不会被覆盖。</li>
+      </ul>
+      {processing?.mode === 'mixed' && (
+        <p className="mt-4 rounded-lg bg-cyan-50 p-3 text-sm text-cyan-900">
+          当前工作簿同时包含可查询区域；这些区域仍可在上方数据集工作区使用。
+        </p>
+      )}
+    </section>
   );
 }
 

@@ -130,32 +130,22 @@ def build_chunk_specs(
 
     seed = content_hash_seed or chunk_content_hash(raw)
     if document_type in {"xlsx", "xls"}:
-        catalog_blocks = [b for b in blocks if (b.extra or {}).get("dataset_eligible") is not False]
-        fallback_blocks = [b for b in blocks if (b.extra or {}).get("dataset_eligible") is False]
-        catalog = _build_dataset_catalog_specs(
-            catalog_blocks,
+        # Excel participates in retrieval through validated datasets only.
+        # Irregular regions remain in the versioned parser payload and original
+        # workbook for diagnosis/governance, but are not flattened into prose
+        # chunks.  Treating an arbitrary workbook as a long document creates
+        # expensive vectors while silently discarding its two-dimensional
+        # semantics.
+        dataset_blocks = [
+            block
+            for block in blocks
+            if (block.extra or {}).get("dataset_eligible") is not False
+        ]
+        return _build_dataset_catalog_specs(
+            dataset_blocks,
             metadata=metadata,
             seed=seed,
         )
-        if not fallback_blocks:
-            return catalog
-        # Preserve every irregular source row through the ordinary document
-        # path, rather than replacing its evidence with representative rows.
-        fallback = build_chunk_specs(
-            StructuredContent(document_type="txt", blocks=fallback_blocks, metadata=metadata),
-            content_hash_seed=f"{seed}:layout",
-            child_max_chars=child_max_chars,
-            child_hard_max_chars=child_hard_max_chars,
-            child_min_chars=child_min_chars,
-            child_overlap_chars=child_overlap_chars,
-            preserve_source_spans=preserve_source_spans,
-        )
-        for role in (_CHUNK_ROLE_PARENT, _CHUNK_ROLE_CHILD):
-            offset = sum(s.role == role for s in catalog)
-            for spec in fallback:
-                if spec.role == role:
-                    spec.order_index += offset
-        return catalog + fallback
     sections = _split_into_sections(blocks)
     specs: list[ChunkSpec] = []
     parent_index = 0

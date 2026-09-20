@@ -16,6 +16,65 @@ def _structured(blocks, metadata=None):
     )
 
 
+def _spreadsheet(blocks, metadata=None):
+    return StructuredContent(
+        document_type="xlsx",
+        blocks=blocks,
+        metadata=metadata or {},
+    )
+
+
+def test_spreadsheet_governance_region_is_not_flattened_into_text_chunks():
+    specs = build_chunk_specs(
+        _spreadsheet(
+            [
+                Block(
+                    type="table",
+                    text="行 1｜A列=复杂层级标题\n行 2｜A列=事实数据",
+                    heading_path=["Sheet1"],
+                    extra={
+                        "dataset_eligible": False,
+                        "layout_risks": ["merged_cells"],
+                    },
+                )
+            ]
+        )
+    )
+
+    assert specs == []
+
+
+def test_spreadsheet_mixed_regions_only_emit_validated_dataset_catalog():
+    specs = build_chunk_specs(
+        _spreadsheet(
+            [
+                Block(
+                    type="table",
+                    text="名称 | 数量\n甲 | 2",
+                    heading_path=["Sheet1"],
+                    extra={
+                        "dataset_eligible": True,
+                        "sheet_name": "Sheet1",
+                        "region_index": 0,
+                        "column_names": ["名称", "数量"],
+                        "row_count": 1,
+                    },
+                ),
+                Block(
+                    type="table",
+                    text="不应进入知识切片的复杂区域",
+                    heading_path=["Sheet1"],
+                    extra={"dataset_eligible": False},
+                ),
+            ]
+        )
+    )
+
+    assert specs
+    assert {spec.chunk_type for spec in specs} == {"dataset", "dataset_catalog"}
+    assert not any("复杂区域" in spec.content for spec in specs)
+
+
 def test_short_section_becomes_single_parent_and_child():
     blocks = [
         Block(

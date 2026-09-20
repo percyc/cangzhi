@@ -29,9 +29,10 @@ def test_regular_region_and_notes_coexist_without_losing_evidence():
     rows = extract_table_row_payloads(content)
     assert len(rows) == 1
     assert rows[0]["row_number"] == 2
+    assert "附注：本表只记录已验收物品" in content.full_text()
     specs = build_chunk_specs(content)
     assert any(s.chunk_type == "dataset_catalog" for s in specs)
-    assert any("附注：本表只记录已验收物品" in s.content for s in specs if s.role == "child")
+    assert not any("附注：本表只记录已验收物品" in s.content for s in specs)
     assert len({s.external_id for s in specs}) == len(specs)
     for role in ("parent", "child"):
         indices = [s.order_index for s in specs if s.role == role]
@@ -63,7 +64,7 @@ def test_summary_rows_are_not_counted_as_detail():
     content = parse_rows([["名称", "数量"], ["甲", 2], ["乙", 3], ["合计", 5]])
     assert extract_table_row_payloads(content) == []
     assert "合计" in content.full_text()
-    assert any("合计" in s.content for s in build_chunk_specs(content) if s.role == "child")
+    assert build_chunk_specs(content) == []
 
 
 def test_regular_table_with_total_column_still_supports_exact_queries():

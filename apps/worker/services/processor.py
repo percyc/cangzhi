@@ -1448,7 +1448,26 @@ def _enqueue_embedding_jobs_for_new_chunks(
             )
         ).all()
     )
+    child_chunks = [
+        chunk
+        for chunk in child_chunks
+        if not (chunk.extra or {}).get("spreadsheet_governance_required")
+        and (chunk.extra or {}).get("dataset_eligible") is not False
+    ]
     if not child_chunks:
+        version.meta = {
+            **(version.meta or {}),
+            "embedding_strategy": {
+                "mode": "disabled",
+                "reason": "no_indexable_chunks",
+                "total_child_chunks": 0,
+                "selected_chunks": 0,
+                "structured_table_rows": int(
+                    (version.meta or {}).get("structured_table_row_count") or 0
+                ),
+            },
+        }
+        session.add(version)
         return
 
     total_child_chunks = len(child_chunks)
@@ -1456,9 +1475,6 @@ def _enqueue_embedding_jobs_for_new_chunks(
     use_sampling = (
         table_row_count > LARGE_TABLE_EMBEDDING_THRESHOLD
         and total_child_chunks > LARGE_TABLE_EMBEDDING_THRESHOLD
-        # Irregular spreadsheet regions have no exact-query backing rows.
-        # Sampling them as if they were redundant dataset rows loses evidence.
-        and not any((chunk.extra or {}).get("dataset_eligible") is False for chunk in child_chunks)
     )
     selected_chunks = (
         evenly_sample_chunks(child_chunks, LARGE_TABLE_EMBEDDING_SAMPLE_SIZE)
@@ -2467,6 +2483,48 @@ def _log_pdf_ocr_summary(
     )
 
 
+def _spreadsheet_processing_summary(payload: dict) -> dict | None:
+    """Return a bounded policy summary without copying spreadsheet cells."""
+
+    if payload.get("document_type") not in {"xls", "xlsx"}:
+        return None
+    metadata = payload.get("metadata")
+    regions = metadata.get("regions") if isinstance(metadata, dict) else None
+    regions = regions if isinstance(regions, list) else []
+    eligible = 0
+    governance = 0
+    risks: set[str] = set()
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        if region.get("dataset_eligible") is False:
+            governance += 1
+            risks.update(
+                str(value)
+                for value in (region.get("layout_risks") or [])
+                if value
+            )
+        else:
+            eligible += 1
+    if eligible and governance:
+        mode = "mixed"
+    elif eligible:
+        mode = "dataset"
+    elif governance:
+        mode = "governance"
+    else:
+        mode = "empty"
+    return {
+        "policy_version": "spreadsheet-dataset-only:v1",
+        "is_spreadsheet": True,
+        "mode": mode,
+        "dataset_regions": eligible,
+        "governance_regions": governance,
+        "governance_required": governance > 0 or not regions,
+        "layout_risks": sorted(risks),
+    }
+
+
 def _apply_parse_result(
     session: Session,
     document: Document,
@@ -2493,6 +2551,13 @@ def _apply_parse_result(
     version.structured_content = payload
     full_text = structured.full_text()
     version.raw_content = full_text
+
+    spreadsheet_summary = _spreadsheet_processing_summary(payload)
+    if spreadsheet_summary is not None:
+        version.meta = {
+            **(version.meta or {}),
+            "spreadsheet_processing": spreadsheet_summary,
+        }
 
     metadata = payload.get("metadata") if isinstance(payload, dict) else None
     if isinstance(metadata, dict):

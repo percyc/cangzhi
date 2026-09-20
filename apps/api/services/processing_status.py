@@ -349,6 +349,11 @@ async def load_pipeline_statuses(
     output: dict[int, dict] = {}
     for version_id, version in versions.items():
         all_chunks = chunks_by_version.get(version_id, [])
+        spreadsheet = (version.meta or {}).get("spreadsheet_processing") or {}
+        governance_only = bool(
+            isinstance(spreadsheet, dict)
+            and spreadsheet.get("mode") in {"governance", "empty"}
+        )
         expected = _expected_chunks(version, all_chunks)
         jobs = latest_jobs.get(version_id, {})
 
@@ -369,7 +374,13 @@ async def load_pipeline_statuses(
             parsing = {**parsing, "extraction": pdf_extraction}
 
         chunking = _stage_payload(jobs.get("chunking"))
-        if all_chunks:
+        if governance_only and getattr(jobs.get("chunking"), "status", None) == "completed":
+            chunking = {
+                "status": "skipped",
+                "message": "表格结构需要治理，未生成知识切片",
+                "last_error": None,
+            }
+        elif all_chunks:
             chunking = {
                 "status": "completed",
                 "message": "已生成知识切片",
@@ -414,7 +425,18 @@ async def load_pipeline_statuses(
         total = len(expected)
         missing = max(total - completed, 0)
 
-        if profile is None:
+        if governance_only:
+            embedding_stage = {
+                "status": "skipped",
+                "message": "表格结构需要治理，未生成向量",
+                "profile_id": profile.id if profile is not None else None,
+                "model": profile.model if profile is not None else None,
+                "completed": 0,
+                "total": 0,
+                "missing": 0,
+                "failed": 0,
+            }
+        elif profile is None:
             embedding_stage = {
                 "status": "disabled",
                 "message": "未启用向量索引，仍可使用关键词检索",
@@ -487,12 +509,20 @@ async def load_pipeline_statuses(
             "document_id": version.document_id,
             "document_version_id": version_id,
             "overall_status": overall,
-            "keyword_searchable": bool(all_chunks),
-            "vector_searchable": total > 0 and missing == 0 and profile is not None,
+            "keyword_searchable": bool(all_chunks) and not governance_only,
+            "vector_searchable": (
+                total > 0
+                and missing == 0
+                and profile is not None
+                and not governance_only
+            ),
             "stages": {
                 "parsing": parsing,
                 "understanding": understanding,
-                "chunking": {**chunking, "child_chunks": len(all_chunks)},
+                "chunking": {
+                    **chunking,
+                    "child_chunks": 0 if governance_only else len(all_chunks),
+                },
                 "embedding": embedding_stage,
             },
         }

@@ -69,6 +69,36 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 _RUNNING_JOB_STATUSES = {"created", "processing", "retry"}
 
 
+def _document_content_kind(
+    source_type: DocumentSourceType,
+    *,
+    has_dataset: bool,
+    is_spreadsheet: bool,
+) -> str:
+    if source_type == DocumentSourceType.note:
+        return "note"
+    if has_dataset:
+        return "dataset"
+    if is_spreadsheet:
+        return "spreadsheet"
+    return "document"
+
+
+def _compact_spreadsheet_payload(value: dict | None) -> dict | None:
+    if not isinstance(value, dict):
+        return value
+    if value.get("document_type") not in {"xls", "xlsx"}:
+        return value
+    # Spreadsheet cells stay in the versioned fact payload and original file.
+    # The document page only needs bounded diagnostics; sending every parsed
+    # block recreates the large-document problem in the browser.
+    return {
+        "document_type": value.get("document_type"),
+        "schema_version": value.get("schema_version"),
+        "metadata": value.get("metadata") or {},
+    }
+
+
 @router.post("/{document_id}/chunking-preview")
 async def chunking_preview(document_id: int, refresh: bool = False, db: AsyncSession = Depends(get_db)):
     from ..services.chunking_preview import PreviewError, preview_document
@@ -197,10 +227,16 @@ async def build_document_response(
 ) -> DocumentResponse:
     version_response: DocumentVersionResponse | None = None
     version_id: int | None = None
+    version_is_spreadsheet = False
     if document.current_version_id is not None:
         version = await db.get(DocumentVersion, document.current_version_id)
         if version is not None:
             version_id = version.id
+            structured_payload = version.structured_content
+            version_is_spreadsheet = bool(
+                isinstance(structured_payload, dict)
+                and structured_payload.get("document_type") in {"xls", "xlsx"}
+            )
             blob_response = None
             preview_blob_response = None
             if version.blob_id is not None:
@@ -215,8 +251,8 @@ async def build_document_response(
                 id=version.id,
                 version_number=version.version_number,
                 content_hash=version.content_hash,
-                raw_content=version.raw_content,
-                structured_content=version.structured_content,
+                raw_content=None if version_is_spreadsheet else version.raw_content,
+                structured_content=_compact_spreadsheet_payload(structured_payload),
                 processing_status=version.processing_status,
                 meta=version.meta or {},
                 created_at=version.created_at,
@@ -270,12 +306,10 @@ async def build_document_response(
             .limit(1)
         )
     )
-    content_kind = (
-        "note"
-        if document.source_type == DocumentSourceType.note
-        else "dataset"
-        if has_dataset
-        else "document"
+    content_kind = _document_content_kind(
+        document.source_type,
+        has_dataset=has_dataset,
+        is_spreadsheet=version_is_spreadsheet,
     )
     return DocumentResponse(
         id=document.id,
@@ -383,6 +417,9 @@ async def list_document_overview(
                     DocumentVersion.version_number,
                     DocumentVersion.processing_status,
                     DocumentVersion.created_at,
+                    DocumentVersion.structured_content["document_type"]
+                    .as_string()
+                    .label("document_type"),
                 ).where(DocumentVersion.id.in_(version_ids))
             )
         ).all()
@@ -475,12 +512,13 @@ async def list_document_overview(
                 "connector_available": connector is not None,
                 "source_status": entry.state if entry else None,
             }
-        content_kind = (
-            "note"
-            if document.source_type == DocumentSourceType.note
-            else "dataset"
-            if version_id in dataset_version_ids
-            else "document"
+        content_kind = _document_content_kind(
+            document.source_type,
+            has_dataset=version_id in dataset_version_ids,
+            is_spreadsheet=bool(
+                version is not None
+                and version.document_type in {"xls", "xlsx"}
+            ),
         )
         output.append(
             DocumentListItemResponse(

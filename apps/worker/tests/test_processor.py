@@ -29,6 +29,7 @@ from apps.worker.services.processor import (
     _ensure_word_pdf_preview,
     _is_terminal_parse_failure,
     _load_content_for_preview,
+    _spreadsheet_processing_summary,
     calculate_next_retry_at,
     process_single_job,
 )
@@ -1067,18 +1068,54 @@ class TestEnqueueEmbeddingJobsForNewChunks:
             ).all()
         )
         # The helper samples 256 chunks out of 1_500.
-        assert len(jobs) == (1_500 if has_source_fallback else 256)
+        assert len(jobs) == 256
         covered_chunk_ids = {job.embedding_chunk_id for job in jobs}
         assert covered_chunk_ids.issubset({chunk.id for chunk in chunks})
+        if has_source_fallback:
+            assert chunks[0].id not in covered_chunk_ids
         # The strategy block is stamped on the version so the
         # API path's :func:`_current_child_chunks` reuses the
         # same sampled slice.
         session.refresh(version)
         strategy = (version.meta or {}).get("embedding_strategy") or {}
-        assert strategy.get("mode") == ("full" if has_source_fallback else "sampled")
-        assert strategy.get("total_child_chunks") == 1_500
-        assert strategy.get("selected_chunks") == (1_500 if has_source_fallback else 256)
+        assert strategy.get("mode") == "sampled"
+        assert strategy.get("total_child_chunks") == (1_499 if has_source_fallback else 1_500)
+        assert strategy.get("selected_chunks") == 256
         assert strategy.get("structured_table_rows") == 10_000
+
+    @pytest.mark.parametrize(
+        ("regions", "expected"),
+        [
+            ([{"dataset_eligible": True}], ("dataset", 1, 0, False)),
+            (
+                [
+                    {"dataset_eligible": True},
+                    {"dataset_eligible": False, "layout_risks": ["merged_cells"]},
+                ],
+                ("mixed", 1, 1, True),
+            ),
+            (
+                [{"dataset_eligible": False, "layout_risks": ["summary_rows"]}],
+                ("governance", 0, 1, True),
+            ),
+            ([], ("empty", 0, 0, True)),
+        ],
+    )
+    def test_spreadsheet_processing_summary(self, regions, expected):
+        summary = _spreadsheet_processing_summary(
+            {"document_type": "xlsx", "metadata": {"regions": regions}}
+        )
+
+        assert summary is not None
+        assert (
+            summary["mode"],
+            summary["dataset_regions"],
+            summary["governance_regions"],
+            summary["governance_required"],
+        ) == expected
+
+    def test_non_spreadsheet_has_no_processing_summary(self):
+        assert _spreadsheet_processing_summary({"document_type": "pdf"}) is None
 
     def test_small_corpus_uses_full_strategy(self, session):
         """The opposite of the sampled path: a small version
