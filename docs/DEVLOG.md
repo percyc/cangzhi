@@ -1114,3 +1114,18 @@
 - 回退镜像：cangzhi-api/worker:rollback-before-spreadsheet-20260920。旧优先容器
   cangzhi-priority-worker-pre-spreadsheet-20260920保留exit0/restart=no；新容器restart
   unless-stopped。回退代码不应回滚原文；将来主线发布必须纳入4218fd3以免覆盖修复。
+
+### 2026-09-20 主线同步与开发交接文档
+
+- 按维护者要求，Excel修复及此前本地提交已快进合并main至a1a934f并推送Gitea，
+  v1.0标签保持8cccfb9不变；Gitee同标签一致，开发主线因写入认证不足尚未同步。
+- 文档交接负责人Codex，分支codex/docs-developer-handoff。更新README、状态、
+  ROADMAP/BACKLOG，新增DEVELOPER_HANDOFF和SPREADSHEET_TESTING；明确三批CZ-X01–X03
+  均为待实现，不能把已完成的保守全文回退误记为完整Excel结构理解。
+- 本轮只读确认已发布样例全流程与向量完成；不把完成率当作语义质量。实例地址、
+  实际文件名/资料ID、备份与操作名单通过对话私下交接，新通用文档不收录这些信息。
+  既有历史日志不改写，若需历史脱敏另行审查。
+- 当前合成Excel测试在内存创建工作簿，Python测试文件不是可上传附件；新增说明列出
+  真实原件传递方式、跨环境ID变化、标准表不退步及复杂表待验收项。
+- 本轮文档交付不更改代码/生产队列、不部署、不发新版本。测试计数引用已记录的
+  发布基线（1445通过/2跳过、专项122通过），不伪称重新跑过业务回归。
