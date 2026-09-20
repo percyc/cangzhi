@@ -685,10 +685,10 @@ export default function DocumentDetailPage() {
             </span>
           </summary>
           <PipelineStatus pipeline={pipeline} />
+          <ChunkingPreview key={params.id} documentId={params.id} />
         </details>
       )}
 
-      <ChunkingPreview key={params.id} documentId={params.id} />
       <KnowledgeEnhancement key={params.id} docId={params.id} />
       {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
       {latestJob?.last_error && status === 'failed' && (
