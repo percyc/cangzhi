@@ -1,40 +1,7 @@
-import Link from 'next/link';
+import { redirect } from 'next/navigation';
 
 export default function Home() {
-  return (
-    <main className="mx-auto min-h-screen max-w-5xl px-6 py-16">
-      <p className="mb-3 text-sm font-medium tracking-[0.2em] text-amber-700">CANGZHI</p>
-      <h1 className="text-4xl font-semibold tracking-tight text-slate-900">藏知</h1>
-      <p className="mt-3 text-base font-medium tracking-wide text-slate-800">
-        藏有所知，问有所据
-      </p>
-      <p className="mt-4 max-w-xl text-lg leading-8 text-slate-600">
-        个人可控的 AI 知识中枢。让资料和想法自然沉淀，通过搜索、引用问答和
-        外部智能体随时可靠取用。
-      </p>
-      <div className="mt-10 flex flex-wrap gap-3">
-        <Link href="/ask" className="rounded-xl bg-slate-900 px-5 py-3 text-white">
-          问知识库
-        </Link>
-        <Link href="/search" className="rounded-xl border border-slate-300 px-5 py-3">
-          搜索资料
-        </Link>
-        <Link href="/notes/new" className="rounded-xl border border-slate-300 px-5 py-3">
-          记录一个想法
-        </Link>
-        <Link href="/files/upload" className="rounded-xl border border-slate-300 px-5 py-3">
-          上传资料
-        </Link>
-        <Link href="/links/new" className="rounded-xl border border-slate-300 px-5 py-3">
-          收藏链接
-        </Link>
-        <Link href="/documents" className="rounded-xl border border-slate-300 px-5 py-3">
-          查看全部资料
-        </Link>
-        <Link href="/categories" className="rounded-xl border border-slate-300 px-5 py-3">
-          分类管理
-        </Link>
-      </div>
-    </main>
-  );
+  // The root route is authenticated by the proxy. Keep one real application
+  // home instead of showing a second, content-free set of navigation links.
+  redirect('/documents');
 }

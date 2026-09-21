@@ -139,6 +139,46 @@ class _OllamaConfig(BaseModel):
         return _validate_model(value)
 
 
+class ModelDiscoveryRequest(BaseModel):
+    """Ephemeral connection details used only to read a model catalog.
+
+    This request deliberately does not include a model name and is never
+    persisted.  An omitted key may reuse the encrypted key already saved for
+    the selected channel, which keeps refreshes convenient without returning
+    the secret to the browser.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: str = Field(default="chat", max_length=16)
+    provider: str = Field(min_length=1, max_length=16)
+    base_url: str = Field(min_length=1, max_length=512)
+    api_key: str | None = Field(default=None, max_length=512)
+    use_saved_api_key: bool = True
+    timeout_seconds: int = Field(default=30, ge=1, le=600)
+
+    @field_validator("channel")
+    @classmethod
+    def _channel(cls, value: str) -> str:
+        cleaned = (value or "chat").strip().lower()
+        if cleaned not in {"chat", "embedding", "ocr"}:
+            raise ValueError("不支持的模型渠道")
+        return cleaned
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, value: str) -> str:
+        cleaned = (value or "").strip().lower()
+        if cleaned not in {"openai", "ollama"}:
+            raise ValueError("不支持的模型来源")
+        return cleaned
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url(cls, value: str) -> str:
+        return _validate_url(value)
+
+
 class AIConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1128,6 +1168,102 @@ async def _request_model_ids(
                 "message": "模型服务返回的模型列表格式不正确",
             },
         ) from None
+
+
+def _saved_model_discovery_key(
+    row: AIRuntimeConfig,
+    *,
+    channel: str,
+    admin: Admin,
+) -> str | None:
+    cipher = {
+        "chat": row.openai_api_key_cipher if row.has_api_key else None,
+        "embedding": (
+            row.embedding_api_key_cipher if row.has_embedding_api_key else None
+        ),
+        "ocr": row.ocr_api_key_cipher if row.has_ocr_api_key else None,
+    }[channel]
+    if not cipher:
+        return None
+    try:
+        return decrypt_secret(cipher) or None
+    except (SecretStoreError, SecretDecryptError):
+        logger.warning(
+            "ai_models_discovery_decrypt_failed channel=%s admin=%s",
+            channel,
+            admin.username,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "decrypt_failed",
+                "message": "已保存的密钥无法读取，请重新输入密钥",
+            },
+        ) from None
+
+
+@router.post("/models/discover", response_model=dict[str, Any])
+async def discover_models(
+    payload: ModelDiscoveryRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    """Read a provider model list before saving the configuration.
+
+    The supplied secret is used for this single upstream request only.  It is
+    neither persisted nor logged, and all upstream failures remain sanitised
+    by :func:`_request_model_ids`.
+    """
+
+    if payload.channel == "ocr" and payload.provider != "openai":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "unsupported_provider",
+                "message": "图片文字识别仅支持 OpenAI 兼容服务",
+            },
+        )
+
+    headers: dict[str, str] | None = None
+    if payload.provider == "openai":
+        api_key = (payload.api_key or "").strip()
+        if not api_key and payload.use_saved_api_key:
+            row = await _get_or_create_config(db)
+            api_key = _saved_model_discovery_key(
+                row,
+                channel=payload.channel,
+                admin=admin,
+            ) or ""
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "missing_api_key",
+                    "message": "请输入 API 密钥，或保留已保存的密钥",
+                },
+            )
+        url = f"{payload.base_url.rstrip('/')}/models"
+        list_key = "data"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        }
+    else:
+        url = f"{payload.base_url.rstrip('/')}/api/tags"
+        list_key = "models"
+
+    model_ids = await _request_model_ids(
+        url=url,
+        timeout=float(payload.timeout_seconds),
+        list_key=list_key,
+        headers=headers,
+    )
+    sorted_ids = sorted(set(model_ids), key=_natural_model_key)[:500]
+    return {
+        "models": [{"id": model_id} for model_id in sorted_ids],
+        "provider": payload.provider,
+        "current_model": "",
+    }
 
 
 @router.get("/models", response_model=dict[str, Any])

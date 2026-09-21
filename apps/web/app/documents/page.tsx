@@ -400,6 +400,25 @@ export default function DocumentsListPage() {
           <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
             <p className="text-lg font-medium text-slate-800">{view === 'trash' ? '回收站为空' : '还没有资料'}</p>
             <p className="mt-2 text-sm text-slate-500">{view === 'trash' ? '删除的资料会暂存在这里，可以随时恢复。' : '从一条随手记、一篇文章链接或一个文件开始建立你的知识库。'}</p>
+            {view === 'active' && (
+              <div className="mx-auto mt-6 grid max-w-2xl gap-3 sm:grid-cols-3">
+                <Link href="/files/upload" className="rounded-xl bg-slate-950 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800">
+                  上传第一个文件
+                </Link>
+                <Link href="/notes/new" className="rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                  记录一条想法
+                </Link>
+                <Link href="/links/new" className="rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                  收藏一个链接
+                </Link>
+              </div>
+            )}
+            {view === 'active' && (
+              <p className="mt-5 text-xs text-slate-400">
+                不配置模型也能保存和关键词检索；需要自动摘要和问答时再前往
+                <Link href="/settings?section=chat" className="ml-1 font-medium text-slate-600 underline underline-offset-2">模型设置</Link>。
+              </p>
+            )}
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">

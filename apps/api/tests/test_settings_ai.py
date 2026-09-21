@@ -574,6 +574,139 @@ def test_models_endpoint_requires_authentication():
         )
 
 
+def test_model_discovery_requires_authentication():
+    from fastapi.testclient import TestClient as TC
+
+    app.dependency_overrides.pop(require_admin, None)
+    try:
+        with TC(app) as client:
+            response = client.post(
+                "/api/settings/ai/models/discover",
+                json={
+                    "channel": "chat",
+                    "provider": "openai",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "not-used",
+                },
+            )
+            assert response.status_code == 401
+    finally:
+        from types import SimpleNamespace
+
+        app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
+            id=1, username="tester", is_active=True
+        )
+
+
+def test_model_discovery_uses_unsaved_connection_without_persisting(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    secret = "sk-ephemeral-model-discovery"
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "model-10"}, {"id": "model-2"}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+
+    response = test_client.post(
+        "/api/settings/ai/models/discover",
+        json={
+            "channel": "chat",
+            "provider": "openai",
+            "base_url": "https://api.example.com/v1",
+            "api_key": secret,
+            "use_saved_api_key": False,
+            "timeout_seconds": 12,
+        },
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["models"]] == [
+        "model-2",
+        "model-10",
+    ]
+    assert captured[0].url == "https://api.example.com/v1/models"
+    assert captured[0].headers["authorization"] == f"Bearer {secret}"
+    assert secret not in response.text
+    config = test_client.get("/api/settings/ai").json()["config"]
+    assert config["provider"] == "disabled"
+    assert config["has_api_key"] is False
+
+
+def test_model_discovery_can_reuse_saved_channel_key(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    secret = "sk-saved-embedding-discovery"
+    test_client.patch(
+        "/api/settings/ai",
+        json={
+            "provider": "disabled",
+            "embedding_provider": "openai",
+            "embedding_base_url": "https://old.example.com/v1",
+            "embedding_api_key_action": "replace",
+            "embedding_api_key": secret,
+        },
+    )
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"data": [{"id": "embed-new"}]})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    response = test_client.post(
+        "/api/settings/ai/models/discover",
+        json={
+            "channel": "embedding",
+            "provider": "openai",
+            "base_url": "https://new.example.com/v1",
+            "use_saved_api_key": True,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["models"] == [{"id": "embed-new"}]
+    assert captured[0].headers["authorization"] == f"Bearer {secret}"
+
+
+def test_model_discovery_sanitizes_upstream_failure(client, monkeypatch):
+    test_client, _ = client
+    _setup_admin(test_client)
+    secret = "sk-discovery-never-return"
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(401, text=f"invalid bearer {secret}")
+    )
+    monkeypatch.setattr(
+        "apps.api.api.settings_ai.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport),
+    )
+    response = test_client.post(
+        "/api/settings/ai/models/discover",
+        json={
+            "channel": "ocr",
+            "provider": "openai",
+            "base_url": "https://vision.example.com/v1",
+            "api_key": secret,
+            "use_saved_api_key": False,
+        },
+    )
+    assert response.status_code == 502
+    assert secret not in response.text
+    assert "HTTP 401" in response.json()["detail"]["message"]
+
+
 def test_models_endpoint_rejects_disabled_provider(client):
     """Must return 400 when provider is disabled."""
     test_client, _ = client

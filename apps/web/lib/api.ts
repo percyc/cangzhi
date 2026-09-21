@@ -139,6 +139,30 @@ export type AIModelsResponse = {
   current_model: string;
 };
 
+export type ModelDiscoveryPayload = {
+  channel: 'chat' | 'embedding' | 'ocr';
+  provider: 'openai' | 'ollama';
+  base_url: string;
+  api_key?: string;
+  use_saved_api_key?: boolean;
+  timeout_seconds?: number;
+};
+
+export async function discoverAIModels(
+  payload: ModelDiscoveryPayload,
+): Promise<AIModelsResponse> {
+  const response = await fetch('/api/settings/ai/models/discover', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await extractErrorMessage(response, '获取模型列表失败'));
+  }
+  return parseJson<AIModelsResponse>(response);
+}
+
 export async function fetchAIModels(): Promise<AIModelsResponse> {
   const response = await fetch('/api/settings/ai/models', {
     cache: 'no-store',

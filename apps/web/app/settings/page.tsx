@@ -4,11 +4,9 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import {
+  discoverAIModels,
   fetchAIConfig,
-  fetchAIModels,
-  fetchEmbeddingModels,
   fetchEmbeddingStatus,
-  fetchOcrModels,
   runEmbeddingProfileAction,
   testAIConfig,
   testEmbeddingCompatibility,
@@ -176,6 +174,18 @@ export default function SettingsPage() {
     setModelsFetchError(null);
   };
 
+  const invalidateEmbeddingModels = () => {
+    setEmbeddingModels([]);
+    setEmbeddingModelsState('idle');
+    setEmbeddingModelsError(null);
+  };
+
+  const invalidateOcrModels = () => {
+    setOcrModels([]);
+    setOcrModelsState('idle');
+    setOcrModelsError(null);
+  };
+
   const connectionChanged =
     provider !== config?.provider ||
     (provider === 'openai' &&
@@ -235,17 +245,43 @@ export default function SettingsPage() {
   const dirtyPanelCount =
     Number(chatDirty) + Number(embeddingDirty) + Number(ocrDirty);
   const anyDirty = dirtyPanelCount > 0;
+  const activePanelDirty = activePanel === 'chat'
+    ? chatDirty
+    : activePanel === 'embedding'
+      ? embeddingDirty
+      : ocrDirty;
+  const chatDiscoveryReady = provider === 'ollama'
+    ? Boolean(ollamaBaseUrl.trim())
+    : provider === 'openai' && Boolean(
+        openaiBaseUrl.trim() && (apiKey || (config?.has_api_key && !clearKey)),
+      );
+  const embeddingDiscoveryReady = embeddingProvider === 'ollama'
+    ? Boolean(embeddingBaseUrl.trim())
+    : embeddingProvider === 'openai' && Boolean(
+        embeddingBaseUrl.trim() && (
+          embeddingApiKey || (config?.has_embedding_api_key && !clearEmbeddingApiKey)
+        ),
+      );
+  const ocrDiscoveryReady = ocrProvider === 'openai' && Boolean(
+    ocrBaseUrl.trim() && (
+      ocrReuseChat
+        ? apiKey || (config?.has_api_key && !clearKey)
+        : ocrApiKey || (config?.has_ocr_api_key && !clearOcrApiKey)
+    ),
+  );
 
   const handleFetchModels = async () => {
-    if (connectionChanged) {
-      setModelsFetchState('error');
-      setModelsFetchError('地址、密钥或模型来源有改动，请先保存设置');
-      return;
-    }
     setModelsFetchState('fetching');
     setModelsFetchError(null);
     try {
-      const result = await fetchAIModels();
+      const result = await discoverAIModels({
+        channel: 'chat',
+        provider: provider === 'ollama' ? 'ollama' : 'openai',
+        base_url: provider === 'ollama' ? ollamaBaseUrl.trim() : openaiBaseUrl.trim(),
+        api_key: provider === 'openai' ? apiKey || undefined : undefined,
+        use_saved_api_key: provider === 'openai' ? !clearKey : undefined,
+        timeout_seconds: timeoutSeconds,
+      });
       setModels(result.models);
       setModelsFetchState('success');
     } catch (err) {
@@ -360,19 +396,17 @@ export default function SettingsPage() {
   };
 
   const handleFetchEmbeddingModels = async () => {
-    if (
-      embeddingConnectionChanged ||
-      embeddingTimeoutChanged ||
-      embeddingProvider === 'disabled'
-    ) {
-      setEmbeddingModelsState('error');
-      setEmbeddingModelsError('请先保存向量渠道、地址、密钥和超时设置');
-      return;
-    }
     setEmbeddingModelsState('fetching');
     setEmbeddingModelsError(null);
     try {
-      const result = await fetchEmbeddingModels();
+      const result = await discoverAIModels({
+        channel: 'embedding',
+        provider: embeddingProvider === 'ollama' ? 'ollama' : 'openai',
+        base_url: embeddingBaseUrl.trim(),
+        api_key: embeddingProvider === 'openai' ? embeddingApiKey || undefined : undefined,
+        use_saved_api_key: embeddingProvider === 'openai' ? !clearEmbeddingApiKey : undefined,
+        timeout_seconds: embeddingTimeoutSeconds,
+      });
       setEmbeddingModels(result.models);
       setEmbeddingModelsState('success');
     } catch (err) {
@@ -421,18 +455,17 @@ export default function SettingsPage() {
   };
 
   const handleFetchOcrModels = async () => {
-    if (
-      ocrConnectionChanged ||
-      ocrProvider === 'disabled'
-    ) {
-      setOcrModelsState('error');
-      setOcrModelsError('请先保存外部 OCR 的地址和密钥');
-      return;
-    }
     setOcrModelsState('fetching');
     setOcrModelsError(null);
     try {
-      const result = await fetchOcrModels();
+      const result = await discoverAIModels({
+        channel: ocrReuseChat ? 'chat' : 'ocr',
+        provider: 'openai',
+        base_url: ocrBaseUrl.trim(),
+        api_key: (ocrReuseChat ? apiKey : ocrApiKey) || undefined,
+        use_saved_api_key: ocrReuseChat ? !clearKey : !clearOcrApiKey,
+        timeout_seconds: ocrTimeoutSeconds,
+      });
       setOcrModels(result.models);
       setOcrModelsState('success');
     } catch (err) {
@@ -534,6 +567,25 @@ export default function SettingsPage() {
             ? '配置语义向量渠道，并管理全库索引版本与切换。'
             : '为扫描 PDF 中的图片页配置外部视觉识别模型。'}
       </p>
+      {provider === 'disabled' && !embeddingStatus?.active_profile.id && (
+        <section className="mt-5 rounded-2xl border border-blue-200 bg-blue-50/60 p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-blue-950">第一次使用？先配置对话模型即可</p>
+              <p className="mt-1 text-xs leading-5 text-blue-800">
+                对话模型负责摘要、分类和问答；向量模型与图片文字识别都是可选增强，之后再配置也不影响先上传资料。
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2 text-xs font-medium text-blue-900">
+              <span className="rounded-full bg-white px-3 py-1.5">1 填连接</span>
+              <span>→</span>
+              <span className="rounded-full bg-white px-3 py-1.5">2 选模型</span>
+              <span>→</span>
+              <span className="rounded-full bg-white px-3 py-1.5">3 保存测试</span>
+            </div>
+          </div>
+        </section>
+      )}
       <SettingsSectionNav
         active={activePanel}
         hints={{
@@ -645,14 +697,6 @@ export default function SettingsPage() {
                 invalidateModels();
               }}
             />
-            <FieldWithList
-              id="openai-model"
-              label="模型名称"
-              help="保存地址和密钥后，可获取模型列表快速选择；也可以手动输入。"
-              value={openaiModel}
-              onChange={setOpenaiModel}
-              models={models}
-            />
             <div>
               <label htmlFor="api-key" className="block text-sm text-slate-700">
                 API 密钥
@@ -691,6 +735,31 @@ export default function SettingsPage() {
                 明确清除已保存的密钥
               </label>
             </div>
+            <FieldWithList
+              id="openai-model"
+              label="模型名称"
+              help="获取列表是可选的；如果服务不提供模型列表，可以直接输入模型名称。"
+              value={openaiModel}
+              onChange={setOpenaiModel}
+              models={models}
+              action={{
+                label: models.length ? '刷新模型列表' : '获取模型列表',
+                busyLabel: '正在获取…',
+                busy: modelsFetchState === 'fetching',
+                disabled: !chatDiscoveryReady,
+                onClick: () => void handleFetchModels(),
+              }}
+            />
+            {modelsFetchError && <p className="text-sm text-red-700">获取失败：{modelsFetchError}</p>}
+            {modelsFetchState === 'success' && <p className="text-sm text-emerald-700">已获取 {models.length} 个模型，可以从列表选择或继续手动输入。</p>}
+            {!chatDiscoveryReady && <p className="text-xs text-amber-700">填写 API 地址和密钥后即可获取模型列表，无需先保存。</p>}
+            <Field
+              id="timeout"
+              label="请求超时（秒）"
+              value={String(timeoutSeconds)}
+              onChange={(value) => setTimeoutSeconds(Number(value) || 30)}
+              type="number"
+            />
             </section>
           )}
 
@@ -712,60 +781,27 @@ export default function SettingsPage() {
             <FieldWithList
               id="ollama-model"
               label="模型名称"
-              help="保存服务地址后，可获取本地模型列表快速选择；也可以手动输入。"
+              help="获取列表是可选的；也可以直接输入本地模型名称。"
               value={ollamaModel}
               onChange={setOllamaModel}
               models={models}
+              action={{
+                label: models.length ? '刷新模型列表' : '获取模型列表',
+                busyLabel: '正在获取…',
+                busy: modelsFetchState === 'fetching',
+                disabled: !chatDiscoveryReady,
+                onClick: () => void handleFetchModels(),
+              }}
             />
-            </section>
-          )}
-
-          {provider !== 'disabled' && (
-            <section className="space-y-4 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
-            <div>
-              <h2 className="text-base font-semibold text-slate-800">
-                3. 获取模型与请求设置
-              </h2>
-              <p className="mt-1 text-xs text-slate-500">
-                模型列表在这里获取；连接测试统一在页面底部执行。
-              </p>
-            </div>
+            {modelsFetchError && <p className="text-sm text-red-700">获取失败：{modelsFetchError}</p>}
+            {modelsFetchState === 'success' && <p className="text-sm text-emerald-700">已获取 {models.length} 个本地模型。</p>}
             <Field
               id="timeout"
-              label="对话模型请求超时（秒）"
+              label="请求超时（秒）"
               value={String(timeoutSeconds)}
               onChange={(value) => setTimeoutSeconds(Number(value) || 30)}
               type="number"
             />
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={handleFetchModels}
-                disabled={modelsFetchState === 'fetching' || connectionChanged}
-                className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-              >
-                {modelsFetchState === 'fetching'
-                  ? '正在获取对话模型…'
-                  : models.length
-                    ? '刷新对话模型列表'
-                    : '获取对话模型列表'}
-              </button>
-            </div>
-            {connectionChanged && (
-              <p className="text-sm text-amber-700">
-                请先保存对话模型的地址、密钥或来源改动
-              </p>
-            )}
-            {modelsFetchError && (
-              <p className="text-sm text-red-700">
-                获取对话模型失败：{modelsFetchError}
-              </p>
-            )}
-            {modelsFetchState === 'success' && (
-              <p className="text-sm text-emerald-700">
-                已获取 {models.length} 个对话模型，可在上方模型名称中选择
-              </p>
-            )}
             </section>
           )}
         </section>
@@ -887,7 +923,10 @@ export default function SettingsPage() {
                 <button
                   key={value}
                   type="button"
-                  onClick={() => setEmbeddingProvider(value)}
+                  onClick={() => {
+                    setEmbeddingProvider(value);
+                    invalidateEmbeddingModels();
+                  }}
                   className={`rounded-xl border p-3 text-left ${style}`}
                 >
                   <p className="text-sm font-semibold">{label.title}</p>
@@ -918,7 +957,10 @@ export default function SettingsPage() {
                     : '形如 https://api.openai.com/v1'
                 }
                 value={embeddingBaseUrl}
-                onChange={setEmbeddingBaseUrl}
+                onChange={(value) => {
+                  setEmbeddingBaseUrl(value);
+                  invalidateEmbeddingModels();
+                }}
               />
               {embeddingProvider === 'openai' && (
                 <div>
@@ -935,6 +977,7 @@ export default function SettingsPage() {
                     value={embeddingApiKey}
                     onChange={(event) => {
                       setEmbeddingApiKey(event.target.value);
+                      invalidateEmbeddingModels();
                       if (event.target.value) setClearEmbeddingApiKey(false);
                     }}
                     placeholder={
@@ -956,6 +999,7 @@ export default function SettingsPage() {
                       checked={clearEmbeddingApiKey}
                       onChange={(event) => {
                         setClearEmbeddingApiKey(event.target.checked);
+                        invalidateEmbeddingModels();
                         if (event.target.checked) setEmbeddingApiKey('');
                       }}
                     />
@@ -966,7 +1010,7 @@ export default function SettingsPage() {
               <FieldWithList
                 id="embedding-model"
                 label="Embedding 模型"
-                help="可从上方获取到的模型列表中挑选，也支持手动输入。留空即关闭 Embedding。"
+                help="获取列表是可选的；也可以直接输入模型名称。留空即关闭 Embedding。"
                 value={embeddingModel}
                 onChange={(value) => {
                   setEmbeddingModel(value);
@@ -975,7 +1019,17 @@ export default function SettingsPage() {
                 models={embeddingModels}
                 allowEmpty
                 emptyOptionLabel="（不启用 Embedding）"
+                action={{
+                  label: embeddingModels.length ? '刷新模型列表' : '获取模型列表',
+                  busyLabel: '正在获取…',
+                  busy: embeddingModelsState === 'fetching',
+                  disabled: !embeddingDiscoveryReady,
+                  onClick: () => void handleFetchEmbeddingModels(),
+                }}
               />
+              {embeddingModelsError && <p className="text-sm text-red-700">获取失败：{embeddingModelsError}</p>}
+              {embeddingModelsState === 'success' && <p className="text-sm text-emerald-700">已获取 {embeddingModels.length} 个模型，可以从列表选择或手动输入。</p>}
+              {!embeddingDiscoveryReady && <p className="text-xs text-amber-700">填写服务地址和密钥后即可获取模型列表，无需先保存。</p>}
               <Field
                 id="embedding-timeout"
                 label="Embedding 请求超时（秒）"
@@ -985,47 +1039,9 @@ export default function SettingsPage() {
                 }
                 type="number"
               />
-              <div className="rounded-xl border border-violet-100 bg-violet-50/50 p-4">
-                <h3 className="text-sm font-semibold text-slate-800">
-                  3. 获取向量模型
-                </h3>
-                <p className="mt-1 text-xs text-slate-500">
-                  模型列表在这里获取；连接和兼容性测试统一在页面底部执行。
-                </p>
-                <div className="mt-3 flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={handleFetchEmbeddingModels}
-                    disabled={
-                      embeddingModelsState === 'fetching' ||
-                      embeddingConnectionChanged ||
-                      embeddingTimeoutChanged
-                    }
-                    className="rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                  >
-                    {embeddingModelsState === 'fetching'
-                      ? '正在获取…'
-                      : embeddingModels.length
-                        ? '刷新向量模型列表'
-                        : '获取向量模型列表'}
-                  </button>
-                </div>
-                {embeddingModelsError && (
-                  <p className="mt-3 text-sm text-red-700">
-                    {embeddingModelsError}
-                  </p>
-                )}
-                {(embeddingConnectionChanged ||
-                  embeddingModelChanged ||
-                  embeddingTimeoutChanged) && (
-                  <p className="mt-3 text-sm text-amber-700">
-                    请先保存向量模型参数的改动，再执行获取或测试。
-                  </p>
-                )}
-                <p className="mt-3 text-xs text-slate-500">
-                  获取列表或测试不会重新生成文档向量；确认兼容性后，再在下方决定是否构建或切换索引。
-                </p>
-              </div>
+              <p className="rounded-lg bg-violet-50 px-3 py-2 text-xs leading-5 text-violet-800">
+                获取列表不会保存设置或生成文档向量。保存并测试兼容性后，再决定是否构建或切换索引。
+              </p>
             </div>
           )}
         </section>
@@ -1084,7 +1100,10 @@ export default function SettingsPage() {
                   <button
                     key={value}
                     type="button"
-                    onClick={() => setOcrProvider(value)}
+                    onClick={() => {
+                      setOcrProvider(value);
+                      invalidateOcrModels();
+                    }}
                     className={`rounded-xl border p-4 text-left ${style}`}
                   >
                     <p className="text-sm font-semibold">{label.title}</p>
@@ -1110,7 +1129,10 @@ export default function SettingsPage() {
                     type="checkbox"
                     className="mt-0.5"
                     checked={ocrReuseChat}
-                    onChange={(event) => setOcrReuseChat(event.target.checked)}
+                    onChange={(event) => {
+                      setOcrReuseChat(event.target.checked);
+                      invalidateOcrModels();
+                    }}
                   />
                   <span>
                     复用对话渠道的地址和已保存密钥
@@ -1126,17 +1148,10 @@ export default function SettingsPage() {
                 label="OpenAI 兼容服务地址"
                 help="形如 https://api.openai.com/v1"
                 value={ocrBaseUrl}
-                onChange={setOcrBaseUrl}
-              />
-              <FieldWithList
-                id="ocr-model"
-                label="视觉模型名称"
-                help="需要支持图片问答，例如 gpt-4o-mini、qwen-vl-max 等；可手动输入或从保存后的模型列表中选择。"
-                value={ocrModel}
-                onChange={setOcrModel}
-                models={ocrModels}
-                allowEmpty
-                emptyOptionLabel="（不填写，留待以后再选）"
+                onChange={(value) => {
+                  setOcrBaseUrl(value);
+                  invalidateOcrModels();
+                }}
               />
               <div>
                 <label
@@ -1152,6 +1167,7 @@ export default function SettingsPage() {
                   value={ocrApiKey}
                   onChange={(event) => {
                     setOcrApiKey(event.target.value);
+                    invalidateOcrModels();
                     if (event.target.value) setClearOcrApiKey(false);
                   }}
                   placeholder={
@@ -1175,12 +1191,33 @@ export default function SettingsPage() {
                     checked={clearOcrApiKey}
                     onChange={(event) => {
                       setClearOcrApiKey(event.target.checked);
+                      invalidateOcrModels();
                       if (event.target.checked) setOcrApiKey('');
                     }}
                   />
                   明确清除已保存的外部 OCR 密钥
                 </label>
               </div>
+              <FieldWithList
+                id="ocr-model"
+                label="视觉模型名称"
+                help="需要支持图片问答。获取列表是可选的，也可以直接输入模型名称。"
+                value={ocrModel}
+                onChange={setOcrModel}
+                models={ocrModels}
+                allowEmpty
+                emptyOptionLabel="（不填写，留待以后再选）"
+                action={{
+                  label: ocrModels.length ? '刷新模型列表' : '获取模型列表',
+                  busyLabel: '正在获取…',
+                  busy: ocrModelsState === 'fetching',
+                  disabled: !ocrDiscoveryReady,
+                  onClick: () => void handleFetchOcrModels(),
+                }}
+              />
+              {ocrModelsError && <p className="text-sm text-red-700">获取失败：{ocrModelsError}</p>}
+              {ocrModelsState === 'success' && <p className="text-sm text-emerald-700">已获取 {ocrModels.length} 个模型，可以从列表选择或手动输入。</p>}
+              {!ocrDiscoveryReady && <p className="text-xs text-amber-700">填写服务地址和密钥后即可获取模型列表，无需先保存。</p>}
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field
                   id="ocr-timeout"
@@ -1222,37 +1259,6 @@ export default function SettingsPage() {
                   type="number"
                 />
               </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleFetchOcrModels}
-                  disabled={
-                    ocrModelsState === 'fetching' || ocrConnectionChanged
-                  }
-                  className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  {ocrModelsState === 'fetching'
-                    ? '正在获取外部 OCR 模型…'
-                    : ocrModels.length
-                      ? '刷新外部 OCR 模型列表'
-                      : '获取外部 OCR 模型列表'}
-                </button>
-              </div>
-              {ocrConnectionChanged && (
-                <p className="text-sm text-amber-700">
-                  请先保存外部 OCR 的地址或密钥
-                </p>
-              )}
-              {ocrModelsError && (
-                <p className="text-sm text-red-700">
-                  获取外部 OCR 模型失败：{ocrModelsError}
-                </p>
-              )}
-              {ocrModelsState === 'success' && (
-                <p className="text-sm text-emerald-700">
-                  已获取 {ocrModels.length} 个外部 OCR 模型，可在视觉模型名称中选择
-                </p>
-              )}
             </section>
           )}
         </section>
@@ -1287,25 +1293,17 @@ export default function SettingsPage() {
               type="submit"
               disabled={
                 saveState === 'saving' ||
-                !anyDirty
+                !activePanelDirty
               }
               className="flex-1 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:bg-slate-300 sm:flex-none"
             >
               {saveState === 'saving'
                 ? '正在保存…'
-                : dirtyPanelCount > 1
-                  ? '保存全部修改'
-                  : chatDirty
-                    ? '保存对话模型'
-                    : embeddingDirty
-                      ? '保存向量模型'
-                      : ocrDirty
-                        ? '保存外部 OCR'
-                        : activePanel === 'chat'
-                          ? '保存对话模型'
-                          : activePanel === 'embedding'
-                            ? '保存向量模型'
-                            : '保存外部 OCR'}
+                : activePanel === 'chat'
+                  ? '保存对话模型'
+                  : activePanel === 'embedding'
+                    ? '保存向量模型'
+                    : '保存外部 OCR'}
             </button>
             {activePanel === 'chat' ? (
               <button
@@ -1438,6 +1436,7 @@ function FieldWithList({
   help,
   allowEmpty = false,
   emptyOptionLabel = '',
+  action,
 }: {
   id: string;
   label: string;
@@ -1447,6 +1446,13 @@ function FieldWithList({
   help?: string;
   allowEmpty?: boolean;
   emptyOptionLabel?: string;
+  action?: {
+    label: string;
+    busyLabel: string;
+    busy: boolean;
+    disabled?: boolean;
+    onClick: () => void;
+  };
 }) {
   const matches = models.some((model) => model.id === value);
   // The <select> can only show one of the known options. When the
@@ -1471,9 +1477,21 @@ function FieldWithList({
 
   return (
     <div>
-      <label htmlFor={id} className="block text-sm text-slate-700">
-        {label}
-      </label>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <label htmlFor={id} className="block text-sm text-slate-700">
+          {label}
+        </label>
+        {action && (
+          <button
+            type="button"
+            onClick={action.onClick}
+            disabled={action.busy || action.disabled}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {action.busy ? action.busyLabel : action.label}
+          </button>
+        )}
+      </div>
       {models.length > 0 && (
         <select
           aria-label={`${label}快速选择`}
