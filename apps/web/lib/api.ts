@@ -393,7 +393,22 @@ export type DatabaseCatalogTable = {
   schema_name: string;
   table_name: string;
   kind: string;
+  imported: boolean;
+  snapshot: DatabaseSnapshotSummary | null;
   columns: DatabaseCatalogColumn[];
+};
+
+export type DatabaseSnapshotSummary = {
+  id: number;
+  schema_name: string;
+  table_name: string;
+  document_id: number;
+  document_title: string;
+  document_deleted: boolean;
+  dataset_id: number;
+  row_count: number;
+  snapshot_at: string | null;
+  last_error: string | null;
 };
 
 export type DatabaseDeleteImpact = {
@@ -499,6 +514,16 @@ export async function fetchDatabaseCatalog(
     `${DB_BASE}/${id}/catalog?schema=${encodeURIComponent(schema)}`,
     undefined,
     '读取表结构失败',
+  );
+}
+
+export async function fetchDatabaseSnapshots(
+  id: number,
+): Promise<DatabaseSnapshotSummary[]> {
+  return apiRequest<DatabaseSnapshotSummary[]>(
+    `${DB_BASE}/${id}/snapshots`,
+    undefined,
+    '读取已导入表失败',
   );
 }
 

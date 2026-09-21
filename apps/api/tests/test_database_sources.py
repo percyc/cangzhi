@@ -242,6 +242,34 @@ def test_list_schemas_uses_fake_driver(monkeypatch):
     assert schemas == ["public", "audit"]
 
 
+def test_mysql_schema_listing_is_limited_to_configured_database(monkeypatch):
+    connection = _install_fake_driver(monkeypatch, schemas=("warehouse",))
+    source = db_source_module.DatabaseSource(
+        id=1,
+        name="MySQL 业务库",
+        engine="mysql",
+        host="db.example.com",
+        port=3306,
+        database_name="warehouse",
+        username="reader",
+        password_cipher=encrypt_secret("secret"),
+        has_password=True,
+        ssl_mode="required",
+        trusted_private_network=False,
+        is_enabled=True,
+        status="idle",
+    )
+
+    schemas = asyncio.run(db_source_module.list_database_schemas(source))
+
+    assert schemas == ["warehouse"]
+    schema_query = next(
+        call for call in connection.calls if "information_schema.schemata" in call[0]
+    )
+    assert "schema_name = %s" in schema_query[0].lower()
+    assert schema_query[1] == ("warehouse",)
+
+
 def test_fetch_catalog_returns_tables_and_columns(monkeypatch):
     _install_fake_driver(
         monkeypatch,
@@ -1196,4 +1224,29 @@ def test_catalog_and_schemas_endpoints_use_fakes(client, monkeypatch):
     ).json()
     assert len(catalog) == 1
     assert catalog[0]["table_name"] == "orders"
+    assert catalog[0]["imported"] is False
+    assert catalog[0]["snapshot"] is None
     assert [column["name"] for column in catalog[0]["columns"]] == ["id", "name"]
+
+    imported = _import_via_api(test_client, source_id)
+    assert imported.status_code == 201
+
+    catalog = test_client.get(
+        f"/api/database-sources/{source_id}/catalog?schema=public"
+    ).json()
+    assert catalog[0]["imported"] is True
+    assert catalog[0]["snapshot"]["row_count"] == 1
+    assert catalog[0]["snapshot"]["document_deleted"] is False
+
+    snapshots = test_client.get(
+        f"/api/database-sources/{source_id}/snapshots"
+    )
+    assert snapshots.status_code == 200
+    assert [row["table_name"] for row in snapshots.json()] == ["orders"]
+
+    changed_scope = test_client.patch(
+        f"/api/database-sources/{source_id}",
+        json={"database_name": "another_database"},
+    )
+    assert changed_scope.status_code == 409
+    assert changed_scope.json()["detail"]["code"] == "database_scope_has_snapshots"

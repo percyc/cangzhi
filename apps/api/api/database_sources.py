@@ -297,6 +297,27 @@ async def update_source(
 ):
     source = await _load_source_or_404(db, source_id)
     action = _password_action(payload)
+    requested_database = (
+        validate_identifier(payload.database_name, "数据库名")
+        if payload.database_name is not None
+        else None
+    )
+
+    if (
+        requested_database is not None
+        and requested_database != source.database_name
+        and (await _snapshot_counts(db, source.id))["total"] > 0
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "database_scope_has_snapshots",
+                "message": (
+                    "该连接器已有导入表，不能直接改为另一个数据库。"
+                    "请新建连接器；如不再需要旧连接，可删除连接器并选择保留已导入资料。"
+                ),
+            },
+        )
 
     if (
         payload.host is not None
@@ -316,8 +337,8 @@ async def update_source(
 
     if payload.port is not None:
         source.port = payload.port
-    if payload.database_name is not None:
-        source.database_name = validate_identifier(payload.database_name, "数据库名")
+    if requested_database is not None:
+        source.database_name = requested_database
     if payload.username is not None:
         source.username = payload.username.strip()
     if payload.name is not None:
@@ -524,11 +545,31 @@ async def get_catalog(
         if exc.code in {"invalid_identifier", "schema_not_found"}:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         raise HTTPException(status_code=502, detail=str(exc)) from None
+    snapshot_rows = (
+        await db.execute(
+            select(DatabaseSnapshot, Document)
+            .join(Document, Document.id == DatabaseSnapshot.document_id)
+            .where(
+                DatabaseSnapshot.source_id == source.id,
+                DatabaseSnapshot.schema_name == schema,
+            )
+        )
+    ).all()
+    snapshots = {
+        snapshot.table_name: (snapshot, document)
+        for snapshot, document in snapshot_rows
+    }
     return [
         {
             "schema_name": table.schema_name,
             "table_name": table.table_name,
             "kind": table.kind,
+            "imported": table.table_name in snapshots,
+            "snapshot": (
+                _snapshot_payload(*snapshots[table.table_name])
+                if table.table_name in snapshots
+                else None
+            ),
             "columns": [
                 {
                     "name": column.name,
@@ -541,6 +582,42 @@ async def get_catalog(
         }
         for table in tables
     ]
+
+
+@router.get("/{source_id}/snapshots", response_model=list[dict[str, Any]])
+async def list_snapshots(source_id: int, db: DatabaseSession):
+    """List imported remote tables, including snapshots no longer in the catalog."""
+
+    source = await _load_source_or_404(db, source_id)
+    rows = (
+        await db.execute(
+            select(DatabaseSnapshot, Document)
+            .join(Document, Document.id == DatabaseSnapshot.document_id)
+            .where(DatabaseSnapshot.source_id == source.id)
+            .order_by(DatabaseSnapshot.schema_name, DatabaseSnapshot.table_name)
+        )
+    ).all()
+    return [_snapshot_payload(snapshot, document) for snapshot, document in rows]
+
+
+def _snapshot_payload(
+    snapshot: DatabaseSnapshot,
+    document: Document,
+) -> dict[str, Any]:
+    return {
+        "id": snapshot.id,
+        "schema_name": snapshot.schema_name,
+        "table_name": snapshot.table_name,
+        "document_id": snapshot.document_id,
+        "document_title": document.title,
+        "document_deleted": bool(document.is_deleted),
+        "dataset_id": snapshot.dataset_id,
+        "row_count": snapshot.row_count,
+        "snapshot_at": snapshot.snapshot_at.isoformat()
+        if snapshot.snapshot_at
+        else None,
+        "last_error": snapshot.last_error,
+    }
 
 
 def _storage_root_for(storage: BlobStorage) -> Path:

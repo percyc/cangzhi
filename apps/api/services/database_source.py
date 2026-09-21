@@ -315,11 +315,18 @@ def _apply_readonly(connection: Connection, engine: str) -> None:
 
 def _list_schemas_impl(source: DatabaseSource) -> list[str]:
     with _safe_connect(source) as (_engine, connection):
-        return _list_schemas_impl_from_connection(connection, source.engine)
+        return _list_schemas_impl_from_connection(
+            connection,
+            source.engine,
+            database_name=source.database_name,
+        )
 
 
 def _list_schemas_impl_from_connection(
-    connection: Connection, engine: str
+    connection: Connection,
+    engine: str,
+    *,
+    database_name: str | None = None,
 ) -> list[str]:
     if engine == "postgresql":
         statement = (
@@ -329,12 +336,18 @@ def _list_schemas_impl_from_connection(
             "ORDER BY schema_name"
         )
     else:
+        if not database_name:
+            raise DatabaseSourceError(
+                "invalid_database_name", "MySQL 数据库名不能为空"
+            )
         statement = (
             "SELECT SCHEMA_NAME FROM information_schema.schemata "
-            "WHERE schema_name NOT IN ('information_schema', 'mysql', "
-            "'performance_schema', 'sys') ORDER BY schema_name"
+            "WHERE schema_name = %s ORDER BY schema_name"
         )
-    rows = connection.exec_driver_sql(statement).fetchall()
+    if engine == "mysql":
+        rows = connection.exec_driver_sql(statement, (database_name,)).fetchall()
+    else:
+        rows = connection.exec_driver_sql(statement).fetchall()
     names = [str(row[0]) for row in rows if row[0] is not None]
     return names[:MAX_SCHEMAS]
 
@@ -405,7 +418,11 @@ def _probe_connection_impl(source: DatabaseSource) -> dict[str, str]:
 def _catalog_impl(source: DatabaseSource, schema: str) -> list[DatabaseTable]:
     schema = validate_identifier(schema, "schema")
     with _safe_connect(source) as (_engine, connection):
-        if schema not in _list_schemas_impl_from_connection(connection, source.engine):
+        if schema not in _list_schemas_impl_from_connection(
+            connection,
+            source.engine,
+            database_name=source.database_name,
+        ):
             raise DatabaseSourceError("schema_not_found", "远程 Schema 不存在")
         tables = _list_tables_impl(connection, source.engine, schema)
         pks_by_table = {
@@ -479,7 +496,11 @@ def _stream_table_impl(
     schema = validate_identifier(schema, "schema")
     table = validate_identifier(table, "表格")
     with _safe_connect(source) as (_engine, connection):
-        if schema not in _list_schemas_impl_from_connection(connection, source.engine):
+        if schema not in _list_schemas_impl_from_connection(
+            connection,
+            source.engine,
+            database_name=source.database_name,
+        ):
             raise DatabaseSourceError("schema_not_found", "远程 Schema 不存在")
         table_names = {
             name for name, _kind in _list_tables_impl(connection, source.engine, schema)

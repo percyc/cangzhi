@@ -1,17 +1,20 @@
 'use client';
 
+import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   DatabaseCatalogTable,
   DatabaseDeleteImpact,
   DatabaseSource,
+  DatabaseSnapshotSummary,
   createDatabaseSource,
   deleteEmptyDatabaseSnapshots,
   deleteDatabaseSource,
   fetchDatabaseCatalog,
   fetchDatabaseDeleteImpact,
   fetchDatabaseSchemas,
+  fetchDatabaseSnapshots,
   fetchDatabaseSources,
   importDatabaseTable,
   testDatabaseSource,
@@ -80,6 +83,10 @@ type BrowseState = {
   loadingTab: boolean;
   error: string | null;
   expanded: string | null;
+  snapshots: DatabaseSnapshotSummary[];
+  query: string;
+  filter: 'all' | 'imported' | 'not_imported';
+  selected: string[];
 };
 
 type RemoveDialog = {
@@ -94,6 +101,7 @@ type BulkConfirm = {
   source: DatabaseSource;
   schemaCount: number;
   tables: BulkTable[];
+  scope: 'database' | 'selected';
 };
 type BulkRun = {
   running: boolean;
@@ -336,7 +344,10 @@ export function DatabaseSourcePanel() {
     setBusy(`${source.id}:browse`);
     setError('');
     try {
-      const schemas = await fetchDatabaseSchemas(source.id);
+      const [schemas, snapshots] = await Promise.all([
+        fetchDatabaseSchemas(source.id),
+        fetchDatabaseSnapshots(source.id),
+      ]);
       setBrowse((current) => ({
         ...current,
         [source.id]: {
@@ -346,6 +357,10 @@ export function DatabaseSourcePanel() {
           loadingTab: false,
           error: null,
           expanded: null,
+          snapshots,
+          query: '',
+          filter: 'all',
+          selected: [],
         },
       }));
       if (schemas[0]) await loadCatalog(source.id, schemas[0]);
@@ -359,7 +374,14 @@ export function DatabaseSourcePanel() {
   const selectSchema = async (sourceId: number, schema: string) => {
     setBrowse((current) => ({
       ...current,
-      [sourceId]: { ...current[sourceId], schema, loadingTab: true, error: null },
+      [sourceId]: {
+        ...current[sourceId],
+        schema,
+        loadingTab: true,
+        error: null,
+        expanded: null,
+        selected: [],
+      },
     }));
     await loadCatalog(sourceId, schema);
   };
@@ -376,13 +398,23 @@ export function DatabaseSourcePanel() {
             ? `${table.schema_name}.${table.table_name} 当前为空，已跳过并清理旧快照。`
             : `${table.schema_name}.${table.table_name} 当前为空，已跳过，未创建知识资料。`,
         );
-        await load();
+        const snapshots = await fetchDatabaseSnapshots(source.id);
+        await Promise.all([load(), loadCatalog(source.id, table.schema_name)]);
+        setBrowse((current) => ({
+          ...current,
+          [source.id]: { ...current[source.id], snapshots },
+        }));
         return;
       }
       setMessage(
         `已导入 ${table.schema_name}.${table.table_name} 的快照：${result.row_count} 行 × ${result.column_count} 列${result.reused_document ? '（更新已有资料）' : '（新资料）'}，可在数据集、API 与 MCP 中查询。`,
       );
-      await load();
+      const snapshots = await fetchDatabaseSnapshots(source.id);
+      await Promise.all([load(), loadCatalog(source.id, table.schema_name)]);
+      setBrowse((current) => ({
+        ...current,
+        [source.id]: { ...current[source.id], snapshots },
+      }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '导入快照失败');
     } finally {
@@ -407,12 +439,26 @@ export function DatabaseSourcePanel() {
           tables.push({ schema: item.schema_name, table: item.table_name, key });
         }
       }
-      setBulkConfirm({ source, schemaCount: schemas.length, tables });
+      setBulkConfirm({ source, schemaCount: schemas.length, tables, scope: 'database' });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '读取数据库目录失败');
     } finally {
       setBusy('');
     }
+  };
+
+  const prepareSelectedImport = (source: DatabaseSource) => {
+    const state = browse[source.id];
+    if (!state?.selected.length) return;
+    const selected = new Set(state.selected);
+    const tables = state.tables
+      .filter((table) => selected.has(`${table.schema_name}.${table.table_name}`))
+      .map((table) => ({
+        schema: table.schema_name,
+        table: table.table_name,
+        key: `${table.schema_name}.${table.table_name}`,
+      }));
+    setBulkConfirm({ source, schemaCount: 1, tables, scope: 'selected' });
   };
 
   const runBulkImport = async (source: DatabaseSource, tables: BulkTable[]) => {
@@ -503,6 +549,15 @@ export function DatabaseSourcePanel() {
     }));
     setBusy('');
     await load();
+    if (browse[source.id]) {
+      const snapshots = await fetchDatabaseSnapshots(source.id);
+      const schema = browse[source.id].schema;
+      if (schema) await loadCatalog(source.id, schema);
+      setBrowse((current) => ({
+        ...current,
+        [source.id]: { ...current[source.id], snapshots, selected: [] },
+      }));
+    }
     setMessage(
       cancelled
         ? `批量导入已停止：完成 ${done}/${tables.length}，成功 ${success}，跳过空表 ${skipped}，失败 ${failures.length}。`
@@ -563,8 +618,8 @@ export function DatabaseSourcePanel() {
           数据库连接器为<strong>只读快照</strong>，绝不修改远程数据库。
         </p>
         <p className="mt-1">
-          建立连接后，可逐表导入，也可一键将当前数据库的全部表和视图导入为本地快照；导入后可在数据集、API 与 MCP
-          中查询。首版单表上限 <strong>10 万行</strong>；重复导入会更新已有资料，不会重复新增。
+          每个连接器只读取<strong>配置中指定的一个数据库</strong>。PostgreSQL 可浏览该库内多个 Schema，MySQL
+          只浏览填写的数据库；不会跨库导入同一账号可见的其他数据库。建议先筛选并勾选需要的表，再导入本地快照。
         </p>
       </div>
 
@@ -648,7 +703,7 @@ export function DatabaseSourcePanel() {
                       {source.database_name}
                     </p>
                     <p className="mt-2 text-sm text-slate-600">
-                      已导入快照 {source.snapshot_counts.total} 张
+                      已导入 {source.snapshot_counts.total} 张表
                       {source.snapshot_counts.empty
                         ? ` · 其中空快照 ${source.snapshot_counts.empty} 张`
                         : ''}
@@ -684,25 +739,25 @@ export function DatabaseSourcePanel() {
                     type="button"
                     disabled={Boolean(busy) || !source.is_enabled}
                     onClick={() => void toggleBrowse(source)}
-                    className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+                    className="rounded-xl bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40"
                   >
                     {busy === `${source.id}:browse` || busy === `${source.id}:catalog`
                       ? '读取中…'
                       : browse[source.id]
-                        ? '收起浏览'
-                        : '浏览并导入表'}
+                        ? '收起表管理'
+                        : '管理导入表'}
                   </button>
                   <button
                     type="button"
                     disabled={Boolean(busy) || !source.is_enabled}
                     onClick={() => void prepareBulkImport(source)}
-                    className="rounded-xl bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+                    className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40"
                   >
                     {busy === `${source.id}:bulk:prepare`
                       ? '正在读取全部表…'
                       : busy === `${source.id}:bulk:run`
                         ? '正在批量导入…'
-                        : '一键导入全部'}
+                        : `导入“${source.database_name}”全部表…`}
                   </button>
                   <button
                     type="button"
@@ -749,6 +804,25 @@ export function DatabaseSourcePanel() {
                     busy={busy}
                     onSelectSchema={(schema) => void selectSchema(source.id, schema)}
                     onImport={(table) => void runImport(source, table)}
+                    onImportSelected={() => prepareSelectedImport(source)}
+                    onChangeQuery={(query) =>
+                      setBrowse((current) => ({
+                        ...current,
+                        [source.id]: { ...current[source.id], query, selected: [] },
+                      }))
+                    }
+                    onChangeFilter={(filter) =>
+                      setBrowse((current) => ({
+                        ...current,
+                        [source.id]: { ...current[source.id], filter, selected: [] },
+                      }))
+                    }
+                    onChangeSelected={(selected) =>
+                      setBrowse((current) => ({
+                        ...current,
+                        [source.id]: { ...current[source.id], selected },
+                      }))
+                    }
                     onToggleExpand={(key) =>
                       setBrowse((current) => ({
                         ...current,
@@ -849,12 +923,20 @@ export function DatabaseSourcePanel() {
             className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
           >
             <h2 id="bulk-import-title" className="text-lg font-semibold text-slate-900">
-              导入“{bulkConfirm.source.name}”的全部表？
+              {bulkConfirm.scope === 'selected'
+                ? `导入已选择的 ${bulkConfirm.tables.length} 张表？`
+                : `导入数据库“${bulkConfirm.source.database_name}”的全部表？`}
             </h2>
             <p className="mt-2 text-sm leading-6 text-slate-600">
-              已发现 {bulkConfirm.schemaCount} 个 Schema、
-              <strong>{bulkConfirm.tables.length} 张表/视图</strong>。藏知会逐张串行导入，
-              单表失败不会中断后续任务。
+              {bulkConfirm.scope === 'database' ? (
+                <>
+                  仅限连接器“{bulkConfirm.source.name}”配置的数据库，已发现 {bulkConfirm.schemaCount} 个
+                  Schema、<strong>{bulkConfirm.tables.length} 张表/视图</strong>。
+                </>
+              ) : (
+                <>范围仅限当前 Schema 中已勾选的表。</>
+              )}{' '}
+              藏知会逐张串行导入，单表失败不会中断后续任务。
             </p>
             {!bulkConfirm.tables.length && (
               <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
@@ -1007,7 +1089,12 @@ function DbFields({
         value={String(form.port)}
         onChange={(port) => setForm({ ...form, port: Number(port) || 0 })}
       />
-      <Field label="数据库名" value={form.database_name} onChange={(database_name) => setForm({ ...form, database_name })} />
+      <Field
+        label="目标数据库（导入严格限制在此库）"
+        value={form.database_name}
+        onChange={(database_name) => setForm({ ...form, database_name })}
+        placeholder={form.engine === 'postgresql' ? '例如 warehouse' : '例如 business_db'}
+      />
       <Field label="用户名" required={false} value={form.username} onChange={(username) => setForm({ ...form, username })} />
       <PasswordFields form={form} setForm={setForm} editing={editing} hasPassword={hasPassword} />
       <label className="text-sm text-slate-700">
@@ -1105,6 +1192,10 @@ function BrowseTables({
   busy,
   onSelectSchema,
   onImport,
+  onImportSelected,
+  onChangeQuery,
+  onChangeFilter,
+  onChangeSelected,
   onToggleExpand,
 }: {
   state: BrowseState;
@@ -1112,12 +1203,32 @@ function BrowseTables({
   busy: string;
   onSelectSchema: (schema: string) => void;
   onImport: (table: DatabaseCatalogTable) => void;
+  onImportSelected: () => void;
+  onChangeQuery: (query: string) => void;
+  onChangeFilter: (filter: BrowseState['filter']) => void;
+  onChangeSelected: (selected: string[]) => void;
   onToggleExpand: (key: string | null) => void;
 }) {
+  const filteredTables = state.tables.filter((table) => {
+    const matchesQuery = `${table.schema_name}.${table.table_name}`
+      .toLocaleLowerCase()
+      .includes(state.query.trim().toLocaleLowerCase());
+    const matchesFilter =
+      state.filter === 'all' ||
+      (state.filter === 'imported' ? table.imported : !table.imported);
+    return matchesQuery && matchesFilter;
+  });
+  const visibleKeys = filteredTables.map(
+    (table) => `${table.schema_name}.${table.table_name}`,
+  );
+  const selected = new Set(state.selected);
+  const allVisibleSelected =
+    visibleKeys.length > 0 && visibleKeys.every((key) => selected.has(key));
   return (
     <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="text-xs text-slate-500">Schema</label>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-xs text-slate-500">
+          Schema
         <select
           value={state.schema ?? ''}
           onChange={(event) => onSelectSchema(event.target.value)}
@@ -1129,24 +1240,102 @@ function BrowseTables({
             </option>
           ))}
         </select>
+        </label>
+        <label className="min-w-52 flex-1 text-xs text-slate-500">
+          搜索表名
+          <input
+            value={state.query}
+            onChange={(event) => onChangeQuery(event.target.value)}
+            placeholder="例如 orders"
+            className="block w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm"
+          />
+        </label>
+        <label className="text-xs text-slate-500">
+          导入状态
+          <select
+            value={state.filter}
+            onChange={(event) => onChangeFilter(event.target.value as BrowseState['filter'])}
+            className="block rounded border border-slate-300 bg-white px-2 py-1.5 text-sm"
+          >
+            <option value="all">全部</option>
+            <option value="not_imported">未导入</option>
+            <option value="imported">已导入</option>
+          </select>
+        </label>
         {state.loadingTab && <span className="text-xs text-slate-500">读取表结构中…</span>}
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-white p-3 text-xs text-slate-600">
+        <span>
+          当前 Schema {state.tables.length} 张 · 已导入{' '}
+          {state.tables.filter((table) => table.imported).length} 张 · 当前显示 {filteredTables.length} 张
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={!visibleKeys.length}
+            onClick={() =>
+              onChangeSelected(
+                allVisibleSelected
+                  ? state.selected.filter((key) => !visibleKeys.includes(key))
+                  : Array.from(new Set([...state.selected, ...visibleKeys])),
+              )
+            }
+            className="rounded border border-slate-300 px-2 py-1 disabled:opacity-40"
+          >
+            {allVisibleSelected ? '取消选择当前结果' : '选择当前结果'}
+          </button>
+          <button
+            type="button"
+            disabled={!state.selected.length || Boolean(busy)}
+            onClick={onImportSelected}
+            className="rounded bg-indigo-600 px-3 py-1.5 font-medium text-white disabled:opacity-40"
+          >
+            导入所选（{state.selected.length}）
+          </button>
+        </div>
       </div>
       {state.error && <p className="mt-3 text-sm text-red-700">{state.error}</p>}
       {!state.error && state.schema && !state.loadingTab && (
         <ul className="mt-3 space-y-2">
-          {state.tables.map((table) => {
+          {filteredTables.map((table) => {
             const key = `${table.schema_name}.${table.table_name}`;
             const expanded = state.expanded === key;
             return (
               <li key={key} className="rounded-lg border border-slate-200 bg-white p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="min-w-0">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <input
+                      type="checkbox"
+                      aria-label={`选择 ${key}`}
+                      checked={selected.has(key)}
+                      onChange={(event) =>
+                        onChangeSelected(
+                          event.target.checked
+                            ? [...state.selected, key]
+                            : state.selected.filter((item) => item !== key),
+                        )
+                      }
+                      className="mt-1"
+                    />
+                    <div>
                     <p className="text-sm font-medium text-slate-900">
                       {table.table_name}
                       <span className="ml-2 text-xs font-normal text-slate-400">
                         {table.kind === 'view' ? '视图' : '表'} · {table.columns.length} 列
                       </span>
                     </p>
+                    {table.snapshot ? (
+                      <p className="mt-1 text-xs text-emerald-700">
+                        已导入 · {table.snapshot.row_count.toLocaleString('zh-CN')} 行
+                        {table.snapshot.snapshot_at
+                          ? ` · ${formatTime(table.snapshot.snapshot_at)}`
+                          : ''}
+                        {table.snapshot.document_deleted ? ' · 资料在回收站' : ''}
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-xs text-slate-400">尚未导入</p>
+                    )}
+                    </div>
                   </div>
                   <div className="flex items-center gap-2">
                     <button
@@ -1193,11 +1382,43 @@ function BrowseTables({
               </li>
             );
           })}
-          {!state.tables.length && (
-            <p className="p-4 text-center text-sm text-slate-500">该 Schema 下没有可导入的表。</p>
+          {!filteredTables.length && (
+            <p className="p-4 text-center text-sm text-slate-500">
+              {state.tables.length ? '没有符合当前筛选条件的表。' : '该 Schema 下没有可导入的表。'}
+            </p>
           )}
         </ul>
       )}
+      <details className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+        <summary className="cursor-pointer text-sm font-medium text-slate-700">
+          已导入表清单（{state.snapshots.length}）
+        </summary>
+        <p className="mt-2 text-xs leading-5 text-slate-500">
+          这里汇总此连接器的全部已导入快照，包括远端目录中已不存在的表。
+        </p>
+        <div className="mt-2 max-h-64 overflow-auto">
+          <table className="min-w-full text-left text-xs">
+            <thead className="sticky top-0 bg-white text-slate-500">
+              <tr><th className="py-2 pr-3">远端表</th><th className="pr-3">行数</th><th className="pr-3">更新时间</th><th>资料</th></tr>
+            </thead>
+            <tbody>
+              {state.snapshots.map((snapshot) => (
+                <tr key={snapshot.id} className="border-t">
+                  <td className="py-2 pr-3 font-medium text-slate-800">{snapshot.schema_name}.{snapshot.table_name}</td>
+                  <td className="pr-3 text-slate-500">{snapshot.row_count.toLocaleString('zh-CN')}</td>
+                  <td className="pr-3 text-slate-500">{snapshot.snapshot_at ? formatTime(snapshot.snapshot_at) : '—'}</td>
+                  <td>
+                    <Link className="text-blue-700 hover:underline" href={`/documents/${snapshot.document_id}`}>
+                      {snapshot.document_deleted ? '回收站中的资料' : '查看资料'}
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+              {!state.snapshots.length && <tr><td colSpan={4} className="py-4 text-center text-slate-500">尚未导入任何表。</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </details>
     </div>
   );
 }
