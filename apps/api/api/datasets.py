@@ -158,6 +158,47 @@ async def list_datasets(
     return [await _dataset_response(db, dataset) for dataset in datasets]
 
 
+@router.get("/summary", response_model=dict[str, Any])
+async def dataset_summary(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """Return a lightweight capability hint for the question composer."""
+
+    rows = (
+        await db.execute(
+            select(
+                KnowledgeDataset.id,
+                KnowledgeDataset.document_id,
+                KnowledgeDataset.name,
+                KnowledgeDataset.sheet_name,
+                DatasetArtifact.status,
+            )
+            .join(Document, Document.id == KnowledgeDataset.document_id)
+            .outerjoin(
+                DatasetArtifact,
+                (DatasetArtifact.dataset_id == KnowledgeDataset.id)
+                & (DatasetArtifact.is_active.is_(True)),
+            )
+            .where(
+                Document.is_deleted.is_(False),
+                Document.current_version_id == KnowledgeDataset.document_version_id,
+            )
+            .order_by(KnowledgeDataset.id.desc())
+        )
+    ).all()
+    return {
+        "dataset_count": len(rows),
+        "document_count": len({int(row.document_id) for row in rows}),
+        "ready_count": sum(row.status == "ready" for row in rows),
+        "examples": [
+            {
+                "id": int(row.id),
+                "name": str(row.name),
+                "sheet_name": str(row.sheet_name),
+            }
+            for row in rows[:3]
+        ],
+    }
+
+
 @router.get("/{dataset_id}", response_model=DatasetResponse)
 async def get_dataset(
     dataset_id: int, db: AsyncSession = Depends(get_db)

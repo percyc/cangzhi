@@ -29,6 +29,7 @@ _STRUCTURED_INTENT_RE = re.compile(
     r"哪些|哪几|列出|罗列|包含什么|包含哪些|提供了什么|提供了哪些|"
     r"有什么|都有什么|有哪些|有哪几|有啥|"
     r"分组|各自|分别|排名|排行|前\s*\d+|后\s*\d+|筛选|过滤|占比|百分比|"
+    r"比较|对比|差异|变化|趋势|增长|下降|同比|环比|分布|明细|记录|"
     r"count|sum|average|avg|max|min|group|rank|top\s*\d+)",
     re.IGNORECASE,
 )

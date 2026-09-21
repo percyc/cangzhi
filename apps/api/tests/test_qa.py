@@ -1148,7 +1148,7 @@ def test_quick_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
     assert captured["force"] is False
 
 
-def test_quick_table_discovery_uses_ranked_catalog_documents(qa_db, monkeypatch):
+def test_quick_table_discovery_merges_ranked_and_catalog_candidates(qa_db, monkeypatch):
     import apps.api.services.qa as qa_service_module
 
     captured: dict[str, list[int]] = {}
@@ -1175,7 +1175,7 @@ def test_quick_table_discovery_uses_ranked_catalog_documents(qa_db, monkeypatch)
         return None
 
     async def broad_candidates(*_args, **_kwargs):
-        raise AssertionError("不应在已有排序证据时退回宽泛数据集发现")
+        return [177]
 
     monkeypatch.setattr(QAService, "collect_evidence", collect)
     monkeypatch.setattr(qa_service_module, "try_structured_table_query", table_query)
@@ -1200,7 +1200,7 @@ def test_quick_table_discovery_uses_ranked_catalog_documents(qa_db, monkeypatch)
             )
 
     asyncio.run(_run())
-    assert captured["document_ids"] == [176]
+    assert captured["document_ids"] == [176, 177]
 
 
 def test_deep_table_discovery_keeps_connector_scope(qa_db, monkeypatch):

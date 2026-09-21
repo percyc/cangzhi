@@ -298,6 +298,9 @@ def test_fallback_executor_direct_child_filter_excludes_deeper_descendants():
         "哪几笔交易超过了一万元？",
         "6月23日的早餐有什么菜？",
         "仓库里有啥物料？",
+        "今年华东销售趋势如何？",
+        "比较各部门预算和实际支出的差异",
+        "查看最近一个月的交易明细",
     ],
 )
 def test_generic_table_detail_questions_use_structured_path(question):

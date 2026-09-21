@@ -98,11 +98,19 @@ def test_dataset_catalog_and_paginated_preview(client):
 
     document = test_client.get(f"/api/documents/{document_id}")
     catalog = test_client.get(f"/api/datasets?document_id={document_id}")
+    summary = test_client.get("/api/datasets/summary")
     preview = test_client.get(f"/api/datasets/{dataset_id}/rows?offset=1&limit=1")
 
     assert document.status_code == 200
     assert document.json()["content_kind"] == "dataset"
     assert catalog.status_code == 200
+    assert summary.status_code == 200
+    assert summary.json() == {
+        "dataset_count": 1,
+        "document_count": 1,
+        "ready_count": 0,
+        "examples": [{"id": dataset_id, "name": "人员", "sheet_name": "人员"}],
+    }
     assert catalog.json()[0]["profile"]["quality"]["completeness"] == 0.75
     assert [field["name"] for field in catalog.json()[0]["fields"]] == [
         "姓名",

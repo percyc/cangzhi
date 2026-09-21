@@ -62,10 +62,17 @@ type AskResponse = {
     degraded_reason: string | null;
     mode?: string;
     structured_table?: {
+      dataset_id?: number | null;
+      document_id?: number;
+      dataset_name?: string;
+      sheet_name?: string;
       matched_rows: number;
       metric: string;
       metric_column?: string | null;
       group_by?: string[];
+      columns?: string[];
+      aggregate?: Record<string, unknown>;
+      contributions?: Array<Record<string, unknown>>;
       warnings?: string[];
     };
     analysis?: {
@@ -121,6 +128,13 @@ type FacetCatalog = {
     is_enabled: boolean;
     document_count: number;
   }>;
+};
+
+type DatasetSummary = {
+  dataset_count: number;
+  document_count: number;
+  ready_count: number;
+  examples: Array<{ id: number; name: string; sheet_name: string }>;
 };
 
 type Turn = {
@@ -202,6 +216,7 @@ function AskClient() {
   const [scopeSlug, setScopeSlug] = useState('all');
   const [scopes, setScopes] = useState<KnowledgeScope[]>([]);
   const [facets, setFacets] = useState<FacetCatalog | null>(null);
+  const [datasetSummary, setDatasetSummary] = useState<DatasetSummary | null>(null);
   const [categoryIds, setCategoryIds] = useState<number[]>([]);
   const [tagIds, setTagIds] = useState<number[]>([]);
   const [sourceTypes, setSourceTypes] = useState<string[]>([]);
@@ -330,11 +345,18 @@ function AskClient() {
           return (await response.json()) as FacetCatalog;
         },
       ),
+      fetch('/api/datasets/summary', { cache: 'no-store' }).then(
+        async (response) => {
+          if (!response.ok) throw new Error('数据集状态加载失败');
+          return (await response.json()) as DatasetSummary;
+        },
+      ),
     ])
-      .then(([scopeResult, status, facetResult]) => {
+      .then(([scopeResult, status, facetResult, datasetResult]) => {
         setScopes(scopeResult.items);
         setProviderReady(status.provider_configured);
         setFacets(facetResult);
+        setDatasetSummary(datasetResult);
       })
       .catch((reason: unknown) => {
         setError(reason instanceof Error ? reason.message : '初始化失败');
@@ -933,6 +955,23 @@ function AskClient() {
               {error}
             </p>
           )}
+          {datasetSummary && datasetSummary.dataset_count > 0 && (
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] leading-5 text-slate-500">
+              <span>
+                当前知识库有 {datasetSummary.dataset_count} 个可查询数据区域；快速问答会自动使用
+                DuckDB 精确筛选和统计。
+              </span>
+              {mode === 'quick' && (
+                <button
+                  type="button"
+                  onClick={() => setMode('deep')}
+                  className="font-medium text-indigo-700 hover:underline"
+                >
+                  跨表或多步计算改用深度分析
+                </button>
+              )}
+            </div>
+          )}
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -1401,6 +1440,12 @@ function ConversationTurn({
             </ReactMarkdown>
           </div>
           <ResultMeta response={turn.response} contextLabel={turn.contextLabel} />
+          {turn.response.retrieval?.mode === 'structured_table' &&
+            turn.response.retrieval.structured_table && (
+              <DatasetResultPreview
+                result={turn.response.retrieval.structured_table}
+              />
+            )}
           {turn.response.retrieval?.analysis && (
             <AnalysisTrace analysis={turn.response.retrieval.analysis} />
           )}
@@ -1508,6 +1553,96 @@ function ResultMeta({
       )}
     </div>
   );
+}
+
+function DatasetResultPreview({
+  result,
+}: {
+  result: NonNullable<
+    NonNullable<AskResponse['retrieval']>['structured_table']
+  >;
+}) {
+  const rows = result.contributions ?? [];
+  const columns = Array.from(
+    new Set(rows.flatMap((row) => Object.keys(row))),
+  );
+  const aggregate = result.aggregate ?? {};
+  const aggregateValue = aggregate.value;
+  const metricLabels: Record<string, string> = {
+    rows: '明细',
+    count: '数量',
+    count_distinct: '去重数量',
+    sum: '合计',
+    avg: '平均值',
+    min: '最小值',
+    max: '最大值',
+  };
+  return (
+    <details open className="mt-3 overflow-hidden rounded-2xl border border-emerald-200 bg-emerald-50/40">
+      <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-emerald-900">
+        精确查询结果 · {result.dataset_name ?? '数据集'}
+        {result.sheet_name ? ` / ${result.sheet_name}` : ''}
+      </summary>
+      <div className="border-t border-emerald-100 bg-white px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+          <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-800">
+            {metricLabels[result.metric] ?? result.metric}
+            {result.metric_column ? `：${result.metric_column}` : ''}
+          </span>
+          <span>命中 {result.matched_rows.toLocaleString('zh-CN')} 行</span>
+          {aggregateValue !== undefined && aggregateValue !== null && (
+            <span className="font-semibold text-slate-900">
+              结果：{formatDatasetValue(aggregateValue)}
+            </span>
+          )}
+          {result.document_id && (
+            <Link href={`/documents/${result.document_id}`} className="text-blue-700 hover:underline">
+              查看来源资料
+            </Link>
+          )}
+        </div>
+        {rows.length > 0 && columns.length > 0 && (
+          <div className="mt-3 max-h-72 overflow-auto rounded-lg border border-slate-200">
+            <table className="min-w-full text-left text-xs">
+              <thead className="sticky top-0 bg-slate-50 text-slate-500">
+                <tr>
+                  {columns.map((column) => (
+                    <th key={column} className="whitespace-nowrap px-3 py-2 font-medium">{column}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, index) => (
+                  <tr key={index} className="border-t border-slate-100">
+                    {columns.map((column) => (
+                      <td key={column} className="max-w-72 whitespace-pre-wrap break-words px-3 py-2 text-slate-700">
+                        {formatDatasetValue(row[column])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {(result.warnings?.length ?? 0) > 0 && (
+          <ul className="mt-3 space-y-1 text-xs text-amber-700">
+            {result.warnings?.map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
+        )}
+        <p className="mt-3 text-[11px] leading-5 text-slate-400">
+          结果由受控查询计划经程序校验后执行，不是模型根据表格内容估算。
+        </p>
+      </div>
+    </details>
+  );
+}
+
+function formatDatasetValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
 }
 
 function CitationList({

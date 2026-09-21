@@ -380,6 +380,7 @@ class QAService:
         if on_progress is not None:
             await on_progress(40, PROGRESS_TOTAL, "检索完成，正在分析")
         assert self._provider is not None  # checked above
+        structured_intent = is_structured_table_question(question)
         table_matches_none = request.matches_none
         candidate_table_document_ids = (
             [] if table_matches_none else list(request.document_ids)
@@ -408,10 +409,7 @@ class QAService:
                     item.document_id for item in evidence if item.table_location
                 )
             )
-        if (
-            not candidate_table_document_ids
-            and is_structured_table_question(question)
-        ):
+        if not candidate_table_document_ids and structured_intent:
             # Database catalog chunks are document-level discovery evidence
             # rather than row chunks, so they do not carry table_location.
             # Their ranked document ids are nevertheless the best dataset
@@ -419,12 +417,13 @@ class QAService:
             candidate_table_document_ids = list(
                 dict.fromkeys(item.document_id for item in evidence)
             )
-        if (
-            not candidate_table_document_ids
-            and is_structured_table_question(question)
-            and not table_matches_none
-        ):
-            candidate_table_document_ids = await candidate_dataset_document_ids(
+        if structured_intent and not table_matches_none:
+            discovery_document_ids = (
+                candidate_table_document_ids
+                if request.connector_ids or request.document_ids
+                else list(request.document_ids)
+            )
+            discovered_dataset_ids = await candidate_dataset_document_ids(
                 db,
                 filters={
                     "category_ids": list(request.category_ids),
@@ -432,11 +431,16 @@ class QAService:
                     "tag_ids": list(request.tag_ids),
                     "tag_slugs": list(request.tag_slugs),
                     "source_types": list(request.source_types),
-                    "document_ids": list(request.document_ids),
+                    "document_ids": list(discovery_document_ids),
                     "document_selection": request.document_selection,
                     "document_boundary": request.document_boundary,
                     "matches_none": request.matches_none,
                 },
+            )
+            candidate_table_document_ids = list(
+                dict.fromkeys(
+                    [*candidate_table_document_ids, *discovered_dataset_ids]
+                )
             )
         from .dataset_execution import DatasetExecutionError
 
@@ -470,6 +474,7 @@ class QAService:
                         "document_id": structured_result.dataset.document_id,
                         "document_version_id": structured_result.dataset.document_version_id,
                         "dataset_id": structured_result.dataset.dataset_id,
+                        "dataset_name": structured_result.dataset.title,
                         "artifact_version": structured_evidence.artifact_version,
                         "sheet_name": structured_result.dataset.sheet_name,
                         "region_index": structured_result.dataset.region_index,
