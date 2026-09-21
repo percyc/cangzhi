@@ -1347,3 +1347,12 @@
 - 部署：待本条代码提交后更新 API/Web；无迁移，不重建向量，不重启 Worker/PostgreSQL。
 - 现场核对：部署前运行库两个版本分别为生效 113/113、历史 53/53，失败任务为 0；先前
   失败原因已随成功重试清空，不能事后准确还原，未臆测具体上游错误。
+
+### 2026-09-21 向量失败诊断与清理部署
+
+- `a4a0825` 已快进本地 `main`。API/Web旧镜像分别保留为
+  `rollback-before-embedding-failure-ux-a4a0825`，仅重建替换 API/Web；Worker、
+  PostgreSQL 未重启，无迁移、向量重建、任务重试或数据清理。
+- API/Web/Worker/PostgreSQL 均 healthy，schema 0033，readiness、Web health 和向量设置
+  页面返回 200；向量状态接口未登录返回 401。部署后再次只读核对仍为生效 113/113、
+  历史 53/53、失败 0，发布没有改变任何向量版本或任务数据。
