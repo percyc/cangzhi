@@ -70,7 +70,7 @@ this contract.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -219,6 +219,10 @@ class ProfileSummary:
     build_finished_at: str | None
     activated_at: str | None
     is_active: bool
+    pending_jobs: int
+    processing_jobs: int
+    failure_reasons: tuple[tuple[str, int], ...]
+    last_error: str | None
     available_actions: tuple[str, ...]
 
     def to_public_dict(self) -> dict:
@@ -237,6 +241,13 @@ class ProfileSummary:
             "build_finished_at": self.build_finished_at,
             "activated_at": self.activated_at,
             "is_active": self.is_active,
+            "pending_jobs": self.pending_jobs,
+            "processing_jobs": self.processing_jobs,
+            "failure_reasons": [
+                {"message": message, "count": count}
+                for message, count in self.failure_reasons
+            ],
+            "last_error": self.last_error,
             "available_actions": list(self.available_actions),
         }
 
@@ -244,7 +255,12 @@ class ProfileSummary:
 # --- Helpers --------------------------------------------------------------
 
 
-def _available_actions(status: str, is_active: bool) -> tuple[str, ...]:
+def _available_actions(
+    status: str,
+    is_active: bool,
+    *,
+    processing_jobs: int = 0,
+) -> tuple[str, ...]:
     """Return the set of POST endpoints the operator may call next."""
 
     actions: list[str] = []
@@ -256,7 +272,10 @@ def _available_actions(status: str, is_active: bool) -> tuple[str, ...]:
         actions.append("activate")
     if status == "retired" and not is_active:
         actions.append("rollback")
-    if not is_active and status != "building":
+    # Queued/retry jobs can be cancelled by deleting their profile. A job
+    # already executing must finish first so the worker never writes against
+    # a profile that disappeared underneath it.
+    if not is_active and processing_jobs == 0:
         actions.append("delete")
     return tuple(actions)
 
@@ -963,9 +982,37 @@ async def get_profile_summaries(db: AsyncSession) -> list[ProfileSummary]:
         return []
     config = await _load_active_config(db)
     active_id = config.active_embedding_profile_id if config else None
+    profile_ids = [row.id for row in rows]
+    job_rows = (
+        await db.execute(
+            select(
+                ProcessingJob.embedding_profile_id,
+                ProcessingJob.status,
+                ProcessingJob.last_error,
+            ).where(
+                ProcessingJob.embedding_profile_id.in_(profile_ids),
+                ProcessingJob.stage == EMBEDDING_STAGE,
+            )
+        )
+    ).all()
+    job_statuses: dict[int, Counter[str]] = defaultdict(Counter)
+    job_errors: dict[int, Counter[str]] = defaultdict(Counter)
+    for profile_id, status, last_error in job_rows:
+        if profile_id is None:
+            continue
+        job_statuses[profile_id][status] += 1
+        if status == "failed":
+            message = (last_error or "未记录具体错误").strip()[:500]
+            job_errors[profile_id][message] += 1
     summaries: list[ProfileSummary] = []
     for row in rows:
         is_active = active_id is not None and active_id == row.id
+        statuses = job_statuses[row.id]
+        pending_jobs = sum(statuses[value] for value in ("created", "retry"))
+        processing_jobs = statuses["processing"]
+        failure_reasons = tuple(
+            job_errors[row.id].most_common(5)
+        )
         summaries.append(
             ProfileSummary(
                 profile_id=row.id,
@@ -988,7 +1035,15 @@ async def get_profile_summaries(db: AsyncSession) -> list[ProfileSummary]:
                     row.activated_at.isoformat() if row.activated_at else None
                 ),
                 is_active=is_active,
-                available_actions=_available_actions(row.status, is_active),
+                pending_jobs=pending_jobs,
+                processing_jobs=processing_jobs,
+                failure_reasons=failure_reasons,
+                last_error=row.last_error,
+                available_actions=_available_actions(
+                    row.status,
+                    is_active,
+                    processing_jobs=processing_jobs,
+                ),
             )
         )
     return summaries

@@ -120,6 +120,10 @@ export type EmbeddingProfileStatus = {
   total_chunks: number | null;
   completed_chunks: number | null;
   failed_chunks: number | null;
+  pending_jobs: number;
+  processing_jobs: number;
+  failure_reasons: Array<{ message: string; count: number }>;
+  last_error: string | null;
   is_active: boolean;
   available_actions: Array<'build' | 'retry' | 'activate' | 'rollback' | 'delete'>;
 };

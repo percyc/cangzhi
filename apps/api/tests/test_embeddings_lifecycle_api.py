@@ -148,6 +148,76 @@ def test_delete_active_profile_is_rejected(client):
     assert _fetch_profile(profile.id) is not None
 
 
+def test_delete_building_profile_cancels_jobs_when_none_are_processing(client):
+    test_client, _storage = client
+    profile = _seed_profile(status="building")
+    document = Document(title="待取消", source_type=DocumentSourceType.note)
+    version = DocumentVersion(
+        document_id=1,
+        version_number=1,
+        content_hash="doc-hash",
+        raw_content="raw",
+        structured_content={"blocks": []},
+        processing_status="ready",
+    )
+    chunk = _seed_chunk(document_id=1, version_id=1, content_hash="hash-1")
+    job = ProcessingJob(
+        document_id=1,
+        document_version_id=1,
+        stage=EMBEDDING_STAGE,
+        status="created",
+        idempotency_key="embedding:delete-building",
+        config_version="test-fingerprint",
+        embedding_profile_id=1,
+        embedding_chunk_id=1,
+    )
+    _seed(test_client, profile, document, version, chunk, job)
+
+    status = test_client.get("/api/embeddings/status").json()["profiles"][0]
+    assert status["pending_jobs"] == 1
+    assert "delete" in status["available_actions"]
+
+    response = test_client.delete(f"/api/embeddings/profiles/{profile.id}")
+    assert response.status_code == 200
+    assert _fetch_profile(profile.id) is None
+    assert _fetch_jobs(profile.id) == []
+
+
+def test_delete_building_profile_waits_for_processing_job(client):
+    test_client, _storage = client
+    profile = _seed_profile(status="building")
+    document = Document(title="正在处理", source_type=DocumentSourceType.note)
+    version = DocumentVersion(
+        document_id=1,
+        version_number=1,
+        content_hash="doc-hash",
+        raw_content="raw",
+        structured_content={"blocks": []},
+        processing_status="ready",
+    )
+    chunk = _seed_chunk(document_id=1, version_id=1, content_hash="hash-1")
+    job = ProcessingJob(
+        document_id=1,
+        document_version_id=1,
+        stage=EMBEDDING_STAGE,
+        status="processing",
+        idempotency_key="embedding:delete-processing",
+        config_version="test-fingerprint",
+        embedding_profile_id=1,
+        embedding_chunk_id=1,
+    )
+    _seed(test_client, profile, document, version, chunk, job)
+
+    status = test_client.get("/api/embeddings/status").json()["profiles"][0]
+    assert status["processing_jobs"] == 1
+    assert "delete" not in status["available_actions"]
+
+    response = test_client.delete(f"/api/embeddings/profiles/{profile.id}")
+    assert response.status_code == 409
+    assert "1 个向量任务正在执行" in response.json()["detail"]
+    assert _fetch_profile(profile.id) is not None
+
+
 def _fetch_jobs(profile_id: int) -> list[ProcessingJob]:
     async def _run():
         async for db in app.dependency_overrides[get_db]():
@@ -357,6 +427,14 @@ def test_retry_endpoint_resets_failed_jobs(client):
             await db.commit()
 
     asyncio.run(_commit_failures())
+
+    status = test_client.get("/api/embeddings/status").json()["profiles"][0]
+    assert status["failure_reasons"] == [
+        {"message": "upstream 500", "count": 2}
+    ]
+    assert status["pending_jobs"] == 0
+    assert status["processing_jobs"] == 0
+    assert "delete" in status["available_actions"]
 
     response = test_client.post(f"/api/embeddings/profiles/{profile_id}/retry")
     assert response.status_code == 200

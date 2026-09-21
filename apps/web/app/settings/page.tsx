@@ -423,7 +423,9 @@ export default function SettingsPage() {
   ) => {
     if (
       action === 'delete' &&
-      !window.confirm('确定删除这个向量索引版本吗？对应向量数据将被永久清理。')
+      !window.confirm(
+        '确定删除这个向量索引版本吗？已有向量以及排队、重试和失败任务都会被永久清理；当前生效版本不会受影响。',
+      )
     ) return;
     setEmbeddingActionId(profileId);
     setEmbeddingActionMessage(null);
@@ -854,6 +856,8 @@ export default function SettingsPage() {
                           {statusLabels[profile.status] ?? profile.status}
                           {total > 0 && ` · ${completed}/${total}（${progress}%）`}
                           {failed > 0 && ` · ${failed} 个失败`}
+                          {profile.processing_jobs > 0 && ` · ${profile.processing_jobs} 个执行中`}
+                          {profile.pending_jobs > 0 && ` · ${profile.pending_jobs} 个排队/重试`}
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -865,6 +869,10 @@ export default function SettingsPage() {
                             rollback: '回滚到此版本',
                             delete: '删除版本',
                           };
+                          const label =
+                            action === 'delete' && profile.status === 'building'
+                              ? '停止并删除版本'
+                              : labels[action];
                           return (
                             <button
                               key={action}
@@ -877,12 +885,32 @@ export default function SettingsPage() {
                                   : 'border-slate-300 text-slate-700 hover:bg-slate-50'
                               }`}
                             >
-                              {embeddingActionId === profile.id ? '处理中…' : labels[action]}
+                              {embeddingActionId === profile.id ? '处理中…' : label}
                             </button>
                           );
                         })}
                       </div>
                     </div>
+                    {(profile.failure_reasons.length > 0 || profile.last_error) && (
+                      <div className="mt-3 rounded-lg border border-red-100 bg-red-50/70 p-3">
+                        <p className="text-xs font-semibold text-red-800">失败原因</p>
+                        <ul className="mt-1 space-y-1 text-xs leading-5 text-red-700">
+                          {profile.failure_reasons.map((reason) => (
+                            <li key={reason.message} className="break-words">
+                              {reason.message}
+                              {reason.count > 1 ? `（${reason.count} 个任务）` : ''}
+                            </li>
+                          ))}
+                          {!profile.failure_reasons.length && profile.last_error && (
+                            <li className="break-words">{profile.last_error}</li>
+                          )}
+                        </ul>
+                        <p className="mt-2 text-xs leading-5 text-slate-600">
+                          请先检查模型地址、密钥、模型名称和返回维度；修正配置后再重试。
+                          若不再需要此版本，可直接删除，已完成任务不会影响当前生效索引。
+                        </p>
+                      </div>
+                    )}
                   </div>
                 );
               })}

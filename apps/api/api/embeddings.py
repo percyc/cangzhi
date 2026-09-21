@@ -275,16 +275,28 @@ async def delete_embedding_profile(
             status_code=409,
             detail="当前生效的向量索引不能删除，请先启用或回滚到其他版本",
         )
-    if profile.status == "building":
+    jobs = list(
+        (
+            await db.execute(
+                select(ProcessingJob)
+                .where(ProcessingJob.embedding_profile_id == profile_id)
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    processing_count = sum(job.status == "processing" for job in jobs)
+    if processing_count:
         raise HTTPException(
             status_code=409,
-            detail="正在构建的向量索引不能删除，请等待构建结束",
+            detail=(
+                f"仍有 {processing_count} 个向量任务正在执行，请等待其结束后再删除；"
+                "排队和失败任务会在删除版本时一并清理"
+            ),
         )
-    await db.execute(
-        delete(ProcessingJob).where(
-            ProcessingJob.embedding_profile_id == profile_id
-        )
-    )
+    for job in jobs:
+        await db.delete(job)
     await db.execute(
         delete(ChunkEmbedding).where(ChunkEmbedding.profile_id == profile_id)
     )
