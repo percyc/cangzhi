@@ -194,6 +194,13 @@ type KnowledgeDataset = {
   profile: {
     quality?: { completeness?: number; empty_cells?: number };
     field_semantics?: { status?: string; updated_fields?: number; total_fields?: number };
+    field_semantics_refresh?: {
+      mode?: 'smart' | 'full';
+      status?: string;
+      reused_fields?: number;
+      estimated_ai_fields?: number;
+      total_fields?: number;
+    };
   };
   execution: {
     backend: 'duckdb' | 'postgresql_fallback';
@@ -895,6 +902,7 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
   const [error, setError] = useState('');
   const [semanticLoading, setSemanticLoading] = useState(false);
   const [semanticMessage, setSemanticMessage] = useState('');
+  const [semanticMode, setSemanticMode] = useState<'smart' | 'full'>('smart');
   const pageSize = 50;
   const dataset = datasetItems.find((item) => item.id === selectedId) ?? datasetItems[0];
 
@@ -903,12 +911,20 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
     setSemanticLoading(true);
     setSemanticMessage('');
     try {
-      const response = await fetch(`/api/datasets/${dataset.id}/field-semantics`, { method: 'POST' });
+      const response = await fetch(`/api/datasets/${dataset.id}/field-semantics`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: semanticMode }),
+      });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : '字段说明生成失败');
       const updated = body.dataset as KnowledgeDataset;
       setDatasetItems((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setSemanticMessage(`已更新 ${body.updated_fields ?? 0}/${body.total_fields ?? 0} 个字段说明`);
+      setSemanticMessage(
+        body.requested_fields === 0
+          ? '所有字段已有可复用说明，本次没有调用模型'
+          : `已更新 ${body.updated_fields ?? 0}/${body.requested_fields ?? 0} 个待处理字段说明`,
+      );
     } catch (caught) {
       setSemanticMessage(caught instanceof Error ? caught.message : '字段说明生成失败');
     } finally {
@@ -947,6 +963,9 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
   const typeLabels: Record<string, string> = {
     text: '文本', number: '数值', date: '日期', boolean: '布尔', identifier: '标识符', unknown: '待分析',
   };
+  const smartSemanticEstimate = dataset.fields.filter((field) => !field.description).length;
+  const semanticEstimate = semanticMode === 'full' ? dataset.fields.length : smartSemanticEstimate;
+  const boundedSemanticEstimate = Math.min(semanticEstimate, 320);
 
   return (
     <section className="mt-6 overflow-hidden rounded-2xl border border-cyan-200 bg-white shadow-sm">
@@ -1007,8 +1026,20 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
         <div className="p-4">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-3">
             <div><p className="text-sm font-medium text-slate-800">字段语义画像</p><p className="mt-0.5 text-xs text-slate-500">类型、统计和样例来自程序；AI 说明仅作问法映射，不改变原始数据。</p></div>
-            <button type="button" disabled={semanticLoading} onClick={generateSemantics} className="rounded-lg border border-cyan-300 bg-white px-3 py-2 text-sm font-medium text-cyan-800 hover:bg-cyan-50 disabled:opacity-50">{semanticLoading ? '正在分析…' : dataset.profile.field_semantics ? '重新生成字段说明' : 'AI 补充字段说明'}</button>
+            <div className="flex flex-wrap items-center gap-2">
+              <select value={semanticMode} onChange={(event) => setSemanticMode(event.target.value as 'smart' | 'full')} disabled={semanticLoading} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
+                <option value="smart">智能补充（推荐）</option>
+                <option value="full">全量重新生成</option>
+              </select>
+              <button type="button" disabled={semanticLoading || semanticEstimate === 0} onClick={generateSemantics} className="rounded-lg border border-cyan-300 bg-white px-3 py-2 text-sm font-medium text-cyan-800 hover:bg-cyan-50 disabled:opacity-50">{semanticLoading ? '正在分析…' : semanticEstimate === 0 ? '无需补充' : `处理 ${boundedSemanticEstimate}${semanticEstimate > 320 ? `/${semanticEstimate}` : ''} 个字段`}</button>
+            </div>
           </div>
+          <p className="mb-3 text-xs leading-5 text-slate-500">
+            {semanticMode === 'smart'
+              ? `复用已有解释，仅处理缺少说明的 ${smartSemanticEstimate} 个字段。数据库刷新时，新增或类型变化字段也会进入此范围。`
+              : `将重新生成全部 ${dataset.fields.length} 个字段的说明、单位和别名，模型消耗更高。`}
+            {semanticEstimate > 320 ? ' 单次最多处理前 320 个字段，其余保持待补充。' : ''}
+          </p>
           {semanticMessage && <p className={`mb-3 rounded-lg px-3 py-2 text-sm ${semanticMessage.includes('失败') || semanticMessage.includes('配置') ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{semanticMessage}</p>}
           <div className="grid gap-3 md:grid-cols-2">
             {dataset.fields.map((field) => (

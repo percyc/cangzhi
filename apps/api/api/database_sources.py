@@ -73,6 +73,7 @@ class DatabaseSourceCreate(BaseModel):
     trusted_private_network: bool = False
     freshness_mode: Literal["manual", "background", "strict"] = "background"
     freshness_interval_minutes: int = Field(default=1440, ge=5, le=43_200)
+    semantic_refresh_mode: Literal["smart", "full"] = "smart"
 
     @field_validator("name")
     @classmethod
@@ -106,6 +107,7 @@ class DatabaseSourceUpdate(BaseModel):
     is_enabled: bool | None = None
     freshness_mode: Literal["manual", "background", "strict"] | None = None
     freshness_interval_minutes: int | None = Field(default=None, ge=5, le=43_200)
+    semantic_refresh_mode: Literal["smart", "full"] | None = None
 
     @field_validator("name")
     @classmethod
@@ -285,6 +287,7 @@ async def create_source(payload: DatabaseSourceCreate, db: DatabaseSession):
         status="idle",
         freshness_mode=freshness_mode,
         freshness_interval_minutes=freshness_interval,
+        semantic_refresh_mode=payload.semantic_refresh_mode,
     )
     db.add(source)
     await db.commit()
@@ -380,6 +383,8 @@ async def update_source(
             raise HTTPException(status_code=400, detail=str(exc)) from None
         source.freshness_mode = mode
         source.freshness_interval_minutes = interval
+    if payload.semantic_refresh_mode is not None:
+        source.semantic_refresh_mode = payload.semantic_refresh_mode
 
     if action == PASSWORD_REPLACE:
         source.password_cipher = encrypt_secret(payload.password)
@@ -710,6 +715,9 @@ def _import_payload(result: DatabaseImportResult) -> dict[str, Any]:
         "column_count": result.column_count,
         "fingerprint": result.fingerprint,
         "reused_document": result.reused_document,
+        "semantic_refresh_mode": result.semantic_refresh_mode,
+        "semantic_reused_fields": result.semantic_reused_fields,
+        "semantic_ai_fields": result.semantic_ai_fields,
     }
 
 

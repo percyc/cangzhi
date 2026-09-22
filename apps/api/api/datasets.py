@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -78,6 +78,10 @@ class DatasetRowsResponse(BaseModel):
     total: int
     columns: list[str]
     rows: list[dict[str, Any]]
+
+
+class FieldSemanticsRequest(BaseModel):
+    mode: Literal["smart", "full"] = "smart"
 
 
 async def _dataset_response(
@@ -223,7 +227,9 @@ async def get_dataset(
 
 @router.post("/{dataset_id}/field-semantics", response_model=dict[str, Any])
 async def generate_field_semantics(
-    dataset_id: int, db: AsyncSession = Depends(get_db)
+    dataset_id: int,
+    payload: FieldSemanticsRequest | None = None,
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Generate optional semantic hints without changing dataset facts."""
 
@@ -240,6 +246,23 @@ async def generate_field_semantics(
     )
     if not fields:
         raise HTTPException(status_code=409, detail="数据集尚未生成字段画像")
+    mode = payload.mode if payload is not None else "smart"
+    target_names = (
+        [field.name for field in fields if not field.description]
+        if mode == "smart"
+        else [field.name for field in fields]
+    )
+    if not target_names:
+        return {
+            "dataset_id": dataset.id,
+            "mode": mode,
+            "updated_fields": 0,
+            "requested_fields": 0,
+            "total_fields": len(fields),
+            "status": "reused",
+            "calls": 0,
+            "dataset": (await _dataset_response(db, dataset)).model_dump(),
+        }
     provider = await build_provider_from_db(db)
     if provider is None or not provider.is_configured():
         raise HTTPException(status_code=409, detail="请先配置可用的对话模型")
@@ -254,6 +277,7 @@ async def generate_field_semantics(
                 "row_count": dataset.row_count,
             },
             [field_semantic_context(field) for field in fields],
+            target_names=target_names,
         )
         result = apply_field_semantic_proposal(dataset, fields, proposal)
     except (AIProviderError, ValueError) as exc:
@@ -262,8 +286,10 @@ async def generate_field_semantics(
     await db.commit()
     return {
         "dataset_id": dataset.id,
+        "mode": mode,
         "updated_fields": result.updated,
-        "total_fields": result.total,
+        "requested_fields": result.total,
+        "total_fields": len(fields),
         "status": result.status,
         "calls": result.calls,
         "dataset": (await _dataset_response(db, dataset)).model_dump(),

@@ -18,7 +18,7 @@ from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
-from apps.api.models.datasets import KnowledgeDataset
+from apps.api.models.datasets import DatasetField, KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
@@ -28,6 +28,7 @@ from apps.api.models.workspaces import Workspace
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
     _process_database_refresh,
+    _process_dataset_semantics,
     _enqueue_embedding_jobs_for_new_chunks,
     _ensure_word_pdf_preview,
     _is_terminal_parse_failure,
@@ -1309,3 +1310,105 @@ def test_database_refresh_failure_keeps_snapshot_and_retries(session, monkeypatc
     assert source.status == "error"
     assert snapshot.last_error == "remote unavailable"
     assert session.get(KnowledgeDataset, dataset.id) is not None
+
+
+def test_dataset_semantics_smart_mode_only_generates_missing_fields(
+    session, monkeypatch
+):
+    document = Document(title="订单快照", source_type=DocumentSourceType.file)
+    session.add(document)
+    session.flush()
+    version = DocumentVersion(
+        document_id=document.id,
+        version_number=1,
+        content_hash="semantic-smart",
+        processing_status="ready",
+    )
+    session.add(version)
+    session.flush()
+    document.current_version_id = version.id
+    dataset = KnowledgeDataset(
+        document_id=document.id,
+        document_version_id=version.id,
+        name="orders",
+        sheet_name="orders",
+        region_index=1,
+        status="ready",
+        row_count=2,
+        column_count=2,
+        profile={
+            "field_semantics_refresh": {
+                "mode": "smart",
+                "estimated_ai_fields": 1,
+            }
+        },
+    )
+    session.add(dataset)
+    session.flush()
+    reused = DatasetField(
+        dataset_id=dataset.id,
+        position=0,
+        name="id",
+        inferred_type="number",
+        description="既有编号说明",
+        aliases=[],
+        semantic_source="ai",
+        semantic_confidence=0.9,
+        sample_values=["1"],
+        statistics={},
+    )
+    pending = DatasetField(
+        dataset_id=dataset.id,
+        position=1,
+        name="amount",
+        inferred_type="number",
+        aliases=[],
+        sample_values=["12"],
+        statistics={},
+    )
+    job = ProcessingJob(
+        document_id=document.id,
+        document_version_id=version.id,
+        stage="dataset_semantics",
+        status="processing",
+        idempotency_key="semantic-smart-test",
+        config_version="field-semantics-v2",
+    )
+    session.add_all([reused, pending, job])
+    session.commit()
+
+    class Provider:
+        name = "fake"
+        _model = "semantic-test"
+
+        @staticmethod
+        def is_configured():
+            return True
+
+        @staticmethod
+        def generate_json(**_kwargs):
+            return {
+                "fields": [
+                    {
+                        "name": "amount",
+                        "description": "订单金额",
+                        "unit": "元",
+                        "aliases": ["金额"],
+                        "confidence": 0.9,
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(
+        "apps.worker.services.processor.build_provider_from_session",
+        lambda _session: Provider(),
+    )
+
+    assert _process_dataset_semantics(session, job, document, version) is True
+    session.refresh(reused)
+    session.refresh(pending)
+    session.refresh(job)
+    assert reused.description == "既有编号说明"
+    assert pending.description == "订单金额"
+    assert pending.unit == "元"
+    assert job.error_details["datasets"][0]["requested_fields"] == 1

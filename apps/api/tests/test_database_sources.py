@@ -24,6 +24,7 @@ from apps.api.models.chunks import DocumentChunk
 from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
 from apps.api.models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
+from apps.api.models.processing import ProcessingJob
 from apps.api.models.table_rows import StructuredTableRow
 from apps.api.models.taxonomy import DocumentCategory, DocumentTag, Tag
 from apps.api.models.workspaces import DEFAULT_WORKSPACE_SLUG, Workspace
@@ -732,6 +733,93 @@ def test_reimport_creates_new_version_and_replaces_dataset(
     )
     assert new_path.is_file()
     assert not first_path.exists(), "re-import should remove the superseded parquet"
+
+
+@pytest.mark.parametrize(
+    ("semantic_mode", "expected_pending"),
+    [("smart", 0), ("full", 2)],
+)
+def test_reimport_reuses_unchanged_field_semantics_and_bounds_ai_work(
+    client, monkeypatch, semantic_mode, expected_pending
+):
+    test_client, _ = client
+    _install_fake_driver(monkeypatch, rows=[(1, "alpha"), (2, "beta")])
+    created = test_client.post(
+        "/api/database-sources",
+        json=_create_source_payload(semantic_refresh_mode=semantic_mode),
+    )
+    assert created.status_code == 201
+    assert created.json()["semantic_refresh_mode"] == semantic_mode
+    source_id = created.json()["id"]
+    first = _import_via_api(test_client, source_id).json()
+
+    async def add_semantics():
+        generator = app.dependency_overrides[get_db]()
+        session = await anext(generator)
+        try:
+            fields = list(
+                (
+                    await session.scalars(
+                        select(DatasetField)
+                        .where(DatasetField.dataset_id == first["dataset_id"])
+                        .order_by(DatasetField.position)
+                    )
+                ).all()
+            )
+            for field in fields:
+                field.description = f"{field.name} 的既有说明"
+                field.unit = "个" if field.name == "id" else None
+                field.aliases = [f"{field.name}别名"]
+                field.semantic_source = "ai"
+                field.semantic_confidence = 0.9
+            await session.commit()
+        finally:
+            await generator.aclose()
+
+    asyncio.run(add_semantics())
+    _install_fake_driver(monkeypatch, rows=[(10, "gamma"), (20, "delta")])
+    second = _import_via_api(test_client, source_id).json()
+
+    async def inspect_refresh():
+        generator = app.dependency_overrides[get_db]()
+        session = await anext(generator)
+        try:
+            dataset = await session.get(KnowledgeDataset, second["dataset_id"])
+            fields = list(
+                (
+                    await session.scalars(
+                        select(DatasetField)
+                        .where(DatasetField.dataset_id == dataset.id)
+                        .order_by(DatasetField.position)
+                    )
+                ).all()
+            )
+            job = await session.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.document_version_id
+                    == second["document_version_id"],
+                    ProcessingJob.stage == "dataset_semantics",
+                )
+            )
+            return dataset.profile, fields, job
+        finally:
+            await generator.aclose()
+
+    profile, fields, job = asyncio.run(inspect_refresh())
+    assert [field.description for field in fields] == [
+        "id 的既有说明",
+        "name 的既有说明",
+    ]
+    assert fields[0].unit == "个"
+    assert fields[1].aliases == ["name别名"]
+    assert profile["field_semantics_refresh"] == {
+        "mode": semantic_mode,
+        "status": "reused" if expected_pending == 0 else "pending",
+        "reused_fields": 2,
+        "estimated_ai_fields": expected_pending,
+        "total_fields": 2,
+    }
+    assert (job is not None) is (expected_pending > 0)
 
 
 def test_empty_table_is_skipped_and_removes_previous_snapshot(

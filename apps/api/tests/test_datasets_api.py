@@ -167,3 +167,19 @@ def test_generate_field_semantics_keeps_profile_facts(client, monkeypatch):
     assert fields["年龄"]["unit"] == "岁"
     assert fields["年龄"]["inferred_type"] == "number"
     assert fields["年龄"]["statistics"] == {"min": 20, "max": 20}
+
+    smart = test_client.post(
+        f"/api/datasets/{dataset_id}/field-semantics",
+        json={"mode": "smart"},
+    )
+    assert smart.status_code == 200
+    assert smart.json()["requested_fields"] == 0
+    assert smart.json()["calls"] == 0
+
+    full = test_client.post(
+        f"/api/datasets/{dataset_id}/field-semantics",
+        json={"mode": "full"},
+    )
+    assert full.status_code == 200
+    assert full.json()["requested_fields"] == 2
+    assert full.json()["calls"] == 1

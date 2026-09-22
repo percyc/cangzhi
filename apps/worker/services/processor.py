@@ -2325,18 +2325,35 @@ def _process_dataset_semantics(
             )
             if not fields:
                 continue
+            refresh = (dataset.profile or {}).get("field_semantics_refresh")
+            target_names: list[str] | None = None
+            if isinstance(refresh, dict) and refresh.get("mode") == "smart":
+                target_names = [field.name for field in fields if not field.description]
+                if not target_names:
+                    outcomes.append(
+                        {
+                            "dataset_id": dataset.id,
+                            "updated_fields": 0,
+                            "requested_fields": 0,
+                            "total_fields": len(fields),
+                            "status": "reused",
+                        }
+                    )
+                    continue
             try:
                 result = enrich_dataset_fields(
                     provider,
                     dataset,
                     fields,
                     document_title=document.title,
+                    target_names=target_names,
                 )
                 outcomes.append(
                     {
                         "dataset_id": dataset.id,
                         "updated_fields": result.updated,
-                        "total_fields": result.total,
+                        "requested_fields": result.total,
+                        "total_fields": len(fields),
                         "status": result.status,
                     }
                 )
@@ -2394,6 +2411,9 @@ async def _refresh_database_snapshot_async(
             "document_version_id": result.document_version_id,
             "row_count": result.row_count,
             "fingerprint": result.fingerprint,
+            "semantic_refresh_mode": result.semantic_refresh_mode,
+            "semantic_reused_fields": result.semantic_reused_fields,
+            "semantic_ai_fields": result.semantic_ai_fields,
         }
 
 

@@ -71,6 +71,9 @@ class DatabaseSource(BaseModel):
     freshness_interval_minutes = Column(
         Integer, nullable=False, server_default=text("1440")
     )
+    semantic_refresh_mode = Column(
+        String(32), nullable=False, server_default=text("'smart'")
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -84,6 +87,10 @@ class DatabaseSource(BaseModel):
         CheckConstraint(
             "freshness_interval_minutes BETWEEN 5 AND 43200",
             name="ck_database_sources_freshness_interval",
+        ),
+        CheckConstraint(
+            "semantic_refresh_mode IN ('smart', 'full')",
+            name="ck_database_sources_semantic_refresh_mode",
         ),
     )
 
@@ -111,6 +118,7 @@ class DatabaseSource(BaseModel):
             else None,
             "freshness_mode": self.freshness_mode,
             "freshness_interval_minutes": self.freshness_interval_minutes,
+            "semantic_refresh_mode": self.semantic_refresh_mode,
         }
 
 

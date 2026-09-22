@@ -61,6 +61,7 @@ type DbForm = {
   trusted_private_network: boolean;
   freshness_mode: 'manual' | 'background' | 'strict';
   freshness_interval_minutes: number;
+  semantic_refresh_mode: 'smart' | 'full';
 };
 
 function emptyForm(): DbForm {
@@ -77,6 +78,7 @@ function emptyForm(): DbForm {
     trusted_private_network: false,
     freshness_mode: 'background',
     freshness_interval_minutes: 1440,
+    semantic_refresh_mode: 'smart',
   };
 }
 
@@ -162,7 +164,7 @@ export function DatabaseSourcePanel() {
     setBusy('create');
     setError('');
     try {
-      const { name, engine, host, port, database_name, username, password, ssl_mode, trusted_private_network, freshness_mode, freshness_interval_minutes } = createForm;
+      const { name, engine, host, port, database_name, username, password, ssl_mode, trusted_private_network, freshness_mode, freshness_interval_minutes, semantic_refresh_mode } = createForm;
       await createDatabaseSource({
         name,
         engine,
@@ -175,6 +177,7 @@ export function DatabaseSourcePanel() {
         trusted_private_network,
         freshness_mode,
         freshness_interval_minutes,
+        semantic_refresh_mode,
       });
       setCreateForm(emptyForm());
       setCreating(false);
@@ -201,6 +204,7 @@ export function DatabaseSourcePanel() {
       trusted_private_network: source.trusted_private_network,
       freshness_mode: source.freshness_mode,
       freshness_interval_minutes: source.freshness_interval_minutes,
+      semantic_refresh_mode: source.semantic_refresh_mode,
     });
     setEditingId(source.id);
     setMessage('');
@@ -222,6 +226,7 @@ export function DatabaseSourcePanel() {
         trusted_private_network: editForm.trusted_private_network,
         freshness_mode: editForm.freshness_mode,
         freshness_interval_minutes: editForm.freshness_interval_minutes,
+        semantic_refresh_mode: editForm.semantic_refresh_mode,
       };
       if (editForm.password_action === 'replace') {
         payload.password_action = 'replace';
@@ -417,7 +422,7 @@ export function DatabaseSourcePanel() {
         return;
       }
       setMessage(
-        `已导入 ${table.schema_name}.${table.table_name} 的快照：${result.row_count} 行 × ${result.column_count} 列${result.reused_document ? '（更新已有资料）' : '（新资料）'}，可在数据集、API 与 MCP 中查询。`,
+        `已导入 ${table.schema_name}.${table.table_name} 的快照：${result.row_count} 行 × ${result.column_count} 列${result.reused_document ? '（更新已有资料）' : '（新资料）'}。AI 字段解释复用 ${result.semantic_reused_fields} 个，待处理 ${result.semantic_ai_fields} 个。`,
       );
       const snapshots = await fetchDatabaseSnapshots(source.id);
       await Promise.all([load(), loadCatalog(source.id, table.schema_name)]);
@@ -724,6 +729,9 @@ export function DatabaseSourcePanel() {
                     <p className="mt-1 text-xs text-slate-500">
                       {source.username || '无用户名'} · {SSL_LABELS[source.ssl_mode] ??
                       source.ssl_mode} · {source.trusted_private_network ? '允许可信内网' : '仅公网地址'}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      AI 字段解释：{source.semantic_refresh_mode === 'full' ? '每次全量重新生成' : '智能增量，仅补必要字段'}
                     </p>
                     <p className="mt-1 text-xs text-slate-500">
                       数据新鲜度：{source.freshness_mode === 'manual' ? '仅手动刷新' : source.freshness_mode === 'strict' ? '严格新鲜' : '过期后台刷新'}
@@ -1161,6 +1169,20 @@ function DbFields({
       <p className="text-xs leading-5 text-slate-500 md:col-span-2">
         知识探索始终查询本地 Parquet 快照。后台模式先返回当前版本并安排刷新；严格模式在过期时要求等待新快照。
       </p>
+      <label className="text-sm text-slate-700 md:col-span-2">
+        刷新后的 AI 字段解释
+        <select
+          value={form.semantic_refresh_mode}
+          onChange={(event) => setForm({ ...form, semantic_refresh_mode: event.target.value as DbForm['semantic_refresh_mode'] })}
+          className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2"
+        >
+          <option value="smart">智能增量（推荐）：复用未变化字段，仅补新增、类型变化或缺失字段</option>
+          <option value="full">全量重新生成：每次重新理解所有字段</option>
+        </select>
+        <span className="mt-1 block text-xs leading-5 text-slate-500">
+          表结构始终由程序完整检查，不消耗模型；这里仅控制 AI 说明、单位和别名的生成范围。
+        </span>
+      </label>
       <p className="text-xs leading-5 text-slate-500 md:col-span-2">
         为安全起见，本机、链路本地及未指定的回环地址始终被拒绝；仅当勾选“可信内网”时才允许连接非公网地址。
       </p>

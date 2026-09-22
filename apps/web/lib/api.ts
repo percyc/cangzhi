@@ -371,6 +371,7 @@ export type DatabaseSource = {
   last_sync_at: string | null;
   freshness_mode: 'manual' | 'background' | 'strict';
   freshness_interval_minutes: number;
+  semantic_refresh_mode: 'smart' | 'full';
   snapshot_counts: { total: number; empty: number };
 };
 
@@ -388,6 +389,7 @@ export type DatabaseSourcePayload = {
   is_enabled?: boolean;
   freshness_mode?: 'manual' | 'background' | 'strict';
   freshness_interval_minutes?: number;
+  semantic_refresh_mode?: 'smart' | 'full';
 };
 
 export type DatabaseCatalogColumn = {
@@ -438,6 +440,9 @@ export type DatabaseImportResult = {
   row_count: number;
   column_count: number;
   reused_document: boolean;
+  semantic_refresh_mode: 'smart' | 'full';
+  semantic_reused_fields: number;
+  semantic_ai_fields: number;
 };
 
 export type DatabaseEmptyCleanupResult = {

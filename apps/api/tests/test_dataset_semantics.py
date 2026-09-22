@@ -128,3 +128,74 @@ def test_enrich_dataset_fields_updates_only_semantic_metadata():
     assert dataset.profile["quality"] == {"completeness": 1}
     assert dataset.profile["field_semantics"]["updated_fields"] == 1
     assert "只读事实" in calls[0]["system"]
+
+
+def test_smart_enrichment_calls_model_only_for_requested_fields():
+    calls = []
+
+    def generate_json(**kwargs):
+        calls.append(kwargs)
+        return {
+            "fields": [
+                {
+                    "name": "新增字段",
+                    "description": "新增字段说明",
+                    "unit": None,
+                    "aliases": [],
+                    "confidence": 0.8,
+                }
+            ]
+        }
+
+    provider = SimpleNamespace(name="fake", _model="unit-test", generate_json=generate_json)
+    dataset = KnowledgeDataset(
+        id=10,
+        document_id=3,
+        document_version_id=8,
+        name="orders",
+        sheet_name="Sheet1",
+        region_index=1,
+        row_count=10,
+        column_count=2,
+        profile={"field_semantics_refresh": {"mode": "smart"}},
+    )
+    reused = DatasetField(
+        id=3,
+        dataset_id=10,
+        position=0,
+        name="已有字段",
+        inferred_type="text",
+        description="保留原说明",
+        semantic_source="ai",
+        aliases=[],
+        sample_values=[],
+        statistics={},
+    )
+    pending = DatasetField(
+        id=4,
+        dataset_id=10,
+        position=1,
+        name="新增字段",
+        inferred_type="text",
+        aliases=[],
+        sample_values=[],
+        statistics={},
+    )
+
+    result = enrich_dataset_fields(
+        provider,
+        dataset,
+        [reused, pending],
+        document_title="订单快照",
+        target_names=["新增字段"],
+    )
+
+    prompt = calls[0]["prompt"]
+    assert result.total == 1
+    assert result.updated == 1
+    assert reused.description == "保留原说明"
+    assert pending.description == "新增字段说明"
+    assert '"all_field_names": ["已有字段", "新增字段"]' in prompt
+    assert '"current_fields": [{"name": "新增字段"' in prompt
+    assert dataset.profile["field_semantics"]["target_fields"] == 1
+    assert dataset.profile["field_semantics"]["total_fields"] == 2

@@ -689,6 +689,9 @@ class DatabaseImportResult:
     status: str = "imported"
     skip_reason: str | None = None
     removed_existing: bool = False
+    semantic_refresh_mode: str = "smart"
+    semantic_reused_fields: int = 0
+    semantic_ai_fields: int = 0
 
 
 @dataclass(frozen=True)
@@ -1229,6 +1232,7 @@ async def import_database_table(
             status="skipped",
             skip_reason="empty_table",
             removed_existing=removed_existing,
+            semantic_refresh_mode=source.semantic_refresh_mode or "smart",
         )
 
     document = await db.scalar(
@@ -1321,6 +1325,33 @@ async def import_database_table(
             )
         ).all()
     )
+    previous_semantics: dict[str, dict[str, Any]] = {}
+    previous_semantic_profile: dict[str, Any] | None = None
+    for old_dataset in old_datasets:
+        if previous_semantic_profile is None:
+            candidate = (old_dataset.profile or {}).get("field_semantics")
+            if isinstance(candidate, dict):
+                previous_semantic_profile = dict(candidate)
+        old_fields = list(
+            (
+                await db.scalars(
+                    select(DatasetField).where(
+                        DatasetField.dataset_id == old_dataset.id
+                    )
+                )
+            ).all()
+        )
+        for old_field in old_fields:
+            if not old_field.description:
+                continue
+            previous_semantics[old_field.name] = {
+                "inferred_type": old_field.inferred_type,
+                "description": old_field.description,
+                "unit": old_field.unit,
+                "aliases": list(old_field.aliases or []),
+                "semantic_source": old_field.semantic_source,
+                "semantic_confidence": old_field.semantic_confidence,
+            }
 
     # Allocate the replacement before deleting old rows. Besides making the
     # transition easier to inspect, this prevents SQLite (used in tests and
@@ -1384,12 +1415,21 @@ async def import_database_table(
     await db.flush()
 
     sample_pool: list[dict[str, Any]] = list(rows[:128])
+    semantic_mode = source.semantic_refresh_mode or "smart"
+    reused_semantic_fields = 0
+    pending_semantic_fields = 0
     for index, name in enumerate(columns):
         column_values = [row.get(name) for row in sample_pool]
         inferred = _to_inferred_type(column_values)
         samples = _build_sample_values(name, sample_pool)
         null_count = sum(1 for row in rows if row.get(name) is None)
         distinct = len({str(value) for value in column_values if value is not None})
+        previous = previous_semantics.get(name)
+        reusable = bool(previous and previous["inferred_type"] == inferred)
+        if reusable:
+            reused_semantic_fields += 1
+        if semantic_mode == "full" or not reusable:
+            pending_semantic_fields += 1
         db.add(
             DatasetField(
                 dataset_id=dataset.id,
@@ -1403,8 +1443,31 @@ async def import_database_table(
                     "profiled_rows": len(sample_pool),
                     "is_sampled": len(rows) > len(sample_pool),
                 },
+                description=previous["description"] if reusable else None,
+                unit=previous["unit"] if reusable else None,
+                aliases=previous["aliases"] if reusable else [],
+                semantic_source=previous["semantic_source"] if reusable else None,
+                semantic_confidence=(
+                    previous["semantic_confidence"] if reusable else None
+                ),
             )
         )
+
+    profile = dict(dataset.profile or {})
+    if previous_semantic_profile is not None:
+        profile["field_semantics"] = {
+            **previous_semantic_profile,
+            "status": "pending" if pending_semantic_fields else "reused",
+            "total_fields": len(columns),
+        }
+    profile["field_semantics_refresh"] = {
+        "mode": semantic_mode,
+        "status": "pending" if pending_semantic_fields else "reused",
+        "reused_fields": reused_semantic_fields,
+        "estimated_ai_fields": pending_semantic_fields,
+        "total_fields": len(columns),
+    }
+    dataset.profile = profile
 
     for offset in range(0, len(rows), 2_000):
         row_records = [
@@ -1491,18 +1554,19 @@ async def import_database_table(
     # the filesystem mirrors the database. The previous active artifact, if
     # any, was unpublished by ``build_dataset_parquet`` and is left alone.
     artifact_path = _artifact_storage_path(artifact, storage_root)
-    db.add(
-        ProcessingJob(
-            document_id=document.id,
-            document_version_id=version.id,
-            stage="dataset_semantics",
-            status="created",
-            idempotency_key=f"{version.id}:dataset_semantics:field-semantics-v1",
-            retry_count=0,
-            max_retries=1,
-            config_version="field-semantics-v1",
+    if pending_semantic_fields:
+        db.add(
+            ProcessingJob(
+                document_id=document.id,
+                document_version_id=version.id,
+                stage="dataset_semantics",
+                status="created",
+                idempotency_key=f"{version.id}:dataset_semantics:field-semantics-v2",
+                retry_count=0,
+                max_retries=1,
+                config_version="field-semantics-v2",
+            )
         )
-    )
     try:
         await db.commit()
     except Exception as exc:
@@ -1536,6 +1600,9 @@ async def import_database_table(
         column_count=len(columns),
         fingerprint=fingerprint,
         reused_document=reused_document,
+        semantic_refresh_mode=semantic_mode,
+        semantic_reused_fields=reused_semantic_fields,
+        semantic_ai_fields=pending_semantic_fields,
     )
 
 

@@ -43,6 +43,7 @@ class SemanticEnrichmentResult:
 class FieldSemanticProposal:
     suggestions: dict[str, dict[str, Any]]
     total: int
+    target_names: tuple[str, ...]
     status: str
     calls: int
     provider: str
@@ -108,14 +109,25 @@ def generate_field_semantic_proposal(
     provider: AIProvider,
     dataset_context: dict[str, Any],
     field_contexts: Sequence[dict[str, Any]],
+    *,
+    target_names: Sequence[str] | None = None,
 ) -> FieldSemanticProposal:
     """Call the model using detached data so async callers stay thread-safe."""
 
-    selected = list(field_contexts[:MAX_AI_FIELDS])
+    contexts = list(field_contexts)
+    available_names = {str(field["name"]) for field in contexts}
+    requested_names = (
+        [str(name) for name in target_names if str(name) in available_names]
+        if target_names is not None
+        else [str(field["name"]) for field in contexts]
+    )
+    requested = set(requested_names)
+    targets = [field for field in contexts if str(field["name"]) in requested]
+    selected = targets[:MAX_AI_FIELDS]
     suggestions: dict[str, dict[str, Any]] = {}
     calls = 0
     model = str(getattr(provider, "_model", "") or "") or None
-    all_names = [str(field["name"]) for field in field_contexts]
+    all_names = [str(field["name"]) for field in contexts]
     for offset in range(0, len(selected), MAX_FIELDS_PER_CALL):
         batch = selected[offset : offset + MAX_FIELDS_PER_CALL]
         prompt = json.dumps(
@@ -138,8 +150,9 @@ def generate_field_semantic_proposal(
         )
     return FieldSemanticProposal(
         suggestions=suggestions,
-        total=len(field_contexts),
-        status="completed" if len(selected) == len(field_contexts) else "partial",
+        total=len(targets),
+        target_names=tuple(str(field["name"]) for field in targets),
+        status="completed" if len(selected) == len(targets) else "partial",
         calls=calls,
         provider=provider.name,
         model=model,
@@ -176,10 +189,14 @@ def apply_field_semantic_proposal(
             updated += 1
 
     profile = dict(dataset.profile or {})
+    effective_status = (
+        proposal.status if updated == proposal.total else "partial"
+    )
     profile["field_semantics"] = {
-        "status": proposal.status,
+        "status": effective_status,
         "updated_fields": updated,
-        "total_fields": proposal.total,
+        "target_fields": proposal.total,
+        "total_fields": len(fields),
         "calls": proposal.calls,
         "source": "ai",
         "provider": proposal.provider,
@@ -187,11 +204,23 @@ def apply_field_semantic_proposal(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "limit": MAX_AI_FIELDS,
     }
+    refresh = profile.get("field_semantics_refresh")
+    if isinstance(refresh, dict):
+        remaining = [
+            name for name in proposal.target_names if name not in proposal.suggestions
+        ]
+        profile["field_semantics_refresh"] = {
+            **refresh,
+            "status": "completed" if not remaining else "partial",
+            "estimated_ai_fields": len(remaining),
+            "last_requested_fields": proposal.total,
+            "last_updated_fields": updated,
+        }
     dataset.profile = profile
     return SemanticEnrichmentResult(
         updated=updated,
         total=proposal.total,
-        status=profile["field_semantics"]["status"],
+        status=effective_status,
         calls=proposal.calls,
         model=proposal.model,
     )
@@ -203,6 +232,7 @@ def enrich_dataset_fields(
     fields: Sequence[DatasetField],
     *,
     document_title: str,
+    target_names: Sequence[str] | None = None,
 ) -> SemanticEnrichmentResult:
     """Synchronous convenience wrapper used by the Worker."""
 
@@ -215,6 +245,7 @@ def enrich_dataset_fields(
             "row_count": dataset.row_count,
         },
         [field_semantic_context(field) for field in fields],
+        target_names=target_names,
     )
     return apply_field_semantic_proposal(dataset, fields, proposal)
 

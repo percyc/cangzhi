@@ -303,6 +303,10 @@ curl -G -H "Authorization: Bearer $TOKEN" \
 `semantic_confidence`。这些是问法映射辅助信息，不是对原始数据的改写。规划查询前应先调用。
 Schema 同样返回 `source_freshness`；后台/严格模式发现过期时会创建去重刷新任务。
 
+内部管理接口 `POST /api/datasets/{dataset_id}/field-semantics` 接受
+`{"mode":"smart"}`（默认）或 `{"mode":"full"}`。`smart` 只补充当前缺少说明的字段，
+没有待处理字段时不调用模型；响应返回 `requested_fields`、`updated_fields` 与 `calls`。
+
 **`GET /api/v1/knowledge/datasets/{dataset_id}/rows`** — 作用域 `knowledge:read`
 
 分页预览少量行。禁止用它逐页抓取整个大表。
