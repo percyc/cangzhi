@@ -1404,3 +1404,14 @@
   SQLite 迁移会因0001的 PostgreSQL `CREATE EXTENSION vector` 不兼容而不适用，实际迁移需在发布时用 PostgreSQL 验证。
 - 局限：这一批还没有数据字典/数据库列注释优先级和用户确认状态；页面因此明确把当前说明标为 AI 建议。
   超过320列的数据集标记 `partial`，不为追求全覆盖引入无界模型成本。
+
+### 2026-09-22 数据集字段语义画像部署
+
+- `e73e72f` 已快进本地 `main`。发布前完成 PostgreSQL 与 storage 联合备份及校验；随后重建
+  API、Web、Worker 并执行0034迁移，PostgreSQL 容器未替换。
+- 发布后 API、Web、Worker、PostgreSQL 均 healthy，schema=0034，readiness 与 Web 页返回200；
+  未登录的字段语义 POST 返回401。数据库已存在新增五个字段，启动日志无异常。
+- 现有实例10个数据集未批量生成语义，发布后 `semantic_fields=0`、`semantic_jobs=0`，
+  确认没有将发布扩大为历史全库模型调用。管理员可在具体数据集的“字段画像”页按需生成；
+  新导入的数据集才会自动排入低优先级任务。
+- 当前自动化浏览器未暴露可控制标签，本轮不伪称完成登录态点击和真实模型生成。
