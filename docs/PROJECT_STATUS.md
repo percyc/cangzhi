@@ -4,7 +4,7 @@
 > `DEVLOG.md` 是按时间追加的变更记录，三者互不重复。本文件只回答：
 > **现在在哪、正在做、刚完成、有什么风险、下一步是什么。**
 
-更新时间：2026-09-21
+更新时间：2026-09-22
 
 本轮维护实例更新：已从远端快进至 `aa7ca04`，审查后按用户明确授权部署 API、Web
 和优先 Worker；schema 保持0033。发布镜像 API/Worker 回归1460通过、2跳过，
@@ -68,6 +68,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 | 主题 | 关联 ID | 状态 | 备注 |
 |---|---|---|---|
+| 数据集字段语义画像 | `CZ-UX` / 基线 C、G | 已完成，待部署 | Codex；`codex/CZ-UX-dataset-field-semantics`。在程序字段画像上增加可校验的 AI 说明、单位、别名和置信度；新数据集低优先级自动尝试，历史数据集可在字段画像页主动生成。不改写字段、类型或数据事实，快速问答与外部 Schema 共享。专项140项、Web lint/typecheck/build通过；需迁移0034 |
 | 快速问答的数据集体验 | `CZ-UX` / 基线 C、G | 已合并部署 | Codex；main `0cede41`。增强趋势/比较/明细等数据意图与范围内数据集发现；提问区提示精确查询，回答展示结果表。保持 DuckDB/Parquet 与程序校验。专项66项、Web lint/typecheck/build通过，API/Web已更新且healthy |
 | 向量构建失败诊断与清理 | `CZ-Q04` / 基线 C | 已合并部署 | Codex；main `a4a0825`。失败原因按消息汇总，显示执行中与排队任务；非生效版本在没有执行中任务时可停止并删除。专项56项、Web lint/typecheck/build通过，API/Web已更新且healthy |
 | 数据库来源导入与维护体验 | `CZ-UX` / 基线 G | 已合并部署 | Codex；main `869c042`。MySQL 目录硬限制到配置库；表管理可看已导入状态、快照清单，支持搜索、筛选、勾选导入；全库导入明确展示目标库与范围。专项36项、Web lint/typecheck/build通过，API/Web已更新且healthy |

@@ -43,6 +43,7 @@ from ..models.chunks import DocumentChunk
 from ..models.database_source import DatabaseSnapshot, DatabaseSource
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from ..models.processing import ProcessingJob
 from ..models.table_rows import StructuredTableRow
 from ..models.taxonomy import Category, DocumentCategory, DocumentTag, Tag
 from ..security.secrets import decrypt_secret
@@ -1490,6 +1491,18 @@ async def import_database_table(
     # the filesystem mirrors the database. The previous active artifact, if
     # any, was unpublished by ``build_dataset_parquet`` and is left alone.
     artifact_path = _artifact_storage_path(artifact, storage_root)
+    db.add(
+        ProcessingJob(
+            document_id=document.id,
+            document_version_id=version.id,
+            stage="dataset_semantics",
+            status="created",
+            idempotency_key=f"{version.id}:dataset_semantics:field-semantics-v1",
+            retry_count=0,
+            max_retries=1,
+            config_version="field-semantics-v1",
+        )
+    )
     try:
         await db.commit()
     except Exception as exc:

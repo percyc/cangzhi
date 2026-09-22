@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from apps.api.core.db import get_db
 from apps.api.main import app
@@ -121,3 +122,48 @@ def test_dataset_catalog_and_paginated_preview(client):
     assert preview.json()["rows"] == [
         {"row_number": 3, "姓名": "乙", "年龄": None}
     ]
+
+
+def test_generate_field_semantics_keeps_profile_facts(client, monkeypatch):
+    test_client, _storage = client
+    document_id, dataset_id = _seed_dataset()
+
+    provider = SimpleNamespace(
+        name="fake",
+        _model="semantic-test",
+        is_configured=lambda: True,
+        generate_json=lambda **_kwargs: {
+            "fields": [
+                {
+                    "name": "姓名",
+                    "description": "人员姓名",
+                    "unit": None,
+                    "aliases": ["名字"],
+                    "confidence": 0.9,
+                },
+                {
+                    "name": "年龄",
+                    "description": "人员年龄",
+                    "unit": "岁",
+                    "aliases": [],
+                    "confidence": 0.8,
+                },
+            ]
+        },
+    )
+
+    async def configured(_db):
+        return provider
+
+    monkeypatch.setattr("apps.api.api.datasets.build_provider_from_db", configured)
+    response = test_client.post(f"/api/datasets/{dataset_id}/field-semantics")
+    catalog = test_client.get(f"/api/datasets?document_id={document_id}").json()[0]
+
+    assert response.status_code == 200
+    assert response.json()["updated_fields"] == 2
+    fields = {field["name"]: field for field in catalog["fields"]}
+    assert fields["姓名"]["description"] == "人员姓名"
+    assert fields["姓名"]["aliases"] == ["名字"]
+    assert fields["年龄"]["unit"] == "岁"
+    assert fields["年龄"]["inferred_type"] == "number"
+    assert fields["年龄"]["statistics"] == {"min": 20, "max": 20}

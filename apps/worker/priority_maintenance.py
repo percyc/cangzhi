@@ -94,6 +94,7 @@ from apps.worker.services.processor import (
     ADAPTIVE_CHUNKING_CONFIG,
     ASSISTED_CHUNKING_CONFIG,
     CHUNKING_STAGE,
+    DATASET_SEMANTICS_STAGE,
     process_single_job,
     utc_now,
 )
@@ -113,6 +114,7 @@ FOREGROUND_STAGES: tuple[str, ...] = (
     "understanding",
     EMBEDDING_STAGE,
     "stored",
+    DATASET_SEMANTICS_STAGE,
     "knowledge_enhancement",
 )
 
@@ -131,6 +133,7 @@ RESUME_STAGES: tuple[str, ...] = (
     "understanding",
     EMBEDDING_STAGE,
     "stored",
+    DATASET_SEMANTICS_STAGE,
 )
 
 FOREGROUND_WEIGHT = 4

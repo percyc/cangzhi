@@ -296,7 +296,9 @@ curl -G -H "Authorization: Bearer $TOKEN" \
 
 **`GET /api/v1/knowledge/datasets/{dataset_id}/schema`** — 作用域 `knowledge:read`
 
-读取字段类型、语义角色、样例、统计画像和执行后端。规划查询前应先调用。
+读取字段类型、语义角色、样例、统计画像和执行后端。如果管理员已生成字段语义，
+`fields[]` 还会返回 `description`、`unit`、`aliases`、`semantic_source` 和
+`semantic_confidence`。这些是问法映射辅助信息，不是对原始数据的改写。规划查询前应先调用。
 
 **`GET /api/v1/knowledge/datasets/{dataset_id}/rows`** — 作用域 `knowledge:read`
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
+from ..ai import AIProviderError, build_provider_from_db
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document
 from ..models.table_rows import StructuredTableRow
@@ -15,6 +17,11 @@ from ..services.dataset_execution import (
     DatasetExecutionError,
     execute_dataset_query,
     preview_dataset,
+)
+from ..services.dataset_semantics import (
+    apply_field_semantic_proposal,
+    field_semantic_context,
+    generate_field_semantic_proposal,
 )
 from .schemas import DatasetFilterInput
 
@@ -34,6 +41,11 @@ class DatasetFieldResponse(BaseModel):
     distinct_count: int | None
     sample_values: list[Any] = Field(default_factory=list)
     statistics: dict[str, Any] = Field(default_factory=dict)
+    description: str | None = None
+    unit: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    semantic_source: str | None = None
+    semantic_confidence: float | None = None
 
 
 class DatasetResponse(BaseModel):
@@ -204,6 +216,55 @@ async def get_dataset(
     dataset_id: int, db: AsyncSession = Depends(get_db)
 ) -> DatasetResponse:
     return await _dataset_response(db, await _visible_dataset(db, dataset_id))
+
+
+@router.post("/{dataset_id}/field-semantics", response_model=dict[str, Any])
+async def generate_field_semantics(
+    dataset_id: int, db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    """Generate optional semantic hints without changing dataset facts."""
+
+    dataset = await _visible_dataset(db, dataset_id)
+    document = await db.get(Document, dataset.document_id)
+    fields = list(
+        (
+            await db.scalars(
+                select(DatasetField)
+                .where(DatasetField.dataset_id == dataset.id)
+                .order_by(DatasetField.position)
+            )
+        ).all()
+    )
+    if not fields:
+        raise HTTPException(status_code=409, detail="数据集尚未生成字段画像")
+    provider = await build_provider_from_db(db)
+    if provider is None or not provider.is_configured():
+        raise HTTPException(status_code=409, detail="请先配置可用的对话模型")
+    try:
+        proposal = await asyncio.to_thread(
+            generate_field_semantic_proposal,
+            provider,
+            {
+                "title": document.title if document is not None else dataset.name,
+                "name": dataset.name,
+                "sheet_name": dataset.sheet_name,
+                "row_count": dataset.row_count,
+            },
+            [field_semantic_context(field) for field in fields],
+        )
+        result = apply_field_semantic_proposal(dataset, fields, proposal)
+    except (AIProviderError, ValueError) as exc:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"字段语义生成失败：{exc}") from None
+    await db.commit()
+    return {
+        "dataset_id": dataset.id,
+        "updated_fields": result.updated,
+        "total_fields": result.total,
+        "status": result.status,
+        "calls": result.calls,
+        "dataset": (await _dataset_response(db, dataset)).model_dump(),
+    }
 
 
 @router.get("/{dataset_id}/rows", response_model=DatasetRowsResponse)

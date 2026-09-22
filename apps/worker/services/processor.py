@@ -78,6 +78,7 @@ from apps.api.services.dataset_execution import (
     DatasetExecutionError,
     build_dataset_parquet,
 )
+from apps.api.services.dataset_semantics import enrich_dataset_fields
 from apps.api.services.structured_table import (
     _dataset_quality,
     _profile_dataset_fields,
@@ -101,6 +102,7 @@ UNDERSTANDING_IDEMPOTENCY = "understanding:v1"
 CHUNKING_STAGE = "chunking"
 DATASET_CATALOG_STAGE = "dataset_catalog"
 DATASET_ARTIFACT_STAGE = "dataset_artifact"
+DATASET_SEMANTICS_STAGE = "dataset_semantics"
 PREVIEW_STAGE = "preview"
 PDF_PREVIEW_CONFIG = "pdf-v1"
 PDF_PREVIEW_MAX_BYTES = 100 * 1024 * 1024
@@ -127,6 +129,7 @@ STAGE_CYCLE: tuple[str, ...] = (
     "chunking",
     DATASET_CATALOG_STAGE,
     DATASET_ARTIFACT_STAGE,
+    DATASET_SEMANTICS_STAGE,
     PREVIEW_STAGE,
     UNDERSTANDING_STAGE,
     "embedding",
@@ -2100,6 +2103,9 @@ def process_single_job(session: Session, job_id: int) -> bool:
     if stage == DATASET_ARTIFACT_STAGE:
         return _process_dataset_artifacts(session, job, version)
 
+    if stage == DATASET_SEMANTICS_STAGE:
+        return _process_dataset_semantics(session, job, document, version)
+
     if stage == PREVIEW_STAGE:
         loaded = _load_content_for_preview(session, document, version)
         if loaded is not None:
@@ -2227,6 +2233,7 @@ def _process_dataset_artifacts(
             "format": "parquet",
         }
         session.add(job)
+        _enqueue_dataset_semantics_job(session, job.document_id, version.id)
         session.commit()
         return True
     except Exception as exc:
@@ -2258,6 +2265,100 @@ def _process_dataset_artifacts(
         session.add(job)
         session.commit()
         return False
+
+
+def _enqueue_dataset_semantics_job(
+    session: Session, document_id: int, version_id: int
+) -> ProcessingJob:
+    key = f"{version_id}:{DATASET_SEMANTICS_STAGE}:field-semantics-v1"
+    existing = session.scalar(
+        select(ProcessingJob).where(ProcessingJob.idempotency_key == key)
+    )
+    if existing is not None:
+        return existing
+    job = ProcessingJob(
+        document_id=document_id,
+        document_version_id=version_id,
+        stage=DATASET_SEMANTICS_STAGE,
+        status="created",
+        idempotency_key=key,
+        retry_count=0,
+        max_retries=1,
+        config_version="field-semantics-v1",
+    )
+    session.add(job)
+    return job
+
+
+def _process_dataset_semantics(
+    session: Session,
+    job: ProcessingJob,
+    document: Document,
+    version: DocumentVersion,
+) -> bool:
+    """Best-effort enrichment; absence or failure never blocks the dataset."""
+
+    datasets = list(
+        session.scalars(
+            select(KnowledgeDataset)
+            .where(KnowledgeDataset.document_version_id == version.id)
+            .order_by(KnowledgeDataset.id)
+        ).all()
+    )
+    provider = build_provider_from_session(session)
+    outcomes: list[dict[str, object]] = []
+    if provider is not None and provider.is_configured():
+        for dataset in datasets:
+            fields = list(
+                session.scalars(
+                    select(DatasetField)
+                    .where(DatasetField.dataset_id == dataset.id)
+                    .order_by(DatasetField.position)
+                ).all()
+            )
+            if not fields:
+                continue
+            try:
+                result = enrich_dataset_fields(
+                    provider,
+                    dataset,
+                    fields,
+                    document_title=document.title,
+                )
+                outcomes.append(
+                    {
+                        "dataset_id": dataset.id,
+                        "updated_fields": result.updated,
+                        "total_fields": result.total,
+                        "status": result.status,
+                    }
+                )
+            except Exception as exc:  # Optional metadata must never block facts.
+                logger.warning(
+                    "dataset_field_semantics_failed",
+                    document_id=document.id,
+                    dataset_id=dataset.id,
+                    error=str(exc),
+                )
+                outcomes.append(
+                    {
+                        "dataset_id": dataset.id,
+                        "status": "failed",
+                        "error": str(exc)[:500],
+                    }
+                )
+    job.status = "completed"
+    job.finished_at = utc_now()
+    job.next_retry_at = None
+    job.last_error = None
+    job.error_details = {
+        "status": "completed" if outcomes else "skipped",
+        "reason": None if outcomes else "model_unavailable_or_no_fields",
+        "datasets": outcomes,
+    }
+    session.add(job)
+    session.commit()
+    return True
 
 
 def _process_parsing(

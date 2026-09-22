@@ -174,6 +174,11 @@ type DatasetField = {
   distinct_count: number | null;
   sample_values: string[];
   statistics: Record<string, unknown>;
+  description: string | null;
+  unit: string | null;
+  aliases: string[];
+  semantic_source: string | null;
+  semantic_confidence: number | null;
 };
 
 type KnowledgeDataset = {
@@ -186,7 +191,10 @@ type KnowledgeDataset = {
   column_count: number;
   source_row_start: number | null;
   source_row_end: number | null;
-  profile: { quality?: { completeness?: number; empty_cells?: number } };
+  profile: {
+    quality?: { completeness?: number; empty_cells?: number };
+    field_semantics?: { status?: string; updated_fields?: number; total_fields?: number };
+  };
   execution: {
     backend: 'duckdb' | 'postgresql_fallback';
     artifact_status: string;
@@ -865,6 +873,7 @@ function SpreadsheetGovernanceSummary({ processing }: { processing: DocumentVers
 }
 
 function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
+  const [datasetItems, setDatasetItems] = useState(datasets);
   const [selectedId, setSelectedId] = useState(datasets[0]?.id ?? 0);
   const [tab, setTab] = useState<'data' | 'fields'>('data');
   const [offset, setOffset] = useState(0);
@@ -875,8 +884,28 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [semanticLoading, setSemanticLoading] = useState(false);
+  const [semanticMessage, setSemanticMessage] = useState('');
   const pageSize = 50;
-  const dataset = datasets.find((item) => item.id === selectedId) ?? datasets[0];
+  const dataset = datasetItems.find((item) => item.id === selectedId) ?? datasetItems[0];
+
+  const generateSemantics = async () => {
+    if (!dataset || semanticLoading) return;
+    setSemanticLoading(true);
+    setSemanticMessage('');
+    try {
+      const response = await fetch(`/api/datasets/${dataset.id}/field-semantics`, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : '字段说明生成失败');
+      const updated = body.dataset as KnowledgeDataset;
+      setDatasetItems((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setSemanticMessage(`已更新 ${body.updated_fields ?? 0}/${body.total_fields ?? 0} 个字段说明`);
+    } catch (caught) {
+      setSemanticMessage(caught instanceof Error ? caught.message : '字段说明生成失败');
+    } finally {
+      setSemanticLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!dataset) return;
@@ -919,9 +948,9 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
             <h2 className="mt-1 text-xl font-semibold text-slate-950">数据集工作区</h2>
             <p className="mt-1 text-sm text-slate-600">表格使用结构化查询，不再把全部内容作为长文档渲染。</p>
           </div>
-          {datasets.length > 1 && (
+          {datasetItems.length > 1 && (
             <select value={dataset.id} onChange={(event) => { setLoading(true); setSelectedId(Number(event.target.value)); setOffset(0); }} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
-              {datasets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              {datasetItems.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           )}
         </div>
@@ -958,14 +987,23 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
           )}
         </div>
       ) : (
-        <div className="grid gap-3 p-4 md:grid-cols-2">
-          {dataset.fields.map((field) => (
-            <div key={field.id} className="rounded-xl border border-slate-200 p-4">
-              <div className="flex items-center justify-between gap-2"><h3 className="font-medium text-slate-900">{field.name}</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{typeLabels[field.inferred_type] || field.inferred_type}</span></div>
-              <p className="mt-2 text-xs text-slate-500">空值 {field.null_count.toLocaleString('zh-CN')} · 唯一值 {field.distinct_count === null ? '较多' : field.distinct_count.toLocaleString('zh-CN')}{field.semantic_role ? ` · ${field.semantic_role}` : ''}</p>
-              {field.sample_values.length > 0 && <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-600">样例：{field.sample_values.slice(0, 5).join('、')}</p>}
-            </div>
-          ))}
+        <div className="p-4">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-3">
+            <div><p className="text-sm font-medium text-slate-800">字段语义画像</p><p className="mt-0.5 text-xs text-slate-500">类型、统计和样例来自程序；AI 说明仅作问法映射，不改变原始数据。</p></div>
+            <button type="button" disabled={semanticLoading} onClick={generateSemantics} className="rounded-lg border border-cyan-300 bg-white px-3 py-2 text-sm font-medium text-cyan-800 hover:bg-cyan-50 disabled:opacity-50">{semanticLoading ? '正在分析…' : dataset.profile.field_semantics ? '重新生成字段说明' : 'AI 补充字段说明'}</button>
+          </div>
+          {semanticMessage && <p className={`mb-3 rounded-lg px-3 py-2 text-sm ${semanticMessage.includes('失败') || semanticMessage.includes('配置') ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{semanticMessage}</p>}
+          <div className="grid gap-3 md:grid-cols-2">
+            {dataset.fields.map((field) => (
+              <div key={field.id} className="rounded-xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-2"><h3 className="font-medium text-slate-900">{field.name}{field.unit ? <span className="ml-1 text-sm font-normal text-slate-500">（{field.unit}）</span> : null}</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{typeLabels[field.inferred_type] || field.inferred_type}</span></div>
+                {field.description ? <p className="mt-2 text-sm leading-6 text-slate-700">{field.description}</p> : <p className="mt-2 text-sm text-slate-400">尚无字段说明</p>}
+                {field.aliases.length > 0 && <p className="mt-2 text-xs text-cyan-700">常见问法：{field.aliases.join('、')}</p>}
+                <p className="mt-2 text-xs text-slate-500">空值 {field.null_count.toLocaleString('zh-CN')} · 唯一值 {field.distinct_count === null ? '较多' : field.distinct_count.toLocaleString('zh-CN')}{field.semantic_role ? ` · ${field.semantic_role}` : ''}{field.semantic_source === 'ai' && field.semantic_confidence !== null ? ` · AI 置信度 ${Math.round(field.semantic_confidence * 100)}%` : ''}</p>
+                {field.sample_values.length > 0 && <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-600">样例：{field.sample_values.slice(0, 5).join('、')}</p>}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </section>

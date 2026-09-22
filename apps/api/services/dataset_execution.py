@@ -399,6 +399,11 @@ async def get_dataset_schema(
                 "distinct_count": field.distinct_count,
                 "sample_values": field.sample_values or [],
                 "statistics": field.statistics or {},
+                "description": field.description,
+                "unit": field.unit,
+                "aliases": field.aliases or [],
+                "semantic_source": field.semantic_source,
+                "semantic_confidence": field.semantic_confidence,
             }
             for field in fields
         ],

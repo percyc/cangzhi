@@ -85,6 +85,7 @@ class TableDataset:
     row_count: int
     semantic_summary: str = ""
     samples: tuple[dict[str, Any], ...] = ()
+    field_semantics: tuple[dict[str, Any], ...] = ()
     literal_matches: tuple[tuple[str, str], ...] = ()
     records: tuple[StructuredTableRow, ...] = field(
         default=(), repr=False, compare=False
@@ -104,6 +105,7 @@ class TableDataset:
             "columns": list(self.columns),
             "row_count": self.row_count,
             "semantic_summary": self.semantic_summary,
+            "field_semantics": list(self.field_semantics),
             "samples": list(self.samples),
         }
 
@@ -1093,6 +1095,18 @@ async def _load_datasets(
                 row_count=catalog.row_count,
                 semantic_summary=semantic_summary or "",
                 samples=samples,
+                field_semantics=tuple(
+                    {
+                        "name": field.name,
+                        "description": field.description,
+                        "unit": field.unit,
+                        "aliases": list(field.aliases or []),
+                        "source": field.semantic_source,
+                        "confidence": field.semantic_confidence,
+                    }
+                    for field in fields
+                    if field.description
+                ),
                 literal_matches=(
                     _literal_matches_for_question(
                         question,
@@ -1177,11 +1191,11 @@ async def _execute_dataset_plan(
 
 _PLAN_SYSTEM = """你是藏知的表格查询规划器。
 只返回 JSON 对象，不生成 SQL、Python 或解释文字。
-先根据数据集的 semantic_summary、标题、表名、列名和样例判断问题
+先根据数据集的 semantic_summary、标题、表名、列名、字段语义建议和样例判断问题
 是否适合用该表格精确查询。“有什么”“有哪些”等只是弱信号，
 不能单独证明相关。若无法把问题映射到表格的字段、筛选、统计或明细，
 返回 relevant=false；否则返回 relevant=true 和完整计划。
-你只能从给定数据集和列名中选择。计划字段固定为：
+字段语义说明是辅助映射线索，不是数据事实；查询仍只能从给定数据集和原始列名中选择。计划字段固定为：
 relevant、document_id、sheet_name、region_index、filters、group_by、metric、
 metric_column、sort_by、sort_order、limit。
 filters 每项固定为 column/operator/value，operator 仅可用

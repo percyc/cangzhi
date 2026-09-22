@@ -83,6 +83,11 @@ class DatasetField(BaseModel):
     distinct_count = Column(Integer, nullable=True)
     sample_values = Column(_JSON_TYPE, nullable=False, default=list)
     statistics = Column(_JSON_TYPE, nullable=False, default=dict)
+    description = Column(String(1000), nullable=True)
+    unit = Column(String(128), nullable=True)
+    aliases = Column(_JSON_TYPE, nullable=False, default=list)
+    semantic_source = Column(String(32), nullable=True)
+    semantic_confidence = Column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("dataset_id", "position", name="uq_dataset_field_position"),
