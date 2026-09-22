@@ -1438,3 +1438,16 @@
   保持待处理。分钟级实时分析若未来需要，必须另立受限实时查询和资源权限边界。
 - 部署：待本条代码提交后执行0035迁移并更新API/Web/优先Worker；不重导现有数据库表，
   现有来源自动采用24小时后台策略。
+
+### 2026-09-22 数据库快照新鲜度部署
+
+- `d1a387e` 已快进本地 `main`。发布前创建并校验 PostgreSQL + storage 联合备份
+  `backups/cangzhi-20260922-021325`，随后重建 API、Web、Worker 并执行0035迁移；
+  PostgreSQL容器未替换。
+- 发布后 API、Web、Worker、PostgreSQL 均 healthy，schema=0035，readiness、Web health、
+  来源设置页及文档20页面均返回200；启动日志未发现 traceback/fatal/migration failed。
+  发布镜像补跑新鲜度、OCR依赖和Worker刷新专项18项全部通过。
+- 两个既有数据库来源由迁移安全采用 `background / 1440分钟`；没有创建刷新任务、没有
+  重导远端表、没有改写数据集和Parquet。只有后续访问过期数据集Schema/查询时才按策略
+  去重排队。当前Compose Worker在发布前已经运行，本次只按既有状态重建，没有扩大队列
+  范围或手动恢复失败任务。

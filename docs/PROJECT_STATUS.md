@@ -68,7 +68,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 | 主题 | 关联 ID | 状态 | 备注 |
 |---|---|---|---|
-| 数据库快照新鲜度 | `CZ-UX` / 基线 G | 已完成，待部署 | Codex；`codex/CZ-DB-snapshot-freshness`。MySQL/PostgreSQL 来源支持默认过期后台刷新、严格新鲜、仅手动三种策略；目录/Schema/查询/MCP 暴露快照时间和状态，刷新走可重试幂等任务，查询仍绑定版本化 Parquet。专项144项、Worker全量215项、Web lint/typecheck/build通过 |
+| 数据库快照新鲜度 | `CZ-UX` / 基线 G | 已合并部署 | Codex；main `d1a387e`。MySQL/PostgreSQL 来源支持默认过期后台刷新、严格新鲜、仅手动三种策略；目录/Schema/查询/MCP 暴露快照时间和状态，刷新走可重试幂等任务，查询仍绑定版本化 Parquet。专项144项、Worker全量215项、Web lint/typecheck/build通过；schema0035、四服务healthy |
 | 数据集字段语义画像 | `CZ-UX` / 基线 C、G | 已合并部署 | Codex；main `e73e72f`。在程序字段画像上增加可校验的 AI 说明、单位、别名和置信度；新数据集低优先级自动尝试，历史数据集可在字段画像页主动生成。不改写字段、类型或数据事实，快速问答与外部 Schema 共享。专项140项、Web lint/typecheck/build通过；已迁移0034，四服务healthy |
 | 快速问答的数据集体验 | `CZ-UX` / 基线 C、G | 已合并部署 | Codex；main `0cede41`。增强趋势/比较/明细等数据意图与范围内数据集发现；提问区提示精确查询，回答展示结果表。保持 DuckDB/Parquet 与程序校验。专项66项、Web lint/typecheck/build通过，API/Web已更新且healthy |
 | 向量构建失败诊断与清理 | `CZ-Q04` / 基线 C | 已合并部署 | Codex；main `a4a0825`。失败原因按消息汇总，显示执行中与排队任务；非生效版本在没有执行中任务时可停止并删除。专项56项、Web lint/typecheck/build通过，API/Web已更新且healthy |
