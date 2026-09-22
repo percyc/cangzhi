@@ -124,6 +124,11 @@ REST 与 CLI 对等接口、分页和错误约定见 [API参考](API_REFERENCE.m
 - `knowledge_query_dataset`：用白名单计划执行筛选、投影、排序、分组和聚合。
 - `knowledge_get_evidence_by_chunk`：按文档版本读取引用所在章节或解析段落；
 - `knowledge_get_evidence_by_dataset`：读取数据集与列式产物版本信息；
+
+数据库来源的数据集目录、Schema 和查询响应会携带 `source_freshness`。外部 Agent 应把
+`snapshot_at` 和 `stale` 告知用户：后台模式可使用本次固定快照并等待刷新，严格模式收到
+`dataset_stale` 后应稍后重新调用 `knowledge_list_datasets`，不要反复重试旧 dataset ID，
+也不要绕过藏知直接拼接远端 SQL。
 - `knowledge_preview_evidence_rows`：只按引用返回的 `source_rows` 读取贡献原始行。
 
 外部 Agent 应先读 schema 再生成计划。`knowledge_query_dataset` 不接收 SQL，查询由

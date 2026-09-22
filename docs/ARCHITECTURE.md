@@ -255,6 +255,13 @@ Excel 不能仅凭文件类型视为关系型数据。新解析器对显式结�
 `DocumentVersion` 只保留字段和快照摘要，避免为大表再复制一份完整 JSON/文本。
 重导入沿用同一文档并产生新版本，新 Parquet 提交成功后才清理旧产物。
 
+数据库快照有显式新鲜度策略。默认 `background` 在超过间隔后仍以当前
+`document_version_id + artifact_version` 完成本次查询，并排入去重刷新任务；`strict`
+先排刷新并拒绝执行旧快照；`manual` 只提示管理员重新导入。目录、Schema 与查询结果
+统一返回快照时间、年龄、过期和任务状态，REST/MCP/问答复用同一服务层。刷新失败进入
+退避重试并保留旧快照；系统不会为追求“实时”让模型向远端执行任意 SQL。完整取舍见
+[ADR-028](ADR-028-database-snapshot-freshness.md)。
+
 ## 6. 检索、问答与证据
 
 ### 6.1 混合检索

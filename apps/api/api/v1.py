@@ -590,6 +590,7 @@ async def capabilities(
             "enhancement_read": True,
             "enhancement_overview": True,
             "source_navigation": True,
+            "database_snapshot_freshness": True,
         },
     }
 
@@ -599,6 +600,7 @@ def _dataset_http_error(exc: DatasetExecutionError) -> HTTPException:
         "dataset_not_found": 404,
         "artifact_unavailable": 409,
         "artifact_missing": 409,
+        "dataset_stale": 409,
         "query_timeout": 408,
     }.get(exc.code, 400)
     return HTTPException(

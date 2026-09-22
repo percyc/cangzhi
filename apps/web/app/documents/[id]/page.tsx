@@ -202,6 +202,15 @@ type KnowledgeDataset = {
     format: string | null;
     byte_size: number;
   };
+  source_freshness: {
+    kind: string;
+    snapshot_at: string | null;
+    age_seconds: number | null;
+    refresh_mode: string;
+    stale: boolean;
+    refresh_pending: boolean;
+    last_error?: string | null;
+  };
   fields: DatasetField[];
 };
 
@@ -961,6 +970,14 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
           <DatasetMetric label="查询执行" value={executionLabel} />
           <DatasetMetric label="来源位置" value={`${dataset.sheet_name} · ${dataset.source_row_start ?? '-'}–${dataset.source_row_end ?? '-'}`} />
         </div>
+        {dataset.source_freshness?.kind === 'database_snapshot' && (
+          <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${dataset.source_freshness.stale ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+            数据库快照：{dataset.source_freshness.snapshot_at ? new Date(dataset.source_freshness.snapshot_at).toLocaleString('zh-CN') : '未记录时间'}
+            {dataset.source_freshness.stale ? ' · 已过期' : ' · 当前有效'}
+            {dataset.source_freshness.refresh_pending ? ' · 已安排刷新' : ''}
+            {dataset.source_freshness.refresh_mode === 'manual' ? ' · 仅手动刷新' : dataset.source_freshness.refresh_mode === 'strict' ? ' · 严格新鲜' : ' · 过期后台刷新'}
+          </div>
+        )}
       </div>
       <div className="flex gap-1 border-b border-slate-200 px-4 pt-3">
         {([['data', '数据预览'], ['fields', '字段画像']] as const).map(([key, label]) => (

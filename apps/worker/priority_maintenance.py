@@ -95,6 +95,7 @@ from apps.worker.services.processor import (
     ASSISTED_CHUNKING_CONFIG,
     CHUNKING_STAGE,
     DATASET_SEMANTICS_STAGE,
+    DATABASE_REFRESH_STAGE,
     process_single_job,
     utc_now,
 )
@@ -115,6 +116,7 @@ FOREGROUND_STAGES: tuple[str, ...] = (
     EMBEDDING_STAGE,
     "stored",
     DATASET_SEMANTICS_STAGE,
+    DATABASE_REFRESH_STAGE,
     "knowledge_enhancement",
 )
 
@@ -134,6 +136,7 @@ RESUME_STAGES: tuple[str, ...] = (
     EMBEDDING_STAGE,
     "stored",
     DATASET_SEMANTICS_STAGE,
+    DATABASE_REFRESH_STAGE,
 )
 
 FOREGROUND_WEIGHT = 4

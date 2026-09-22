@@ -17,6 +17,8 @@ from apps.api.embeddings.canary import CANARY_VERSION
 from apps.api.embeddings.sampling import evenly_sample_chunks
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
+from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
+from apps.api.models.datasets import KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
@@ -25,6 +27,7 @@ from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.api.models.workspaces import Workspace
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
+    _process_database_refresh,
     _enqueue_embedding_jobs_for_new_chunks,
     _ensure_word_pdf_preview,
     _is_terminal_parse_failure,
@@ -76,6 +79,7 @@ class TestCalculateNextRetry:
     def test_spreadsheet_limit_is_not_retried(self):
         assert _is_terminal_parse_failure({"reason": "spreadsheet_limit_exceeded"})
         assert not _is_terminal_parse_failure({"reason": "xlsx_parse_failed"})
+
 
     def test_large_table_embedding_sample_is_even_and_keeps_edges(self):
         chunks = [
@@ -1191,3 +1195,117 @@ class TestEnqueueEmbeddingJobsForNewChunks:
             _idempotency_key(profile.id, chunk.id, profile.config_fingerprint)
             for chunk in chunks
         }
+
+
+def _database_refresh_fixture(session, *, engine_name="postgresql"):
+    source = DatabaseSource(
+        workspace_id=1,
+        name="warehouse",
+        engine=engine_name,
+        host="db.example.com",
+        port=5432 if engine_name == "postgresql" else 3306,
+        database_name="analytics",
+        username="reader",
+        password_cipher="cipher",
+        has_password=True,
+        status="idle",
+    )
+    document = Document(
+        workspace_id=1,
+        title="public.sales",
+        source_type=DocumentSourceType.file,
+    )
+    session.add_all([source, document])
+    session.flush()
+    version = DocumentVersion(
+        document_id=document.id,
+        version_number=1,
+        content_hash="snapshot-v1",
+        processing_status="ready",
+    )
+    session.add(version)
+    session.flush()
+    document.current_version_id = version.id
+    dataset = KnowledgeDataset(
+        document_id=document.id,
+        document_version_id=version.id,
+        name="sales",
+        sheet_name="sales",
+        region_index=1,
+        status="ready",
+        row_count=2,
+        column_count=1,
+        profile={},
+    )
+    session.add(dataset)
+    session.flush()
+    snapshot = DatabaseSnapshot(
+        workspace_id=1,
+        source_id=source.id,
+        schema_name="public",
+        table_name="sales",
+        document_id=document.id,
+        dataset_id=dataset.id,
+        row_count=2,
+        snapshot_fingerprint="v1",
+        snapshot_at=datetime.datetime.now(datetime.timezone.utc),
+    )
+    job = ProcessingJob(
+        document_id=document.id,
+        document_version_id=version.id,
+        stage="database_refresh",
+        status="processing",
+        idempotency_key=f"db-refresh:test:{engine_name}",
+        config_version=f"database-refresh:{snapshot.id}",
+        max_retries=3,
+    )
+    session.add_all([snapshot, job])
+    session.commit()
+    return source, document, dataset, snapshot, job
+
+
+def test_database_refresh_job_completes_without_discarding_snapshot(
+    session, monkeypatch
+):
+    source, document, dataset, snapshot, job = _database_refresh_fixture(session)
+
+    async def fake_refresh(snapshot_id, workspace_id):
+        assert snapshot_id == snapshot.id
+        assert workspace_id == 1
+        return {"status": "updated", "dataset_id": dataset.id, "row_count": 2}
+
+    monkeypatch.setattr(
+        "apps.worker.services.processor._refresh_database_snapshot_async",
+        fake_refresh,
+    )
+
+    assert _process_database_refresh(session, job, document) is True
+    session.refresh(job)
+    session.refresh(source)
+    assert job.status == "completed"
+    assert source.status == "idle"
+    assert session.get(DatabaseSnapshot, snapshot.id) is not None
+
+
+def test_database_refresh_failure_keeps_snapshot_and_retries(session, monkeypatch):
+    source, document, dataset, snapshot, job = _database_refresh_fixture(
+        session, engine_name="mysql"
+    )
+
+    async def failed_refresh(_snapshot_id, _workspace_id):
+        raise RuntimeError("remote unavailable")
+
+    monkeypatch.setattr(
+        "apps.worker.services.processor._refresh_database_snapshot_async",
+        failed_refresh,
+    )
+
+    assert _process_database_refresh(session, job, document) is False
+    session.refresh(job)
+    session.refresh(source)
+    session.refresh(snapshot)
+    assert job.status == "retry"
+    assert job.retry_count == 1
+    assert source.status == "error"
+    assert snapshot.last_error == "remote unavailable"
+    assert session.get(KnowledgeDataset, dataset.id) is not None

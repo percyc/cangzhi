@@ -369,6 +369,8 @@ export type DatabaseSource = {
   last_error: string | null;
   last_tested_at: string | null;
   last_sync_at: string | null;
+  freshness_mode: 'manual' | 'background' | 'strict';
+  freshness_interval_minutes: number;
   snapshot_counts: { total: number; empty: number };
 };
 
@@ -384,6 +386,8 @@ export type DatabaseSourcePayload = {
   ssl_mode: string;
   trusted_private_network: boolean;
   is_enabled?: boolean;
+  freshness_mode?: 'manual' | 'background' | 'strict';
+  freshness_interval_minutes?: number;
 };
 
 export type DatabaseCatalogColumn = {

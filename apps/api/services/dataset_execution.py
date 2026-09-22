@@ -27,6 +27,11 @@ from ..core.config import settings
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.documents import Document
 from ..models.table_rows import StructuredTableRow
+from .dataset_freshness import (
+    get_dataset_freshness,
+    get_datasets_freshness,
+    schedule_dataset_refresh,
+)
 from .scope_keys import DocumentSelection, candidate_condition
 
 MAX_PREVIEW_ROWS = 200
@@ -339,19 +344,23 @@ async def list_visible_datasets(
     if boundary_condition is not None:
         statement = statement.where(boundary_condition)
     items = list((await db.scalars(statement)).all())
-    return [
-        {
-            "id": item.id,
-            "document_id": item.document_id,
-            "name": item.name,
-            "sheet_name": item.sheet_name,
-            "region_index": item.region_index,
-            "row_count": item.row_count,
-            "column_count": item.column_count,
-            "status": item.status,
-        }
-        for item in items
-    ]
+    freshness_by_dataset = await get_datasets_freshness(db, items)
+    output: list[dict[str, Any]] = []
+    for item in items:
+        output.append(
+            {
+                "id": item.id,
+                "document_id": item.document_id,
+                "name": item.name,
+                "sheet_name": item.sheet_name,
+                "region_index": item.region_index,
+                "row_count": item.row_count,
+                "column_count": item.column_count,
+                "status": item.status,
+                "source_freshness": freshness_by_dataset[item.id],
+            }
+        )
+    return output
 
 
 async def get_dataset_schema(
@@ -379,6 +388,17 @@ async def get_dataset_schema(
             DatasetArtifact.status == "ready",
         )
     )
+    freshness = await get_dataset_freshness(db, dataset)
+    if freshness.get("stale") and freshness.get("refresh_mode") in {
+        "background",
+        "strict",
+    }:
+        await schedule_dataset_refresh(
+            db,
+            dataset,
+            freshness,
+            immediate=freshness.get("refresh_mode") == "strict",
+        )
     return {
         "id": dataset.id,
         "document_id": dataset.document_id,
@@ -389,6 +409,7 @@ async def get_dataset_schema(
         "row_count": dataset.row_count,
         "column_count": dataset.column_count,
         "profile": dataset.profile or {},
+        "source_freshness": freshness,
         "fields": [
             {
                 "name": field.name,
@@ -801,6 +822,17 @@ async def execute_dataset_query(
     )
     document = await db.get(Document, dataset.document_id)
     document_title = document.title if document is not None else dataset.name
+    freshness = await get_dataset_freshness(db, dataset)
+    if (
+        freshness.get("kind") == "database_snapshot"
+        and freshness.get("stale")
+        and freshness.get("refresh_mode") == "strict"
+    ):
+        await schedule_dataset_refresh(db, dataset, freshness, immediate=True)
+        raise DatasetExecutionError(
+            "dataset_stale",
+            "数据库快照已超过严格新鲜度要求，已安排刷新；请稍后重新列出数据集并重试",
+        )
     fields = list(
         (
             await db.scalars(
@@ -901,6 +933,7 @@ async def execute_dataset_query(
                 else ["列式产物尚未就绪，当前使用 PostgreSQL 兼容执行器"]
             ),
         }
+        await _finalize_query_freshness(db, dataset, freshness, payload)
         payload["query_hints"] = _query_hints(query, fields, payload)
         return payload
     path = _artifact_path(artifact, storage_root)
@@ -929,8 +962,30 @@ async def execute_dataset_query(
         "warnings": [],
         **result,
     }
+    await _finalize_query_freshness(db, dataset, freshness, payload)
     payload["query_hints"] = _query_hints(query, fields, payload)
     return payload
+
+
+async def _finalize_query_freshness(
+    db: AsyncSession,
+    dataset: KnowledgeDataset,
+    freshness: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """Annotate the fixed snapshot result, then schedule any background refresh."""
+
+    payload["source_freshness"] = freshness
+    if freshness.get("kind") != "database_snapshot" or not freshness.get("stale"):
+        return
+    warnings = payload.setdefault("warnings", [])
+    if freshness.get("refresh_mode") == "background":
+        warnings.append(
+            "结果来自已过期的本地快照；系统已安排后台刷新，本次结果仍固定到所示数据版本"
+        )
+        await schedule_dataset_refresh(db, dataset, freshness, immediate=False)
+    elif freshness.get("refresh_mode") == "manual":
+        warnings.append("结果来自已过期的本地快照；当前来源配置为仅手动刷新")
 
 
 def _query_hints(

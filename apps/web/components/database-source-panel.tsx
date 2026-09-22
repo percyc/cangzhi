@@ -59,6 +59,8 @@ type DbForm = {
   password_action: 'keep' | 'replace' | 'clear';
   ssl_mode: string;
   trusted_private_network: boolean;
+  freshness_mode: 'manual' | 'background' | 'strict';
+  freshness_interval_minutes: number;
 };
 
 function emptyForm(): DbForm {
@@ -73,6 +75,8 @@ function emptyForm(): DbForm {
     password_action: 'replace',
     ssl_mode: 'prefer',
     trusted_private_network: false,
+    freshness_mode: 'background',
+    freshness_interval_minutes: 1440,
   };
 }
 
@@ -158,7 +162,7 @@ export function DatabaseSourcePanel() {
     setBusy('create');
     setError('');
     try {
-      const { name, engine, host, port, database_name, username, password, ssl_mode, trusted_private_network } = createForm;
+      const { name, engine, host, port, database_name, username, password, ssl_mode, trusted_private_network, freshness_mode, freshness_interval_minutes } = createForm;
       await createDatabaseSource({
         name,
         engine,
@@ -169,6 +173,8 @@ export function DatabaseSourcePanel() {
         password,
         ssl_mode,
         trusted_private_network,
+        freshness_mode,
+        freshness_interval_minutes,
       });
       setCreateForm(emptyForm());
       setCreating(false);
@@ -193,6 +199,8 @@ export function DatabaseSourcePanel() {
       password_action: 'keep',
       ssl_mode: source.ssl_mode,
       trusted_private_network: source.trusted_private_network,
+      freshness_mode: source.freshness_mode,
+      freshness_interval_minutes: source.freshness_interval_minutes,
     });
     setEditingId(source.id);
     setMessage('');
@@ -212,6 +220,8 @@ export function DatabaseSourcePanel() {
         username: editForm.username,
         ssl_mode: editForm.ssl_mode,
         trusted_private_network: editForm.trusted_private_network,
+        freshness_mode: editForm.freshness_mode,
+        freshness_interval_minutes: editForm.freshness_interval_minutes,
       };
       if (editForm.password_action === 'replace') {
         payload.password_action = 'replace';
@@ -715,6 +725,11 @@ export function DatabaseSourcePanel() {
                       {source.username || '无用户名'} · {SSL_LABELS[source.ssl_mode] ??
                       source.ssl_mode} · {source.trusted_private_network ? '允许可信内网' : '仅公网地址'}
                     </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      数据新鲜度：{source.freshness_mode === 'manual' ? '仅手动刷新' : source.freshness_mode === 'strict' ? '严格新鲜' : '过期后台刷新'}
+                      {source.freshness_mode !== 'manual' ? ` · ${formatInterval(source.freshness_interval_minutes)}` : ''}
+                      {source.last_sync_at ? ` · 最近同步 ${formatTime(source.last_sync_at)}` : ''}
+                    </p>
                   </div>
                   <span
                     className={`rounded-full px-3 py-1 text-xs ${
@@ -1119,6 +1134,33 @@ function DbFields({
         />
         允许连接可信内网地址
       </label>
+      <label className="text-sm text-slate-700">
+        快照新鲜度
+        <select
+          value={form.freshness_mode}
+          onChange={(event) => setForm({ ...form, freshness_mode: event.target.value as DbForm['freshness_mode'] })}
+          className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2"
+        >
+          <option value="background">过期后台刷新（推荐）</option>
+          <option value="strict">严格新鲜：过期时暂停查询</option>
+          <option value="manual">仅手动重新导入</option>
+        </select>
+      </label>
+      <label className="text-sm text-slate-700">
+        刷新间隔（分钟）
+        <input
+          type="number"
+          min={5}
+          max={43200}
+          disabled={form.freshness_mode === 'manual'}
+          value={form.freshness_interval_minutes}
+          onChange={(event) => setForm({ ...form, freshness_interval_minutes: Number(event.target.value) || 5 })}
+          className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 disabled:bg-slate-100"
+        />
+      </label>
+      <p className="text-xs leading-5 text-slate-500 md:col-span-2">
+        知识探索始终查询本地 Parquet 快照。后台模式先返回当前版本并安排刷新；严格模式在过期时要求等待新快照。
+      </p>
       <p className="text-xs leading-5 text-slate-500 md:col-span-2">
         为安全起见，本机、链路本地及未指定的回环地址始终被拒绝；仅当勾选“可信内网”时才允许连接非公网地址。
       </p>
@@ -1454,7 +1496,13 @@ function Field({
 }
 
 function statusLabel(value: string) {
-  return ({ idle: '空闲', failed: '连接失败' } as Record<string, string>)[value] ?? value;
+  return ({ idle: '空闲', failed: '连接失败', syncing: '正在刷新', error: '刷新失败' } as Record<string, string>)[value] ?? value;
+}
+
+function formatInterval(minutes: number) {
+  if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
+  if (minutes % 60 === 0) return `${minutes / 60} 小时`;
+  return `${minutes} 分钟`;
 }
 
 function formatTime(value: string) {

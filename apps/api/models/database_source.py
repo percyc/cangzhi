@@ -65,11 +65,25 @@ class DatabaseSource(BaseModel):
     last_error = Column(Text, nullable=True)
     last_tested_at = Column(DateTime(timezone=True), nullable=True)
     last_sync_at = Column(DateTime(timezone=True), nullable=True)
+    freshness_mode = Column(
+        String(32), nullable=False, server_default=text("'background'")
+    )
+    freshness_interval_minutes = Column(
+        Integer, nullable=False, server_default=text("1440")
+    )
 
     __table_args__ = (
         CheckConstraint(
             "engine IN ('postgresql', 'mysql')",
             name="ck_database_sources_engine",
+        ),
+        CheckConstraint(
+            "freshness_mode IN ('manual', 'background', 'strict')",
+            name="ck_database_sources_freshness_mode",
+        ),
+        CheckConstraint(
+            "freshness_interval_minutes BETWEEN 5 AND 43200",
+            name="ck_database_sources_freshness_interval",
         ),
     )
 
@@ -95,6 +109,8 @@ class DatabaseSource(BaseModel):
             "last_sync_at": self.last_sync_at.isoformat()
             if self.last_sync_at
             else None,
+            "freshness_mode": self.freshness_mode,
+            "freshness_interval_minutes": self.freshness_interval_minutes,
         }
 
 

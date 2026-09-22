@@ -31,6 +31,7 @@ from apps.api.extractors import extract_xinhua_html
 from apps.api.models.auth import AIRuntimeConfig
 from apps.api.models.blobs import Blob
 from apps.api.models.chunks import DocumentChunk
+from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
 from apps.api.models.datasets import DatasetField, KnowledgeDataset
 from apps.api.models.documents import (
     Document,
@@ -78,7 +79,9 @@ from apps.api.services.dataset_execution import (
     DatasetExecutionError,
     build_dataset_parquet,
 )
+from apps.api.services.dataset_freshness import DATABASE_REFRESH_STAGE
 from apps.api.services.dataset_semantics import enrich_dataset_fields
+from apps.api.services.database_source import DatabaseSourceError, import_database_table
 from apps.api.services.structured_table import (
     _dataset_quality,
     _profile_dataset_fields,
@@ -130,6 +133,7 @@ STAGE_CYCLE: tuple[str, ...] = (
     DATASET_CATALOG_STAGE,
     DATASET_ARTIFACT_STAGE,
     DATASET_SEMANTICS_STAGE,
+    DATABASE_REFRESH_STAGE,
     PREVIEW_STAGE,
     UNDERSTANDING_STAGE,
     "embedding",
@@ -2106,6 +2110,9 @@ def process_single_job(session: Session, job_id: int) -> bool:
     if stage == DATASET_SEMANTICS_STAGE:
         return _process_dataset_semantics(session, job, document, version)
 
+    if stage == DATABASE_REFRESH_STAGE:
+        return _process_database_refresh(session, job, document)
+
     if stage == PREVIEW_STAGE:
         loaded = _load_content_for_preview(session, document, version)
         if loaded is not None:
@@ -2356,6 +2363,112 @@ def _process_dataset_semantics(
         "reason": None if outcomes else "model_unavailable_or_no_fields",
         "datasets": outcomes,
     }
+    session.add(job)
+    session.commit()
+    return True
+
+
+async def _refresh_database_snapshot_async(
+    snapshot_id: int, workspace_id: int
+) -> dict[str, object]:
+    from apps.api.core.db import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        bind_workspace_context(db.sync_session, workspace_id)
+        snapshot = await db.get(DatabaseSnapshot, snapshot_id)
+        if snapshot is None:
+            raise DatabaseSourceError("snapshot_not_found", "数据库快照不存在")
+        source = await db.get(DatabaseSource, snapshot.source_id)
+        if source is None or not source.is_enabled:
+            raise DatabaseSourceError("source_unavailable", "数据库来源不存在或已停用")
+        result = await import_database_table(
+            db,
+            source,
+            snapshot.schema_name,
+            snapshot.table_name,
+            storage_root=settings.storage_path,
+        )
+        return {
+            "status": result.status,
+            "dataset_id": result.dataset_id,
+            "document_version_id": result.document_version_id,
+            "row_count": result.row_count,
+            "fingerprint": result.fingerprint,
+        }
+
+
+def _process_database_refresh(
+    session: Session,
+    job: ProcessingJob,
+    document: Document,
+) -> bool:
+    snapshot = session.scalar(
+        select(DatabaseSnapshot).where(
+            DatabaseSnapshot.document_id == document.id
+        )
+    )
+    if snapshot is None:
+        return _mark_terminal_failure(
+            session, job, None, "数据库快照不存在", details={"code": "snapshot_not_found"}
+        )
+    source = session.get(DatabaseSource, snapshot.source_id)
+    if source is None or not source.is_enabled:
+        return _mark_terminal_failure(
+            session,
+            job,
+            None,
+            "数据库来源不存在或已停用",
+            details={"code": "source_unavailable"},
+        )
+    source.status = "syncing"
+    source.last_error = None
+    session.add(source)
+    session.commit()
+    try:
+        outcome = asyncio.run(
+            _refresh_database_snapshot_async(snapshot.id, document.workspace_id)
+        )
+    except Exception as exc:
+        session.expire_all()
+        job = session.get(ProcessingJob, job.id)
+        source = session.get(DatabaseSource, snapshot.source_id)
+        snapshot = session.get(DatabaseSnapshot, snapshot.id)
+        if job is None:
+            return False
+        job.retry_count += 1
+        job.finished_at = utc_now()
+        job.last_error = f"数据库快照刷新失败：{exc}"
+        job.error_details = {"code": "database_refresh_failed", "exception": str(exc)}
+        if job.retry_count >= (job.max_retries or MAX_RETRIES):
+            job.status = "failed"
+            job.next_retry_at = None
+        else:
+            job.status = "retry"
+            job.next_retry_at = calculate_next_retry_at(job.retry_count - 1)
+        if source is not None:
+            source.status = "error"
+            source.last_error = str(exc)[:2000]
+            session.add(source)
+        if snapshot is not None:
+            snapshot.last_error = str(exc)[:2000]
+            session.add(snapshot)
+        session.add(job)
+        session.commit()
+        return False
+    session.expire_all()
+    job = session.get(ProcessingJob, job.id)
+    if job is None:
+        return False
+    source = session.get(DatabaseSource, snapshot.source_id)
+    job.status = "completed"
+    job.finished_at = utc_now()
+    job.next_retry_at = None
+    job.last_error = None
+    job.error_details = outcome
+    if source is not None:
+        source.status = "idle"
+        source.last_error = None
+        session.add(source)
     session.add(job)
     session.commit()
     return True

@@ -35,6 +35,7 @@ from ..services.database_source import (
     validate_identifier,
     validate_ssl_mode,
 )
+from ..services.dataset_freshness import validate_freshness_policy
 from ..services.document_lifecycle import (
     trash_documents as trash_document_records,
 )
@@ -70,6 +71,8 @@ class DatabaseSourceCreate(BaseModel):
     password: str = Field(default="", max_length=1024)
     ssl_mode: str | None = Field(default=None, max_length=32)
     trusted_private_network: bool = False
+    freshness_mode: Literal["manual", "background", "strict"] = "background"
+    freshness_interval_minutes: int = Field(default=1440, ge=5, le=43_200)
 
     @field_validator("name")
     @classmethod
@@ -101,6 +104,8 @@ class DatabaseSourceUpdate(BaseModel):
     ssl_mode: str | None = Field(default=None, max_length=32)
     trusted_private_network: bool | None = None
     is_enabled: bool | None = None
+    freshness_mode: Literal["manual", "background", "strict"] | None = None
+    freshness_interval_minutes: int | None = Field(default=None, ge=5, le=43_200)
 
     @field_validator("name")
     @classmethod
@@ -259,6 +264,12 @@ async def create_source(payload: DatabaseSourceCreate, db: DatabaseSession):
         raise HTTPException(status_code=400, detail=str(exc)) from None
     username = payload.username or ""
     has_password = bool(payload.password)
+    try:
+        freshness_mode, freshness_interval = validate_freshness_policy(
+            payload.freshness_mode, payload.freshness_interval_minutes
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     source = DatabaseSource(
         name=payload.name,
         engine=payload.engine,
@@ -272,6 +283,8 @@ async def create_source(payload: DatabaseSourceCreate, db: DatabaseSession):
         trusted_private_network=trusted,
         is_enabled=True,
         status="idle",
+        freshness_mode=freshness_mode,
+        freshness_interval_minutes=freshness_interval,
     )
     db.add(source)
     await db.commit()
@@ -352,6 +365,21 @@ async def update_source(
         source.trusted_private_network = payload.trusted_private_network
     if payload.is_enabled is not None:
         source.is_enabled = payload.is_enabled
+    if (
+        payload.freshness_mode is not None
+        or payload.freshness_interval_minutes is not None
+    ):
+        try:
+            mode, interval = validate_freshness_policy(
+                payload.freshness_mode or source.freshness_mode,
+                payload.freshness_interval_minutes
+                if payload.freshness_interval_minutes is not None
+                else source.freshness_interval_minutes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        source.freshness_mode = mode
+        source.freshness_interval_minutes = interval
 
     if action == PASSWORD_REPLACE:
         source.password_cipher = encrypt_secret(payload.password)

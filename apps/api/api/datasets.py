@@ -18,6 +18,7 @@ from ..services.dataset_execution import (
     execute_dataset_query,
     preview_dataset,
 )
+from ..services.dataset_freshness import get_dataset_freshness
 from ..services.dataset_semantics import (
     apply_field_semantic_proposal,
     field_semantic_context,
@@ -67,6 +68,7 @@ class DatasetResponse(BaseModel):
     profile: dict[str, Any] = Field(default_factory=dict)
     fields: list[DatasetFieldResponse] = Field(default_factory=list)
     execution: dict[str, Any] = Field(default_factory=dict)
+    source_freshness: dict[str, Any] = Field(default_factory=dict)
 
 
 class DatasetRowsResponse(BaseModel):
@@ -128,6 +130,7 @@ async def _dataset_response(
             "format": artifact.format if artifact else None,
             "byte_size": artifact.byte_size if artifact else 0,
         },
+        source_freshness=await get_dataset_freshness(db, dataset),
     )
 
 

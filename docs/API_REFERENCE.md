@@ -293,12 +293,15 @@ curl -G -H "Authorization: Bearer $TOKEN" \
 **`GET /api/v1/knowledge/datasets`** — 作用域 `knowledge:read`
 
 列出当前有效文档中的二维数据集。可选 `document_id`（限定文档）、`limit`。
+数据库来源的数据集还包含 `source_freshness`：`snapshot_at`、`age_seconds`、
+`refresh_mode`、`refresh_interval_minutes`、`stale`、`refresh_pending` 与最近错误。
 
 **`GET /api/v1/knowledge/datasets/{dataset_id}/schema`** — 作用域 `knowledge:read`
 
 读取字段类型、语义角色、样例、统计画像和执行后端。如果管理员已生成字段语义，
 `fields[]` 还会返回 `description`、`unit`、`aliases`、`semantic_source` 和
 `semantic_confidence`。这些是问法映射辅助信息，不是对原始数据的改写。规划查询前应先调用。
+Schema 同样返回 `source_freshness`；后台/严格模式发现过期时会创建去重刷新任务。
 
 **`GET /api/v1/knowledge/datasets/{dataset_id}/rows`** — 作用域 `knowledge:read`
 
@@ -308,6 +311,11 @@ curl -G -H "Authorization: Bearer $TOKEN" \
 
 通过受控计划执行筛选、投影、排序、分组和聚合，由 DuckDB/Parquet 下推计算。
 **不接受 SQL**，最多返回 200 行。
+
+数据库快照在 `background` 模式下可返回旧快照结果及警告，并在后台刷新；`manual`
+只警告；`strict` 过期时返回 HTTP 409、错误码 `dataset_stale` 并安排立即刷新。客户端应
+稍后重新列出数据集，因为成功刷新会产生新的数据集/文档版本 ID。MCP 工具返回同样的
+`source_freshness` 或结构化错误。
 
 请求体：
 

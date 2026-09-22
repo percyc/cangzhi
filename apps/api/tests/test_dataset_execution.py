@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from apps.api.core.db import Base
+from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
 from apps.api.models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
@@ -95,6 +97,47 @@ def _seed_and_build(path: Path) -> tuple[int, int]:
         return document.id, dataset.id
 
 
+def _attach_database_snapshot(
+    path: Path,
+    document_id: int,
+    dataset_id: int,
+    *,
+    freshness_mode: str,
+) -> None:
+    engine = create_engine(f"sqlite:///{path / 'builder.db'}")
+    with Session(engine) as session:
+        source = DatabaseSource(
+            workspace_id=1,
+            name=f"warehouse-{freshness_mode}",
+            engine="postgresql",
+            host="db.example.com",
+            port=5432,
+            database_name="analytics",
+            username="reader",
+            password_cipher="cipher",
+            has_password=True,
+            status="idle",
+            freshness_mode=freshness_mode,
+            freshness_interval_minutes=60,
+        )
+        session.add(source)
+        session.flush()
+        session.add(
+            DatabaseSnapshot(
+                workspace_id=1,
+                source_id=source.id,
+                schema_name="public",
+                table_name="sales",
+                document_id=document_id,
+                dataset_id=dataset_id,
+                row_count=6,
+                snapshot_fingerprint="stale-v1",
+                snapshot_at=datetime.now(timezone.utc) - timedelta(hours=2),
+            )
+        )
+        session.commit()
+
+
 def test_parquet_build_and_duckdb_pushdown(tmp_path: Path):
     document_id, dataset_id = _seed_and_build(tmp_path)
 
@@ -145,6 +188,76 @@ def test_parquet_build_and_duckdb_pushdown(tmp_path: Path):
     assert (
         tmp_path / "storage" / "datasets" / str(dataset_id) / "v1.parquet"
     ).is_file()
+
+
+def test_background_freshness_serves_fixed_snapshot_and_schedules_refresh(
+    tmp_path: Path,
+):
+    document_id, dataset_id = _seed_and_build(tmp_path)
+    _attach_database_snapshot(
+        tmp_path, document_id, dataset_id, freshness_mode="background"
+    )
+
+    async def run():
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'builder.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            result = await execute_dataset_query(
+                session,
+                dataset_id,
+                {"columns": ["地区", "金额"], "limit": 2},
+                storage_root=tmp_path / "storage",
+            )
+        await engine.dispose()
+        return result
+
+    result = asyncio.run(run())
+    assert result["source_freshness"]["stale"] is True
+    assert result["source_freshness"]["refresh_pending"] is True
+    assert "后台刷新" in result["warnings"][0]
+    engine = create_engine(f"sqlite:///{tmp_path / 'builder.db'}")
+    with Session(engine) as session:
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.stage == "database_refresh")
+        )
+        assert job is not None and job.next_retry_at is not None
+
+
+def test_strict_freshness_rejects_stale_snapshot_and_schedules_refresh(
+    tmp_path: Path,
+):
+    document_id, dataset_id = _seed_and_build(tmp_path)
+    _attach_database_snapshot(
+        tmp_path, document_id, dataset_id, freshness_mode="strict"
+    )
+
+    async def run():
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'builder.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                with pytest.raises(DatasetExecutionError) as caught:
+                    await execute_dataset_query(
+                        session,
+                        dataset_id,
+                        {"columns": ["地区", "金额"], "limit": 2},
+                        storage_root=tmp_path / "storage",
+                    )
+                return caught.value.code
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(run()) == "dataset_stale"
+    engine = create_engine(f"sqlite:///{tmp_path / 'builder.db'}")
+    with Session(engine) as session:
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.stage == "database_refresh")
+        )
+        assert job is not None and job.next_retry_at is None
 
 
 def test_dataset_query_accepts_op_alias(tmp_path: Path):
