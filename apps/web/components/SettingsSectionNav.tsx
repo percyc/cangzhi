@@ -10,6 +10,7 @@ export type SettingsSection =
   | 'sources'
   | 'data'
   | 'access'
+  | 'account'
   | 'workspaces';
 
 type Item = {
@@ -68,6 +69,12 @@ const ITEMS: Item[] = [
     title: '工作空间',
     defaultHint: '知识隔离与默认空间',
   },
+  {
+    id: 'account',
+    href: '/settings/account',
+    title: '账户与安全',
+    defaultHint: '账号、密码与登录设备',
+  },
 ];
 
 export function SettingsSectionNav({
@@ -86,7 +93,7 @@ export function SettingsSectionNav({
   return (
     <nav
       aria-label="设置分类"
-      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 sm:grid-cols-3 lg:grid-cols-8"
+      className="mt-6 grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2 sm:grid-cols-3 lg:grid-cols-9"
     >
       {ITEMS.map((item) => {
         const selected = active === item.id;

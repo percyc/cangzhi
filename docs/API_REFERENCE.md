@@ -17,6 +17,23 @@ KnowledgeScope 或文档存活状态，也不各自维护另一套向量索引�
 
 ## 1. 认证与工作空间
 
+### 1.0 管理员账户（浏览器会话）
+
+首次设置和登录分别使用 `POST /api/auth/setup`、`POST /api/auth/login`，登录状态由
+`GET /api/auth/status` 查询，退出使用 `POST /api/auth/logout`。藏知目前只有一个管理员，
+下列接口仅接受有效管理员会话，不接受个人访问令牌（PAT）：
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /api/auth/account` | 返回用户名、创建时间和最近登录时间，不返回密码哈希 |
+| `PATCH /api/auth/account` | 请求体 `username`、`current_password`；验证当前密码后修改用户名 |
+| `POST /api/auth/change-password` | 请求体 `current_password`、`new_password`；验证后更新密码、撤销其他会话、轮换当前会话 Cookie |
+| `GET /api/auth/sessions` | 列出有效登录会话及当前设备标记 |
+| `POST /api/auth/sessions/revoke-others` | 让其他登录设备退出，保留当前设备 |
+
+用户名使用 3–32 位字母、数字、下划线、点或短横线；密码使用 8–256 位。
+修改密码不撤销 PAT，若怀疑外部令牌泄露，还需在“设置 → 外部接入”单独撤销。
+
 ### 1.1 个人访问令牌（PAT）
 
 用浏览器登录藏知后，调用 `POST /api/access-tokens` 创建令牌。令牌明文只返回一次，

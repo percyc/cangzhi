@@ -264,3 +264,108 @@ def test_session_token_is_hashed_not_stored_plain(client):
     assert cookie not in hashes
     for stored in hashes:
         assert len(stored) == 64
+
+
+def test_account_requires_login_and_rename_requires_current_password(client):
+    test_client, _ = client
+    _clear_auth_override()
+    assert test_client.get("/api/auth/account").status_code == 401
+    _setup(test_client, "founder", "a-strong-password")
+    profile = test_client.get("/api/auth/account").json()["admin"]
+    assert profile["username"] == "founder"
+    assert "password_hash" not in profile
+    bad = test_client.patch(
+        "/api/auth/account",
+        json={"username": "renamed", "current_password": "wrong-password"},
+    )
+    assert bad.status_code == 401
+    assert bad.json()["detail"]["code"] == "invalid_password"
+    invalid = test_client.patch(
+        "/api/auth/account",
+        json={"username": "bad name", "current_password": "a-strong-password"},
+    )
+    assert invalid.status_code == 422
+    changed = test_client.patch(
+        "/api/auth/account",
+        json={"username": "Renamed", "current_password": "a-strong-password"},
+    )
+    assert changed.status_code == 200
+    assert changed.json()["admin"]["username"] == "renamed"
+    test_client.cookies.clear()
+    assert _login(test_client, "founder", "a-strong-password").status_code == 401
+    assert _login(test_client, "renamed", "a-strong-password").status_code == 200
+
+
+def test_password_change_rotates_current_cookie_and_revokes_other_sessions(client):
+    test_client, _ = client
+    _clear_auth_override()
+    _setup(test_client, "founder", "a-strong-password")
+    old_device_token = test_client.cookies.get("cangzhi_session")
+    test_client.cookies.clear()
+    assert _login(test_client, "founder", "a-strong-password").status_code == 200
+    current_token = test_client.cookies.get("cangzhi_session")
+    sessions = test_client.get("/api/auth/sessions").json()["items"]
+    assert len(sessions) == 2
+    assert sum(item["current"] for item in sessions) == 1
+    assert all("token_hash" not in item for item in sessions)
+
+    bad = test_client.post(
+        "/api/auth/change-password",
+        json={"current_password": "wrong-password", "new_password": "new-strong-password"},
+    )
+    assert bad.status_code == 401
+    assert test_client.cookies.get("cangzhi_session") == current_token
+    same = test_client.post(
+        "/api/auth/change-password",
+        json={"current_password": "a-strong-password", "new_password": "a-strong-password"},
+    )
+    assert same.status_code == 400
+
+    changed = test_client.post(
+        "/api/auth/change-password",
+        json={"current_password": "a-strong-password", "new_password": "new-strong-password"},
+    )
+    assert changed.status_code == 200
+    assert changed.json()["other_sessions_revoked"] == 1
+    new_token = test_client.cookies.get("cangzhi_session")
+    assert new_token != current_token
+    assert test_client.get("/api/auth/status").json()["authenticated"] is True
+    test_client.cookies.clear()
+    for token in (old_device_token, current_token):
+        response = test_client.get("/api/auth/account", headers={"authorization": f"Bearer {token}"})
+        assert response.status_code == 401
+    assert _login(test_client, "founder", "a-strong-password").status_code == 401
+    assert _login(test_client, "founder", "new-strong-password").status_code == 200
+
+
+def test_revoke_other_sessions_keeps_current_session(client):
+    test_client, _ = client
+    _clear_auth_override()
+    _setup(test_client, "founder", "a-strong-password")
+    first_token = test_client.cookies.get("cangzhi_session")
+    test_client.cookies.clear()
+    _login(test_client, "founder", "a-strong-password")
+    result = test_client.post("/api/auth/sessions/revoke-others")
+    assert result.status_code == 200
+    assert result.json()["revoked"] == 1
+    assert len(test_client.get("/api/auth/sessions").json()["items"]) == 1
+    test_client.cookies.clear()
+    assert test_client.get("/api/auth/account", headers={"authorization": f"Bearer {first_token}"}).status_code == 401
+
+
+def test_account_password_verification_is_rate_limited(client):
+    test_client, _ = client
+    _clear_auth_override()
+    _setup(test_client, "founder", "a-strong-password")
+    for _ in range(5):
+        response = test_client.patch(
+            "/api/auth/account",
+            json={"username": "renamed", "current_password": "wrong-password"},
+        )
+        assert response.status_code == 401
+    blocked = test_client.post(
+        "/api/auth/change-password",
+        json={"current_password": "a-strong-password", "new_password": "new-strong-password"},
+    )
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "rate_limited"

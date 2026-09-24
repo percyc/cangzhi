@@ -50,7 +50,7 @@ export function TopNav() {
 
   useEffect(() => {
     let cancelled = false;
-    fetchAuthStatus()
+    const refreshStatus = () => fetchAuthStatus()
       .then((data) => {
         if (!cancelled) setState({ kind: 'ready', status: data });
       })
@@ -61,8 +61,11 @@ export function TopNav() {
           message: err instanceof Error ? err.message : '登录状态读取失败',
         });
       });
+    void refreshStatus();
+    window.addEventListener('cangzhi:auth-updated', refreshStatus);
     return () => {
       cancelled = true;
+      window.removeEventListener('cangzhi:auth-updated', refreshStatus);
     };
   }, [pathname]);
 
@@ -179,6 +182,14 @@ export function TopNav() {
                   <p className="truncate px-3 py-2 text-xs text-slate-400">
                     已登录为 {status.admin?.username}
                   </p>
+                  <Link
+                    href="/settings/account"
+                    role="menuitem"
+                    onClick={close}
+                    className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-100"
+                  >
+                    账户与安全
+                  </Link>
                   <button
                     type="button"
                     role="menuitem"

@@ -40,6 +40,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
 from ..models.auth import Admin, AuthSession
+from ..services.admin_account import (
+    active_sessions,
+    change_admin_password,
+    rename_admin,
+    revoke_other_sessions as revoke_other_sessions_service,
+)
 from ..security.auth import (
     MAX_SESSIONS_PER_ADMIN,
     SESSION_COOKIE_NAME,
@@ -74,6 +80,7 @@ _SINGLETON_KEY = "singleton"
 
 _login_limiter = RateLimiter(max_attempts=5, window_seconds=60.0)
 _setup_limiter = RateLimiter(max_attempts=3, window_seconds=60.0)
+_account_limiter = RateLimiter(max_attempts=5, window_seconds=60.0)
 _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32)).serialized
 
 
@@ -93,6 +100,21 @@ class _CredentialsPayload(BaseModel):
                 "用户名只能包含字母、数字、下划线、点和短横线，长度 3-32"
             )
         return cleaned.lower()
+
+
+class _RenamePayload(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    current_password: str = Field(min_length=_MIN_PASSWORD_LEN, max_length=_MAX_PASSWORD_LEN)
+
+    @field_validator("username")
+    @classmethod
+    def _username_format(cls, value: str) -> str:
+        return _CredentialsPayload._username_format(value)
+
+
+class _PasswordPayload(BaseModel):
+    current_password: str = Field(min_length=_MIN_PASSWORD_LEN, max_length=_MAX_PASSWORD_LEN)
+    new_password: str = Field(min_length=_MIN_PASSWORD_LEN, max_length=_MAX_PASSWORD_LEN)
 
 
 # --- Helpers --------------------------------------------------------------
@@ -186,6 +208,39 @@ def _public_session(session: AuthSession, admin: Admin) -> dict[str, Any]:
         if expires_at
         else None,
     }
+
+
+def _account_summary(admin: Admin) -> dict[str, Any]:
+    return {
+        "id": admin.id,
+        "username": admin.username,
+        "created_at": admin.created_at.isoformat() if admin.created_at else None,
+        "last_login_at": admin.last_login_at.isoformat() if admin.last_login_at else None,
+    }
+
+
+def _verify_account_password(request: Request, admin: Admin, password: str) -> None:
+    key = f"{_client_ip(request)}:{admin.id}"
+    if not _account_limiter.hit(key):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "rate_limited", "message": "尝试过于频繁，请稍后再试"},
+        )
+    if not verify_password(password, admin.password_hash):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "invalid_password", "message": "当前密码不正确"},
+        )
+
+
+async def _authenticated_session(db: AsyncSession, request: Request) -> tuple[AuthSession, Admin]:
+    session, admin = await _resolve_session(db, request)
+    if session is None or admin is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "unauthenticated", "message": "请先登录后再访问"},
+        )
+    return session, admin
 
 
 # --- Endpoints ------------------------------------------------------------
@@ -391,6 +446,76 @@ async def status(
     }
 
 
+@router.get("/account", response_model=dict[str, Any])
+async def account(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """Show the single administrator profile without exposing credentials."""
+
+    _, admin = await _authenticated_session(db, request)
+    return {"admin": _account_summary(admin)}
+
+
+@router.patch("/account", response_model=dict[str, Any])
+async def rename_account(
+    payload: _RenamePayload,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    _, admin = await _authenticated_session(db, request)
+    _verify_account_password(request, admin, payload.current_password)
+    if payload.username == admin.username:
+        return {"status": "ok", "admin": _account_summary(admin)}
+    await rename_admin(db, admin, payload.username)
+    logger.info("admin_renamed admin_id=%s", admin.id)
+    return {"status": "ok", "admin": _account_summary(admin)}
+
+
+@router.post("/change-password", response_model=dict[str, Any])
+async def change_password(
+    payload: _PasswordPayload,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    session, admin = await _authenticated_session(db, request)
+    _verify_account_password(request, admin, payload.current_password)
+    if payload.new_password == payload.current_password:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "password_unchanged", "message": "新密码不能与当前密码相同"},
+        )
+    token, revoked = await change_admin_password(db, admin, session, payload.new_password)
+    _set_session_cookie(response, token, secure=_is_secure(request))
+    logger.info("admin_password_changed admin_id=%s revoked_sessions=%s", admin.id, revoked)
+    return {"status": "ok", "other_sessions_revoked": revoked}
+
+
+@router.get("/sessions", response_model=dict[str, Any])
+async def list_sessions(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    session, admin = await _authenticated_session(db, request)
+    rows = await active_sessions(db, admin.id)
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "current": row.id == session.id,
+                "user_agent": row.user_agent,
+                "ip_address": row.ip_address,
+                "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+                "expires_at": row.expires_at.isoformat(),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/sessions/revoke-others", response_model=dict[str, Any])
+async def revoke_other_sessions(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    session, admin = await _authenticated_session(db, request)
+    revoked = await revoke_other_sessions_service(db, admin.id, session.id)
+    logger.info("admin_other_sessions_revoked admin_id=%s count=%s", admin.id, revoked)
+    return {"status": "ok", "revoked": revoked}
+
+
 # --- Session resolution ---------------------------------------------------
 
 
@@ -474,6 +599,7 @@ def get_setup_limiter() -> RateLimiter:
 def reset_auth_limiters_for_tests() -> None:
     _login_limiter.reset()
     _setup_limiter.reset()
+    _account_limiter.reset()
 
 
 def build_session_record(session_row: AuthSession, admin: Admin) -> SessionRecord:
