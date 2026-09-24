@@ -96,7 +96,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
-- 2026-09-25 管理员账户与会话管理已在 `codex/CZ-UX-account-security` 完成代码与文档，
+- 2026-09-25 管理员账户与会话管理已在 `codex/CZ-UX-account-security` 提交 `98731a5`，
   待维护者合并、部署。设置新增原生账户页，支持修改用户名和密码、查看有效会话与退出
   其他设备；改密轮换当前 Cookie 并撤销其他会话，外部 PAT 保持独立。相关 API 回归
   36 项、Web lint/typecheck/生产构建通过；未做线上实例验收。
