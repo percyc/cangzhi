@@ -172,3 +172,37 @@ details > summary::-webkit-details-marker {
 .document-shell {
   animation: none;
 }
+
+@media (max-width: 1023px) {
+  .ask-shell {
+    height: calc(100dvh - 122px);
+    min-height: calc(100dvh - 122px);
+    max-height: calc(100dvh - 122px);
+  }
+}
+
+@media (min-width: 1024px) {
+  main.settings-shell {
+    position: relative;
+    max-width: 1280px;
+    padding-left: 280px;
+    min-height: 860px;
+  }
+  .settings-rail {
+    position: absolute;
+    inset: 44px auto 0 24px;
+    width: 224px;
+    margin-top: 0;
+  }
+  .settings-rail-inner {
+    position: sticky;
+    top: 84px;
+    max-height: calc(100dvh - 104px);
+    overflow-y: auto;
+  }
+}
+
+:is(a, button, summary):focus-visible {
+  outline: 2px solid #64748b;
+  outline-offset: 3px;
+}

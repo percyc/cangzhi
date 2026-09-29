@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from 'next';
+import { Suspense } from 'react';
 
 import { TopNav } from '@/components/TopNav';
+import { PageGuide } from '@/components/PageGuide';
 import { WEB_BASE_PATH } from '@/lib/paths';
 
 import './globals.css';
@@ -41,6 +43,7 @@ export default function RootLayout({
       )}
       <body>
         <TopNav />
+        <Suspense fallback={null}><PageGuide /></Suspense>
         {children}
       </body>
     </html>

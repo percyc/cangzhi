@@ -144,7 +144,7 @@ const toggleModule = (module: string) => {
   };
 
   return (
-    <main className="mx-auto max-w-5xl px-5 py-9">
+    <main className="settings-shell mx-auto max-w-5xl px-5 py-9">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
         可选的 AI 知识增强
       </p>

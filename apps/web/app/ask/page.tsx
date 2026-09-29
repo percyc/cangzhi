@@ -993,6 +993,7 @@ function AskClient() {
                 }
               }}
               placeholder="询问你保存过的资料…"
+              aria-label="向当前知识范围提问"
               rows={2}
               maxLength={500}
               className="max-h-40 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400"
@@ -1016,7 +1017,7 @@ function AskClient() {
             )}
           </form>
           <p className="mt-2 text-center text-[10px] leading-4 text-slate-400 sm:text-[11px]">
-            {mode === 'deep'
+            <span className="hidden sm:inline">Enter 发送 · Shift+Enter 换行 · </span>{mode === 'deep'
               ? '每次提问独立检索，不读取此前问答 · 深度分析只在持续获得新证据时继续调用工具'
               : '每次提问独立检索，不读取此前问答 · 请核对引用原文'}
           </p>
@@ -1052,6 +1053,11 @@ function WelcomeState({
       <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500">
         藏知会在当前范围中同时使用关键词和可用的向量索引检索，并把答案链接回原文。
       </p>
+      <details className="mt-4 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left text-xs leading-6 text-slate-600">
+        <summary className="cursor-pointer font-medium text-slate-700">如何选择问答模式与范围？</summary>
+        <p className="mt-2">顶栏工作空间决定可用资料；知识范围与筛选进一步缩小范围。快速问答适合单个问题，深度分析适合多步查证或数据计算，可能调用模型多次。</p>
+        <p>完成后点击引用核对原文。每次提问独立检索，问答记录不会自动成为模型记忆。</p>
+      </details>
       <div className="mt-7 grid w-full gap-2 sm:grid-cols-3">
         {examples.map((example) => (
           <button

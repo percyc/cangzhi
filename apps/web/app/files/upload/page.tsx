@@ -182,6 +182,7 @@ export default function FileUploadPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (uploading) return;
     const targets = items.filter(
       (item) => item.status === 'pending' || item.status === 'error',
     );
@@ -263,20 +264,21 @@ export default function FileUploadPage() {
       <div className="mt-5">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">文件导入</p>
         <h1 className="mt-1 text-3xl font-semibold text-slate-950">上传本地资料</h1>
-        <p className="mt-2 text-sm text-slate-500">可一次选择多个文件，上传后会自动进入内容解析、智能切片和向量索引流程。</p>
+        <p className="mt-2 text-sm text-slate-500">先保存原文件，再在后台解析和整理。上传成功后，可到收件箱查看处理结果；模型是可选能力。</p>
       </div>
 
       <form onSubmit={handleSubmit} className="mt-7 space-y-5 rounded-2xl border bg-white p-5 sm:p-7">
-        {globalError && <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{globalError}</div>}
+        {globalError && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{globalError}</div>}
 
         <div>
-          <label className="mb-2 block text-sm font-medium text-slate-700">
+          <label htmlFor="upload-files" className="mb-2 block text-sm font-medium text-slate-700">
             文件
             <span className="mt-1 block text-xs font-normal text-slate-400">
               支持 {SUPPORTED_TYPES.map((t) => t.name).join('、')}，最多 {MAX_FILES} 个
             </span>
           </label>
           <input
+            id="upload-files"
             ref={inputRef}
             type="file"
             multiple

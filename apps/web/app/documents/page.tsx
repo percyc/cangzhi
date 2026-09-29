@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import { libraryEmptyState } from '@/lib/usability';
 
 type DocumentSummary = {
   summary: string;
@@ -304,6 +305,7 @@ export default function DocumentsListPage() {
 
   const visibleDocuments = documents;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const empty = libraryEmptyState(view === 'trash', categoryId !== null);
 
   return (
     <main className="mx-auto max-w-7xl px-4 sm:px-6">
@@ -311,7 +313,7 @@ export default function DocumentsListPage() {
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Personal Library</p>
           <h1 className="mt-1 text-3xl font-semibold text-slate-950">知识库</h1>
-          <p className="mt-1 text-sm text-slate-500">让收藏、文档和想法在这里持续沉淀。</p>
+          <p className="mt-1 text-sm text-slate-500">保存原文，按分类浏览；需要查找或归纳时，使用搜资料和问知识。</p>
         </div>
         <div className="flex items-center gap-2">
           {view === 'trash' && total > 0 && (
@@ -327,6 +329,9 @@ export default function DocumentsListPage() {
       </div>
 
       {view === 'active' && <div className="mb-6 flex flex-wrap gap-2">
+        <Link href="/files/upload" className="rounded-xl bg-slate-950 px-3.5 py-2 text-sm font-medium text-white hover:bg-slate-800">上传文件</Link>
+        <Link href="/notes/new" className="rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-700 hover:bg-slate-50">记录想法</Link>
+        <Link href="/links/new" className="rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-700 hover:bg-slate-50">收藏链接</Link>
         <Link
           href="/categories"
           className="rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-700 hover:border-slate-400 hover:bg-slate-50"
@@ -393,14 +398,15 @@ export default function DocumentsListPage() {
       )}
 
       {loading && <p className="text-slate-500">加载中…</p>}
-      {error && <p className="text-red-600">错误：{error}</p>}
+      {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error} <button type="button" onClick={() => void load()} disabled={loading} className="ml-2 underline">重新加载</button></p>}
 
       {!loading && !error && (
         visibleDocuments.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
-            <p className="text-lg font-medium text-slate-800">{view === 'trash' ? '回收站为空' : '还没有资料'}</p>
-            <p className="mt-2 text-sm text-slate-500">{view === 'trash' ? '删除的资料会暂存在这里，可以随时恢复。' : '从一条随手记、一篇文章链接或一个文件开始建立你的知识库。'}</p>
-            {view === 'active' && (
+            <p className="text-lg font-medium text-slate-800">{empty.title}</p>
+            <p className="mt-2 text-sm text-slate-500">{empty.description}</p>
+            {empty.kind === 'filtered' && <button type="button" onClick={() => { setCategoryId(null); setPage(1); setSelected([]); }} className="mt-5 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white">查看全部分类资料</button>}
+            {empty.kind === 'new' && (
               <div className="mx-auto mt-6 grid max-w-2xl gap-3 sm:grid-cols-3">
                 <Link href="/files/upload" className="rounded-xl bg-slate-950 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800">
                   上传第一个文件
@@ -413,7 +419,7 @@ export default function DocumentsListPage() {
                 </Link>
               </div>
             )}
-            {view === 'active' && (
+            {empty.kind === 'new' && (
               <p className="mt-5 text-xs text-slate-400">
                 不配置模型也能保存和关键词检索；需要自动摘要和问答时再前往
                 <Link href="/settings?section=chat" className="ml-1 font-medium text-slate-600 underline underline-offset-2">模型设置</Link>。

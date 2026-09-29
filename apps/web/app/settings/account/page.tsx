@@ -150,7 +150,7 @@ export default function AccountSettingsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-5xl px-5 py-9">
+    <main className="settings-shell mx-auto max-w-5xl px-5 py-9">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">系统设置</p>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">账户与安全</h1>
       <p className="mt-2 text-sm leading-6 text-slate-500">管理唯一管理员账户，以及哪些设备仍保持登录。</p>

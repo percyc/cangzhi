@@ -284,6 +284,7 @@ export default function TagsPage() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="搜索标签"
+              aria-label="搜索已有标签"
               className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm sm:w-56"
             />
           </div>

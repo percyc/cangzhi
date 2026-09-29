@@ -71,7 +71,7 @@ export default function SetupPage() {
         }
         return;
       }
-      router.replace('/settings');
+      router.replace('/documents');
       router.refresh();
     } catch {
       setError('无法连接服务器，请检查网络');

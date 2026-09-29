@@ -30,6 +30,7 @@ export default function EditNotePage() {
 
   async function save(event: FormEvent) {
     event.preventDefault()
+    if (saving || !content.trim()) return
     setSaving(true)
     setError('')
     try {
@@ -53,16 +54,18 @@ export default function EditNotePage() {
       <Link href={`/documents/${params.id}`} className="text-blue-700">← 返回资料</Link>
       <h1 className="mb-6 mt-4 text-2xl font-semibold">编辑随手记</h1>
       <form onSubmit={save} className="space-y-4">
-        {error && <p className="rounded bg-red-50 p-3 text-red-700">{error}</p>}
+        {error && <p role="alert" className="rounded bg-red-50 p-3 text-red-700">{error}</p>}
         <input
           aria-label="标题"
           className="w-full rounded-lg border border-slate-300 px-4 py-3"
           maxLength={1024}
+          disabled={saving}
           onChange={(event) => setTitle(event.target.value)}
           value={title}
         />
         <textarea
           aria-label="内容"
+          disabled={saving}
           className="min-h-[360px] w-full rounded-lg border border-slate-300 px-4 py-3"
           onChange={(event) => setContent(event.target.value)}
           required
@@ -70,7 +73,7 @@ export default function EditNotePage() {
         />
         <button
           className="rounded-lg bg-slate-900 px-5 py-3 text-white disabled:opacity-50"
-          disabled={saving}
+          disabled={saving || !content.trim()}
           type="submit"
         >
           {saving ? '保存中…' : '保存修改'}

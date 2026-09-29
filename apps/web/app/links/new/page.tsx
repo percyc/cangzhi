@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { apiErrorMessage } from '@/lib/usability';
 
 export default function NewLinkPage() {
   const router = useRouter();
@@ -12,6 +13,7 @@ export default function NewLinkPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     if (!url.trim()) {
       setError('请粘贴一个链接');
       return;
@@ -28,7 +30,7 @@ export default function NewLinkPage() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        setError(body.detail || '提交失败，请检查链接后重试');
+        setError(apiErrorMessage(body, '提交失败，请检查链接后重试'));
         setLoading(false);
         return;
       }
@@ -52,7 +54,7 @@ export default function NewLinkPage() {
       </div>
 
       <form onSubmit={handleSubmit} className="mt-7 space-y-5 rounded-2xl border bg-white p-5 sm:p-7">
-        {error && <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+        {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
         <div>
           <label htmlFor="url" className="mb-1.5 block text-sm font-medium text-slate-700">链接地址</label>

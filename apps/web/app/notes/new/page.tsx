@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { apiErrorMessage } from '@/lib/usability';
 
 export default function NewNotePage() {
   const router = useRouter();
@@ -13,29 +14,26 @@ export default function NewNotePage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
+    if (!content.trim()) { setError('请先填写正文内容'); return; }
     setLoading(true);
     setError('');
 
-    const res = await fetch('/api/notes', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        title,
-        content,
-        generate_title: !title.trim(),
-      }),
-    });
+    try {
+      const res = await fetch('/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, content, generate_title: !title.trim() }),
+      });
 
-    if (!res.ok) {
-      setError('保存失败，请重试');
+      if (!res.ok) throw new Error(apiErrorMessage(await res.json().catch(() => null), '保存失败，请重试'));
+      const data = await res.json();
+      router.push(`/documents/${data.id}`);
+    } catch (reason) {
+      setError(reason instanceof TypeError ? '无法连接服务器。正文仍保留在此页，请检查网络后重试。' : reason instanceof Error ? reason.message : '保存失败，请重试');
+    } finally {
       setLoading(false);
-      return;
     }
-
-    const data = await res.json();
-    router.push(`/documents/${data.id}`);
   };
 
   return (
@@ -48,7 +46,7 @@ export default function NewNotePage() {
       </div>
 
       <form onSubmit={handleSubmit} className="mt-7 space-y-5 rounded-2xl border bg-white p-5 sm:p-7">
-        {error && <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+        {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
         <div>
           <label htmlFor="title" className="mb-1.5 block text-sm font-medium text-slate-700">
@@ -57,6 +55,8 @@ export default function NewNotePage() {
           <input
             id="title"
             type="text"
+            maxLength={1024}
+            disabled={loading}
             value={title}
             onChange={e => setTitle(e.target.value)}
             className="w-full rounded-xl border px-3.5 py-2.5"
@@ -70,6 +70,7 @@ export default function NewNotePage() {
           </label>
           <textarea
             id="content"
+            disabled={loading}
             value={content}
             onChange={e => setContent(e.target.value)}
             className="min-h-[360px] w-full resize-y rounded-xl border px-4 py-3 leading-7"
@@ -81,7 +82,7 @@ export default function NewNotePage() {
         <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 pt-5">
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !content.trim()}
             className="rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
             {loading ? '保存中...' : '保存'}

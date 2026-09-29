@@ -11,6 +11,7 @@ import {
 } from 'react';
 
 import { fetchAuthStatus, type AuthStatus } from '@/lib/api';
+import { activeNavigation } from '@/lib/usability';
 
 const NAV_ITEMS = [
   { href: '/documents', label: '知识库', icon: 'library' },
@@ -116,11 +117,10 @@ export function TopNav() {
 
   const status = state.kind === 'ready' ? state.status : null;
   const error = state.kind === 'error' ? state.message : null;
-  const immersiveAsk = pathname.startsWith('/ask');
 
   return (
-    <header className={`${immersiveAsk ? 'hidden sm:block' : ''} sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 shadow-[0_1px_0_rgba(15,23,42,0.02)] backdrop-blur-xl`}>
-      <div className="mx-auto flex h-16 max-w-7xl items-center gap-4 px-4 sm:px-6">
+    <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 shadow-[0_1px_0_rgba(15,23,42,0.02)] backdrop-blur-xl">
+      <div className="mx-auto flex h-16 max-w-7xl items-center gap-2 px-3 sm:gap-4 sm:px-6">
         <Link
           href="/documents"
           className="group flex shrink-0 items-center gap-2.5"
@@ -137,12 +137,12 @@ export function TopNav() {
           <WorkspaceSelector state={workspaceState} />
         )}
 
-        <nav className="ml-2 hidden flex-1 items-center gap-1 sm:flex">
+        <nav className="ml-2 hidden flex-1 items-center gap-1 lg:flex">
           {NAV_ITEMS.map((item) => (
             <NavItem
               key={item.href}
               item={item}
-              active={isActive(pathname, item.href)}
+              active={activeNavigation(pathname, item.href)}
             />
           ))}
         </nav>
@@ -209,12 +209,12 @@ export function TopNav() {
         </div>
       </div>
 
-      <nav className="grid grid-cols-5 border-t border-slate-100 bg-white/95 px-1 sm:hidden">
+      <nav className="grid grid-cols-5 border-t border-slate-100 bg-white/95 px-1 lg:hidden" aria-label="主要页面">
         {NAV_ITEMS.map((item) => (
           <NavItem
             key={item.href}
             item={item}
-            active={isActive(pathname, item.href)}
+            active={activeNavigation(pathname, item.href)}
             mobile
           />
         ))}
@@ -242,6 +242,7 @@ function NavItem({
     return (
       <Link
         href={item.href}
+        aria-current={active ? 'page' : undefined}
         className={`relative flex min-h-14 flex-col items-center justify-center gap-0.5 text-[11px] font-medium ${
           active ? 'text-slate-950' : 'text-slate-500'
         }`}
@@ -255,6 +256,7 @@ function NavItem({
   return (
     <Link
       href={item.href}
+      aria-current={active ? 'page' : undefined}
       className={`rounded-xl px-3.5 py-2 text-sm font-medium transition-colors ${
         active
           ? 'bg-slate-100 text-slate-950'
@@ -269,6 +271,7 @@ function NavItem({
 function AddMenu({ compact = false }: { compact?: boolean }) {
   return (
     <Menu
+      buttonTitle="添加资料"
       buttonClassName="flex cursor-pointer items-center gap-1.5 rounded-xl bg-slate-950 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-slate-800"
       panelClassName="w-48 rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-xl shadow-slate-950/10"
       trigger={() => (
@@ -416,13 +419,6 @@ function Menu({
   );
 }
 
-function isActive(pathname: string, href: string) {
-  return (
-    pathname === href ||
-    pathname.startsWith(`${href}/`)
-  );
-}
-
 function NavIcon({ name }: { name: (typeof NAV_ITEMS)[number]['icon'] }) {
   const paths = {
     library: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v15H6.5A2.5 2.5 0 0 0 4 20.5v-15Z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v15h4.5a2.5 2.5 0 0 1 2.5 2.5v-15Z" /></>,
@@ -501,7 +497,7 @@ function WorkspaceSelector({ state }: { state: WorkspaceLoadState }) {
   const list = state.kind === 'ready' ? state.list : [];
   const current = state.kind === 'ready' ? state.current : null;
   const active = list.filter((workspace) => workspace.status === 'active');
-  const label = current?.name ?? '默认空间';
+  const label = current?.name ?? '空间未确认';
 
   const handleSelect = (slug: string) => {
     if (current?.slug === slug) return;
@@ -521,7 +517,7 @@ function WorkspaceSelector({ state }: { state: WorkspaceLoadState }) {
         <>
           <WorkspaceIcon />
           <span
-            aria-label={fallback ? '当前工作空间：默认空间（暂未加载）' : `当前工作空间：${label}`}
+            aria-label={fallback || !current ? '当前工作空间未确认，请重新加载或管理工作空间' : `当前工作空间：${label}`}
             className="max-w-16 truncate sm:max-w-32"
           >
             {label}

@@ -10,6 +10,7 @@ import {
 } from 'react';
 
 import { SettingsSectionNav } from '@/components/SettingsSectionNav';
+import { workspaceSlug } from '@/lib/usability';
 
 type Workspace = {
   slug: string;
@@ -48,6 +49,7 @@ export default function WorkspacesSettingsPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const slugManuallyEdited = useRef(false);
+  const generatedSlug = useRef('');
 
   const [editingSlug, setEditingSlug] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<EditForm>(EMPTY_EDIT);
@@ -131,6 +133,7 @@ export default function WorkspacesSettingsPage() {
       });
       setCreateForm(EMPTY_CREATE);
       slugManuallyEdited.current = false;
+      generatedSlug.current = '';
       setMessage(`已创建工作空间 “${created.name}”。`);
     } catch (caught) {
       setCreateError(caught instanceof Error ? caught.message : '创建工作空间失败');
@@ -140,10 +143,11 @@ export default function WorkspacesSettingsPage() {
   };
 
   const handleCreateNameChange = (next: string) => {
+    if (!generatedSlug.current) generatedSlug.current = `space-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
     setCreateForm((current) => {
       const shouldAutoSlug =
         !slugManuallyEdited.current || current.slug.trim() === '';
-      const derived = shouldAutoSlug ? deriveSlug(next) : current.slug;
+      const derived = shouldAutoSlug ? workspaceSlug(next, generatedSlug.current) : current.slug;
       return { ...current, name: next, slug: derived };
     });
   };
@@ -281,7 +285,7 @@ export default function WorkspacesSettingsPage() {
 
   if (loadError && workspaces === null) {
     return (
-      <main className="mx-auto max-w-5xl px-5 py-9">
+      <main className="settings-shell mx-auto max-w-5xl px-5 py-9">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
           系统设置
         </p>
@@ -325,7 +329,7 @@ export default function WorkspacesSettingsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-5xl px-5 py-9">
+    <main className="settings-shell mx-auto max-w-5xl px-5 py-9">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
         系统设置
       </p>
@@ -337,8 +341,8 @@ export default function WorkspacesSettingsPage() {
       </p>
       <SettingsSectionNav active="workspaces" />
 
-      <section className="mt-6 rounded-2xl border border-blue-200 bg-blue-50/50 p-5 text-sm leading-6 text-blue-900/80">
-        <h2 className="text-sm font-semibold text-blue-900">关于工作空间</h2>
+      <details className="mt-6 rounded-2xl border border-blue-200 bg-blue-50/50 p-4 text-sm leading-6 text-blue-900/80">
+        <summary className="cursor-pointer font-semibold text-blue-900">空间隔离哪些内容？模型是否共享？</summary>
         <p className="mt-2">
           所有工作空间共用同一套对话模型和向量模型（在「对话模型」与「向量与索引」中配置）。
           每个工作空间的分类、文档、笔记、回收站和资料计数相互独立，切换空间后看到的资料也会随之切换。
@@ -346,7 +350,7 @@ export default function WorkspacesSettingsPage() {
         <p className="mt-2">
           「默认空间」始终存在且不可归档；其它工作空间可以随时归档，归档后其中的资料会保留，但不再出现在活跃空间列表中，需要时可在此页面还原。
         </p>
-      </section>
+      </details>
 
       {error && (
         <p className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -359,13 +363,11 @@ export default function WorkspacesSettingsPage() {
         </p>
       )}
 
-      <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <header>
-          <h2 className="text-base font-semibold text-slate-900">新建工作空间</h2>
+      <details className="mt-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <summary className="cursor-pointer text-base font-semibold text-slate-900">＋ 新建工作空间</summary>
           <p className="mt-1 text-xs text-slate-500">
-            名称用于在导航和资料中展示；标识（slug）作为内部代号，会出现在 URL 与接口中，建议创建后保持稳定。
+            填写名称即可自动生成系统标识，中文名称也可直接使用。需要对接 API 时才需关注标识；普通资料整理不一定需要新建空间。
           </p>
-        </header>
         <form className="mt-4 space-y-4" onSubmit={handleCreate}>
           <FormField
             id="workspace-name"
@@ -387,7 +389,7 @@ export default function WorkspacesSettingsPage() {
           </FormField>
           <FormField
             id="workspace-slug"
-            label="标识（slug）"
+            label="系统标识（自动生成，可修改）"
             required
             help="小写字母、数字或连字符；以字母或数字开头；最长 64 个字符；创建后建议不要修改。"
           >
@@ -424,7 +426,7 @@ export default function WorkspacesSettingsPage() {
             />
           </FormField>
           {createError && (
-            <p className="text-sm text-red-700">{createError}</p>
+            <p role="alert" className="text-sm text-red-700">{createError}</p>
           )}
           <div className="flex items-center justify-end">
             <button
@@ -436,7 +438,7 @@ export default function WorkspacesSettingsPage() {
             </button>
           </div>
         </form>
-      </section>
+      </details>
 
       {workspaces === null ? (
         <p className="mt-6 text-sm text-slate-500">工作空间加载中…</p>
@@ -727,17 +729,6 @@ function FormField({
       {help ? <p className="mt-1 text-xs text-slate-500">{help}</p> : null}
     </div>
   );
-}
-
-function deriveSlug(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_]+/g, '-')
-    .replace(/[^a-z0-9-]/g, '')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
 }
 
 async function fetchJson<T>(url: string, fallback: string): Promise<T> {

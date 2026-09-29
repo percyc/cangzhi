@@ -136,6 +136,7 @@ export default function CategoriesPage() {
           <input
             type="text"
             placeholder="分类名称"
+            aria-label="新分类名称"
             value={newCategory.name}
             onChange={e => setNewCategory(prev => ({ ...prev, name: e.target.value }))}
             className="rounded border border-slate-300 px-3 py-2 text-sm"
@@ -145,6 +146,7 @@ export default function CategoriesPage() {
           <input
             type="text"
             placeholder="描述（可选）"
+            aria-label="新分类描述（可选）"
             value={newCategory.description}
             onChange={e => setNewCategory(prev => ({ ...prev, description: e.target.value }))}
             className="rounded border border-slate-300 px-3 py-2 text-sm"

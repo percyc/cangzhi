@@ -385,6 +385,7 @@ export default function InboxPage() {
           <button
             key={item.key}
             type="button"
+            aria-pressed={filter === item.key}
             onClick={() => {
               if (filter === item.key) return;
               setItems([]); setLoading(true); setFilter(item.key); setPage(1);

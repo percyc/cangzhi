@@ -15,7 +15,7 @@ export default function DataSettingsPage() {
   });
 
   return (
-    <main className="mx-auto max-w-5xl px-5 py-9">
+    <main className="settings-shell mx-auto max-w-5xl px-5 py-9">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
         系统设置
       </p>
@@ -87,7 +87,7 @@ export default function DataSettingsPage() {
       <section className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/60 p-5">
         <h3 className="font-semibold text-amber-950">导出不等于完整系统备份</h3>
         <p className="mt-2 text-sm leading-6 text-amber-900/80">
-          导出适合阅读和迁移知识内容；完整恢复还需要数据库、storage 目录及加密主密钥。自动备份与恢复校验将在本阶段下一批交付。
+          导出适合阅读和迁移知识内容；完整恢复还需要数据库、storage 目录及加密主密钥。服务器维护者可使用 make backup 和 make verify-backup 执行联合备份与校验。本页不执行服务器备份或覆盖恢复，自动备份计划尚未提供。
         </p>
       </section>
     </main>
