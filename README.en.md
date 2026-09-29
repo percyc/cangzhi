@@ -10,6 +10,9 @@ verify, and reuse. It is more than a note-taking app or a RAG chat interface: it
 manages the complete knowledge lifecycle, from ingestion and preservation to
 understanding, organization, indexing, evidence retrieval, and reuse.
 
+[Quick start](#quick-start) · [First-time workflow](#first-time-workflow) ·
+[UI guide](#ui-guide) · [Scope and limits](#current-scope) · [Documentation](#documentation)
+
 ## What “AI-native” means in Cangzhi
 
 AI is not just a chat box attached to a conventional knowledge base. It helps
@@ -54,6 +57,37 @@ both use and maintain the knowledge stored in Cangzhi:
 See [Product](docs/PRODUCT.md) for the full problem statement and product
 boundaries.
 
+## Version and development status
+
+- **The current version tag is `v1.2`**, pointing to `2a9ac16` and synchronized
+  to GitHub, Gitee, and Gitea. It includes dataset-aware quick Q&A, AI field
+  descriptions, database snapshot freshness, incremental reuse of field
+  descriptions, and native account management.
+- `v1.0` (`8cccfb9`) remains available. Existing tags are not moved; use the
+  documentation at the selected tag when reproducing a release.
+- `main` is the ongoing development branch. Cangzhi remains in its personal
+  Beta quality-improvement phase: a tag does not imply that complex spreadsheet
+  handling, a complete knowledge graph, or all retrieval quality goals are done.
+
+## UI guide
+
+The current interface uses Chinese labels:
+
+| Goal | Where to start | What to expect |
+| --- | --- | --- |
+| Save and manage material | 知识库 / top-bar add menu | Files, notes, web bookmarks, categories, and tags |
+| Check ingestion | 收件箱 / 处理中心 | Pending organization, failed stages, progress, and retry controls |
+| Inspect document processing | Document details → 内容与切片 | Original, parsed content, live chunks, and candidate comparison |
+| Search or ask questions | 搜资料 / 问知识 | Scope filters, matched passages, citations, and dataset results |
+| Maintain database datasets | Field profiles / 设置 → 知识源 | Field descriptions, imported tables, snapshot age, and refresh policies |
+| Configure models | 设置 → 对话模型 / 向量与索引 / 图片文字识别 | Connection tests, optional model discovery, index builds, and rollback |
+| Connect external AI | 设置 → 外部接入 | PAT scopes and CLI / Skill / MCP connection information |
+| Manage spaces and account | 设置 → 工作空间 / 账户与安全 | Knowledge isolation, username/password changes, and login sessions |
+
+Workspaces isolate personal knowledge; they are not team memberships or a
+multi-user authorization system. Check the current workspace and knowledge
+scope before uploading or asking.
+
 ## Available capabilities
 
 ### Ingestion and preservation
@@ -66,7 +100,8 @@ boundaries.
 - Connect read-only WebDAV directories through the same parsing,
   classification, and indexing pipeline.
 - Browse PostgreSQL or MySQL schemas in read-only mode and import tables as
-  refreshable local dataset snapshots.
+  refreshable local dataset snapshots. Choose background refresh when stale
+  (default), strict freshness, or manual refresh; answers expose snapshot age.
 - Deduplicate source blobs with SHA-256 and expose retryable background jobs.
 
 ### Understanding and organization
@@ -80,6 +115,13 @@ boundaries.
   while allowing users to override the primary category.
 - Manage trash, restoration, permanent deletion, and WebDAV source lifecycle in
   one place.
+- Optionally enable budgeted, window-based knowledge enhancement with evidence,
+  progress, cancellation, and resume. It is off by default and does not replace
+  basic summaries, classification, tags, or the retrieval index.
+- Explore existing enhancement outputs and hierarchical overviews through
+  REST/MCP/CLI/Skill, or browse source headings and blocks without enabling
+  enhancement. Reads do not trigger model generation; unresolved entities are
+  hints, not a complete knowledge graph. See [Enhancement](docs/KNOWLEDGE_ENHANCEMENT.md).
 
 ### Retrieval and grounded answers
 
@@ -87,10 +129,21 @@ boundaries.
   deterministically.
 - Build structure-first parent and child chunks around headings, sections,
   clauses, paragraphs, and table boundaries.
+- Preview live chunks in document details. Optional AI boundary candidates are
+  program-validated drafts, not automatic replacements for the live index.
 - Fuse PostgreSQL full-text and pgvector results with Reciprocal Rank Fusion.
 - Store tabular datasets as rebuildable Parquet versions and push controlled
   filtering, projection, sorting, grouping, and aggregation into DuckDB. The API
   and MCP endpoint accept a safe query plan, never arbitrary SQL.
+- Field profiles keep program-computed types, null counts, distinct values,
+  ranges, and samples separate from optional AI descriptions, units, aliases,
+  and confidence. Database refreshes reuse unchanged field descriptions by
+  default and generate only missing or changed ones; full regeneration is optional.
+- Excel regions must pass structural validation before entering dataset queries.
+  Unverifiable layouts keep originals, coordinates, merged-cell information,
+  and diagnostics, but do not become ordinary text chunks or vectors. Common
+  header layouts can be supported through validated mappings; complex reports
+  require data cleanup, not special-case overfitting.
 - Apply categories, tags, source types, connectors, and saved knowledge scopes
   consistently to both retrieval paths.
 - Return matched passages, section paths, and source locations.
@@ -102,6 +155,9 @@ boundaries.
 ### Models, data ownership, and integrations
 
 - Configure, test, and switch chat and embedding providers independently.
+- Configure optional external visual OCR separately. Discover models after
+  entering a base URL and key, or enter a model name manually. Scanned PDFs use
+  local OCR first, with bounded external fallback.
 - Build versioned vector indexes in the background, retry failures, activate
   atomically, and roll back in one step.
 - Export one knowledge item as Markdown or JSON, or export the complete library
@@ -111,6 +167,10 @@ boundaries.
 - Let external agents such as Hermes and OpenClaw retrieve evidence through
   `/api/v1`, `python -m apps.cli`, and `/api/mcp`.
 - Give every client a separate, least-privilege, revocable personal access token.
+- Use one administrator across multiple workspaces. Change the username and
+  password, inspect active sessions, and sign out other devices from the native
+  account page. Password changes rotate the current session and revoke other
+  browser sessions; PATs must be revoked separately.
 
 ## How it works
 
@@ -146,6 +206,8 @@ Most detailed project documentation is currently maintained in Chinese:
 
 - [Contributor guide and repository rules](AGENTS.md)
 - [Current project status](docs/PROJECT_STATUS.md)
+- [Developer handoff](docs/DEVELOPER_HANDOFF.md)
+- [Spreadsheet testing and sample handling](docs/SPREADSHEET_TESTING.md)
 - [Development log](docs/DEVLOG.md)
 - [Product definition](docs/PRODUCT.md)
 - [Architecture and safety boundaries](docs/ARCHITECTURE.md)
@@ -179,6 +241,8 @@ Most detailed project documentation is currently maintained in Chinese:
 Python and Node.js are not required on the host when using Compose.
 
 ```bash
+git clone --branch v1.2 https://github.com/percyc/cangzhi.git
+cd cangzhi
 cp .env.example .env
 # Set a secure POSTGRES_PASSWORD in .env before production use.
 docker compose up -d --build
@@ -204,6 +268,36 @@ encrypted and are never displayed back in plaintext.
 
 For LAN or public deployment, HTTPS, ports, upgrades, backup, and
 troubleshooting, see [Deployment](docs/DEPLOYMENT.md).
+
+### First-time workflow
+
+1. Open the web app and create the sole administrator. After login, start in
+   the library: upload a small file, write a note, or save a web page. A model
+   is not required to preserve originals.
+2. For summaries, classification, tags, and answers, open Settings → 对话模型.
+   Enter the API URL and key, optionally discover models or enter a model name,
+   then save and test. Ollama supports local models.
+3. Add semantic search when needed under 向量与索引: test, build, then activate
+   the completed index. External visual OCR and knowledge enhancement are optional.
+4. Check the inbox, then inspect the original, parsed content, and live chunks.
+   Ask within a selected scope and follow citations. Dataset filtering and
+   aggregation use controlled exact queries, not model-estimated arithmetic.
+5. Add workspaces or knowledge sources as needed. Create a least-privilege PAT
+   for external AI under 外部接入. Account maintenance is available from the
+   top-right menu → 账户与安全.
+
+**Important distinctions:**
+
+- Saved Q&A is not model memory: each question performs independent retrieval.
+- Database sources are versioned local snapshots, not live remote queries on
+  every question. The interface shows snapshot time and refresh status.
+- AI chunking candidates do not automatically replace chunks, vectors, or citations.
+- Complex spreadsheets need data cleanup. Originals and diagnostics are retained;
+  the system does not force unreliable structures into exact calculations.
+
+> Before upgrading an existing installation, back up and read the deployment
+> guide. Do not overwrite your existing `.env`. `v1.2` is a fixed tag; explicitly
+> switch to `main` to follow development. Public deployments require HTTPS.
 
 ### Common commands
 
