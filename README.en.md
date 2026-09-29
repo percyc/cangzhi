@@ -59,8 +59,9 @@ boundaries.
 
 ## Version and development status
 
-- **The current version tag is `v1.2`**, pointing to `2a9ac16` and synchronized
-  to GitHub, Gitee, and Gitea. It includes dataset-aware quick Q&A, AI field
+- **The current version tag is `v1.3`**, adding bilingual documentation and real
+  UI screenshots to the `v1.2` (`2a9ac16`) functional baseline. This release
+  changes no application code or database migrations. Existing features include dataset-aware quick Q&A, AI field
   descriptions, database snapshot freshness, incremental reuse of field
   descriptions, and native account management.
 - `v1.0` (`8cccfb9`) remains available. Existing tags are not moved; use the
@@ -262,7 +263,7 @@ Most detailed project documentation is currently maintained in Chinese:
 Python and Node.js are not required on the host when using Compose.
 
 ```bash
-git clone --branch v1.2 https://github.com/percyc/cangzhi.git
+git clone --branch v1.3 https://github.com/percyc/cangzhi.git
 cd cangzhi
 cp .env.example .env
 # Set a secure POSTGRES_PASSWORD in .env before production use.
@@ -317,7 +318,7 @@ troubleshooting, see [Deployment](docs/DEPLOYMENT.md).
   the system does not force unreliable structures into exact calculations.
 
 > Before upgrading an existing installation, back up and read the deployment
-> guide. Do not overwrite your existing `.env`. `v1.2` is a fixed tag; explicitly
+> guide. Do not overwrite your existing `.env`. `v1.3` is a fixed tag; explicitly
 > switch to `main` to follow development. Public deployments require HTTPS.
 
 ### Common commands
