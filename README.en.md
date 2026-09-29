@@ -88,6 +88,27 @@ Workspaces isolate personal knowledge; they are not team memberships or a
 multi-user authorization system. Check the current workspace and knowledge
 scope before uploading or asking.
 
+## Interface preview
+
+These are real screenshots of the `v1.2` test instance, using an isolated
+“产品演示” (Product demo) workspace and a synthetic note. The account header
+is cropped out; no private material or fabricated answers are shown.
+
+**Knowledge library:** Browse categories and check text/vector retrieval readiness.
+
+![Synthetic note in the knowledge library](docs/images/knowledge-library.jpg)
+
+**Document inspection:** Switch between parsed content, live chunks, and candidate
+comparison in the same content area.
+
+![Parsed demo document and chunk inspection tabs](docs/images/document-preview.jpg)
+
+**Knowledge Q&A:** Choose a knowledge scope on the left and ask on the right,
+with quick Q&A and deep analysis modes. The illustrated question is an unsent
+draft, not an answer-quality evaluation.
+
+![Knowledge Q&A entry with a synthetic question draft](docs/images/knowledge-ask.jpg)
+
 ## Available capabilities
 
 ### Ingestion and preservation
