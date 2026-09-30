@@ -23,6 +23,10 @@ KnowledgeScope 或文档存活状态，也不各自维护另一套向量索引�
 `GET /api/auth/status` 查询，退出使用 `POST /api/auth/logout`。藏知目前只有一个管理员，
 下列接口仅接受有效管理员会话，不接受个人访问令牌（PAT）：
 
+`POST /api/auth/login` 的请求体为 `username`、`password`，可选 `remember: true`。
+默认会话固定 12 小时；显式选择后按闲置 7 天续期，最长不超过登录后 30 天。
+`GET /api/auth/status` 仅对记住的会话续期，并同步更新 HttpOnly Cookie。
+
 | 方法与路径 | 用途 |
 | --- | --- |
 | `GET /api/auth/account` | 返回用户名、创建时间和最近登录时间，不返回密码哈希 |

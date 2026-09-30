@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -48,13 +48,13 @@ from ..services.admin_account import (
 )
 from ..security.auth import (
     MAX_SESSIONS_PER_ADMIN,
+    REMEMBERED_ABSOLUTE_TTL,
     SESSION_COOKIE_NAME,
-    SESSION_TTL,
     RateLimiter,
     SessionRecord,
+    browser_session_deadline,
     client_ip_from_headers,
     cookie_attributes,
-    expires_at_from_now,
     extract_bearer_token,
     hash_session_token,
     is_secure_request,
@@ -102,6 +102,10 @@ class _CredentialsPayload(BaseModel):
         return cleaned.lower()
 
 
+class _LoginPayload(_CredentialsPayload):
+    remember: bool = False
+
+
 class _RenamePayload(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     current_password: str = Field(min_length=_MIN_PASSWORD_LEN, max_length=_MAX_PASSWORD_LEN)
@@ -132,11 +136,16 @@ def _is_secure(request: Request) -> bool:
     return is_secure_request(request.headers) or request.url.scheme == "https"
 
 
-def _set_session_cookie(response: Response, token: str, *, secure: bool) -> None:
+def _aware(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _set_session_cookie(response: Response, token: str, session: AuthSession, *, secure: bool) -> None:
+    max_age = max(0, int((_aware(session.expires_at) - now_utc()).total_seconds()))
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
-        max_age=int(SESSION_TTL.total_seconds()),
+        max_age=max_age,
         **cookie_attributes(secure=secure),
     )
 
@@ -163,14 +172,17 @@ async def _create_session(
     token: str,
     user_agent: str,
     client_ip: str,
+    remembered: bool = False,
 ) -> AuthSession:
+    now = now_utc()
     session = AuthSession(
         admin_id=admin.id,
         token_hash=hash_session_token(token),
         user_agent=user_agent[:512] or None,
         ip_address=client_ip[:64] or None,
-        last_seen_at=now_utc(),
-        expires_at=expires_at_from_now(),
+        last_seen_at=now,
+        expires_at=browser_session_deadline(remembered=remembered, now=now),
+        remembered=remembered,
     )
     db.add(session)
     await db.flush()
@@ -315,7 +327,7 @@ async def setup(
     db.add(admin)
     await db.commit()
 
-    _set_session_cookie(response, token, secure=_is_secure(request))
+    _set_session_cookie(response, token, session_row, secure=_is_secure(request))
     logger.info("admin_setup username=%s", admin.username)
     return {
         "status": "ok",
@@ -329,7 +341,7 @@ async def setup(
 
 @router.post("/login", response_model=dict[str, Any])
 async def login(
-    payload: _CredentialsPayload,
+    payload: _LoginPayload,
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
@@ -365,12 +377,13 @@ async def login(
         token=token,
         user_agent=_user_agent(request),
         client_ip=client_ip_value,
+        remembered=payload.remember,
     )
     admin.last_login_at = now_utc()
     db.add(admin)
     await db.commit()
 
-    _set_session_cookie(response, token, secure=_is_secure(request))
+    _set_session_cookie(response, token, session_row, secure=_is_secure(request))
     logger.info("admin_login username=%s", admin.username)
     return {
         "status": "ok",
@@ -409,6 +422,7 @@ async def logout(
 @router.get("/status", response_model=dict[str, Any])
 async def status(
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Return whether the caller is logged in.
@@ -427,9 +441,13 @@ async def status(
             "setup_required": not has_admin,
             "admin": None,
         }
-    # Touch the session so the "last seen" timestamp stays fresh
-    # and the cookie is refreshed by the same middleware.
-    session_row.last_seen_at = now_utc()
+    now = now_utc()
+    session_row.last_seen_at = now
+    if session_row.remembered:
+        session_row.expires_at = browser_session_deadline(
+            remembered=True, now=now, created_at=session_row.created_at,
+        )
+        _set_session_cookie(response, _resolve_token(request), session_row, secure=_is_secure(request))
     db.add(session_row)
     await db.commit()
     return {
@@ -484,7 +502,7 @@ async def change_password(
             detail={"code": "password_unchanged", "message": "新密码不能与当前密码相同"},
         )
     token, revoked = await change_admin_password(db, admin, session, payload.new_password)
-    _set_session_cookie(response, token, secure=_is_secure(request))
+    _set_session_cookie(response, token, session, secure=_is_secure(request))
     logger.info("admin_password_changed admin_id=%s revoked_sessions=%s", admin.id, revoked)
     return {"status": "ok", "other_sessions_revoked": revoked}
 
@@ -561,6 +579,10 @@ async def _resolve_session(
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at <= now_utc():
         return None, None
+    if session_row.remembered:
+        created_at = session_row.created_at
+        if created_at is None or _aware(created_at) + REMEMBERED_ABSOLUTE_TTL <= now_utc():
+            return None, None
     admin = await db.get(Admin, session_row.admin_id)
     if admin is None or not admin.is_active:
         return None, None

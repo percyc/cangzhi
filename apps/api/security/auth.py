@@ -25,6 +25,8 @@ from typing import Iterable, Mapping
 
 SESSION_COOKIE_NAME = "cangzhi_session"
 SESSION_TTL = timedelta(hours=12)
+REMEMBERED_IDLE_TTL = timedelta(days=7)
+REMEMBERED_ABSOLUTE_TTL = timedelta(days=30)
 TOKEN_BYTES = 32
 MAX_SESSIONS_PER_ADMIN = 16
 
@@ -57,6 +59,19 @@ def now_utc() -> datetime:
 
 def expires_at_from_now(ttl: timedelta = SESSION_TTL) -> datetime:
     return now_utc() + ttl
+
+
+def browser_session_deadline(*, remembered: bool, now: datetime, created_at: datetime | None = None) -> datetime:
+    """Return the idle deadline, bounded by a remembered session's hard limit."""
+
+    if not remembered:
+        return now + SESSION_TTL
+    deadline = now + REMEMBERED_IDLE_TTL
+    if created_at is not None:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        deadline = min(deadline, created_at + REMEMBERED_ABSOLUTE_TTL)
+    return deadline
 
 
 # --- Rate limiter ---------------------------------------------------------

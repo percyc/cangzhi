@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.auth import Admin, AuthSession
-from ..security.auth import expires_at_from_now, hash_session_token, new_session_token, now_utc
+from ..security.auth import browser_session_deadline, hash_session_token, new_session_token, now_utc
 from ..security.passwords import hash_password
 
 
@@ -69,8 +69,10 @@ async def change_admin_password(
             row.revoked_at = now_utc()
             revoked += 1
     token = new_session_token()
+    now = now_utc()
     current_session.token_hash = hash_session_token(token)
-    current_session.last_seen_at = now_utc()
-    current_session.expires_at = expires_at_from_now()
+    current_session.last_seen_at = now
+    current_session.created_at = now
+    current_session.expires_at = browser_session_deadline(remembered=current_session.remembered, now=now)
     await db.commit()
     return token, revoked

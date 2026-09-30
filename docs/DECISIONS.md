@@ -353,3 +353,9 @@ Top 5 命中率；或 active profile 超过 10 万个切片导致精确余弦查
 过期后台刷新、严格新鲜或仅手动刷新；目录、Schema、查询和 MCP 都暴露快照时间与
 过期状态。刷新失败保留旧快照，回答证据继续绑定固定文档与 Parquet 版本。
 见 [ADR-028](ADR-028-database-snapshot-freshness.md)。
+
+## ADR-029：可选延长管理员浏览器会话
+
+默认登录继续固定 12 小时；显式选择“记住此浏览器”后由服务端会话按 7 天闲置、
+30 天绝对上限续期。DSH 检索 PAT 不作为管理员登录凭据。
+见 [ADR-029](ADR-029-remembered-browser-sessions.md)。

@@ -21,6 +21,7 @@ from apps.api.api.auth import require_admin, reset_auth_limiters_for_tests
 from apps.api.core.db import get_db
 from apps.api.main import app
 from apps.api.models.auth import AuthSession
+from apps.api.security.auth import hash_session_token
 
 
 def _login(client: TestClient, username: str, password: str):
@@ -118,6 +119,87 @@ def test_login_succeeds_with_correct_password(client):
     response = _login(test_client, "founder", "a-strong-password")
     assert response.status_code == 200
     assert response.json()["admin"]["username"] == "founder"
+    assert 43198 <= int(response.headers["set-cookie"].split("Max-Age=")[1].split(";")[0]) <= 43200
+    assert "set-cookie" not in test_client.get("/api/auth/status").headers
+
+
+def test_remembered_login_renews_until_absolute_deadline(client):
+    test_client, _ = client
+    _clear_auth_override()
+    _setup(test_client, "founder", "a-strong-password")
+    test_client.cookies.clear()
+    login_response = test_client.post(
+        "/api/auth/login",
+        json={"username": "founder", "password": "a-strong-password", "remember": True},
+    )
+    assert login_response.status_code == 200
+    assert 604798 <= int(login_response.headers["set-cookie"].split("Max-Age=")[1].split(";")[0]) <= 604800
+    token = test_client.cookies.get("cangzhi_session")
+
+    async def _move_near_deadline():
+        async for db in app.dependency_overrides[get_db]():
+            row = (await db.execute(select(AuthSession).where(AuthSession.token_hash == hash_session_token(token)))).scalar_one()
+            assert row.remembered is True
+            row.created_at = datetime.now(tz=timezone.utc) - timedelta(days=29)
+            row.expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+            await db.commit()
+            return
+
+    asyncio.run(_move_near_deadline())
+    status_response = test_client.get("/api/auth/status")
+    assert status_response.json()["authenticated"] is True
+    seconds_left = (datetime.fromisoformat(status_response.json()["session"]["expires_at"]) - datetime.now(tz=timezone.utc)).total_seconds()
+    assert 86390 <= seconds_left <= 86410
+    assert 86388 <= int(status_response.headers["set-cookie"].split("Max-Age=")[1].split(";")[0]) <= 86410
+    assert test_client.post("/api/auth/logout").status_code == 200
+    assert test_client.get("/api/auth/status").json()["authenticated"] is False
+
+
+def test_remembered_session_expires_after_idle_deadline(client):
+    test_client, _ = client
+    _clear_auth_override()
+    _setup(test_client, "founder", "a-strong-password")
+    test_client.cookies.clear()
+    response = test_client.post(
+        "/api/auth/login",
+        json={"username": "founder", "password": "a-strong-password", "remember": True},
+    )
+    assert response.status_code == 200
+    token = test_client.cookies.get("cangzhi_session")
+
+    async def _expire():
+        async for db in app.dependency_overrides[get_db]():
+            row = (await db.execute(select(AuthSession).where(AuthSession.token_hash == hash_session_token(token)))).scalar_one()
+            row.expires_at = datetime.now(tz=timezone.utc) - timedelta(seconds=1)
+            await db.commit()
+            return
+
+    asyncio.run(_expire())
+    assert test_client.get("/api/auth/status").json()["authenticated"] is False
+
+
+def test_remembered_session_cannot_pass_absolute_deadline(client):
+    test_client, _ = client
+    _clear_auth_override()
+    _setup(test_client, "founder", "a-strong-password")
+    test_client.cookies.clear()
+    response = test_client.post(
+        "/api/auth/login",
+        json={"username": "founder", "password": "a-strong-password", "remember": True},
+    )
+    assert response.status_code == 200
+    token = test_client.cookies.get("cangzhi_session")
+
+    async def _past_hard_limit():
+        async for db in app.dependency_overrides[get_db]():
+            row = (await db.execute(select(AuthSession).where(AuthSession.token_hash == hash_session_token(token)))).scalar_one()
+            row.created_at = datetime.now(tz=timezone.utc) - timedelta(days=31)
+            row.expires_at = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+            await db.commit()
+            return
+
+    asyncio.run(_past_hard_limit())
+    assert test_client.get("/api/auth/status").json()["authenticated"] is False
 
 
 def test_login_fails_with_wrong_password(client):
@@ -336,6 +418,27 @@ def test_password_change_rotates_current_cookie_and_revokes_other_sessions(clien
         assert response.status_code == 401
     assert _login(test_client, "founder", "a-strong-password").status_code == 401
     assert _login(test_client, "founder", "new-strong-password").status_code == 200
+
+
+def test_password_change_preserves_remember_choice_and_rotates_deadline(client):
+    test_client, _ = client
+    _clear_auth_override()
+    _setup(test_client, "founder", "a-strong-password")
+    test_client.cookies.clear()
+    login_response = test_client.post(
+        "/api/auth/login",
+        json={"username": "founder", "password": "a-strong-password", "remember": True},
+    )
+    assert login_response.status_code == 200
+    old_token = test_client.cookies.get("cangzhi_session")
+    changed = test_client.post(
+        "/api/auth/change-password",
+        json={"current_password": "a-strong-password", "new_password": "new-strong-password"},
+    )
+    assert changed.status_code == 200
+    assert test_client.cookies.get("cangzhi_session") != old_token
+    assert 604798 <= int(changed.headers["set-cookie"].split("Max-Age=")[1].split(";")[0]) <= 604800
+    assert test_client.get("/api/auth/status").json()["authenticated"] is True
 
 
 def test_revoke_other_sessions_keeps_current_session(client):

@@ -292,6 +292,7 @@ class AuthSession(BaseModel):
         server_default=text("now()"),
     )
     expires_at = Column(DateTime(timezone=True), nullable=False)
+    remembered = Column(Boolean, nullable=False, server_default=text("false"))
     revoked_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (

@@ -372,6 +372,8 @@ Scope Key 是文档分组而不是用户/角色系统；`document_selection` 以
 ## 9. 安全边界
 
 - 当前为数据库约束的单管理员系统；密码使用 scrypt，服务端会话只存 token SHA-256。
+- 管理员浏览器会话默认固定 12 小时；显式选择记住浏览器后按闲置 7 天续期，
+  但不超过首次认证后 30 天。退出与设备撤销由服务端记录立即生效。
 - AI Key、Embedding Key 和 WebDAV 密码使用 Fernet 加密；主密钥来自
   `CANGZHI_SECRET_KEY`，未设置时生成到 `storage/.secret_key`。
 - PAT 明文只显示一次，按 `read/search/ask/documents:write` 最小权限授权，可选绑定单一

@@ -283,6 +283,9 @@ Services:
 The first visit to the web app opens `/setup`, where you create the sole
 administrator account. Later sessions use `/login`. The default upload limit is
 50 MB per file and the default web snapshot limit is 5 MB.
+Sign-in offers an optional **Remember this browser** choice:
+without it the session expires after 12 hours; with it, the session expires
+after seven idle days and must be renewed by signing in again after 30 days.
 
 Model configuration is optional. After signing in, configure chat and embedding
 providers separately under Settings. Settings saved in the UI take effect
