@@ -1547,3 +1547,9 @@
 - 原生 Web 登录新增未勾选的“记住此浏览器”。老请求和未选择登录仍固定 12 小时；选择后数据库记录 `remembered`，`GET /api/auth/status` 将到期时间续至当前时间后 7 天，但不超过创建后 30 天，并同步刷新 HttpOnly Cookie。
 - 迁移 0037 为既有 `auth_sessions` 增加默认 `false` 的标记，不改变旧会话期限。改密轮换当前 Cookie、撤销其他设备，并在保持本设备选择的同时重置绝对期限。退出及设备撤销仍由服务端记录即时生效。
 - 对接 DSH 插件的同一登录参数；插件只保留有限权限的检索 PAT，不保存管理员密码或会话。API 认证/权限/空间专项 `40 passed`；Alembic 唯一 head `0037`；Web lint、typecheck、Next.js 生产构建通过。运行实例未迁移或重启，真实浏览器验收待维护者部署后进行。
+
+### 2026-09-30 CZ-U06 合并与发布
+
+- 维护者明确要求合并部署。先核对 Gitea、Gitee、GitHub 的 main 一致，将任务分支 `32d6233` 快进合并至 main；无历史重写。
+- 发布前创建并校验 PostgreSQL + storage 联合备份 `backups/cangzhi-20260930-095936`。仅构建 migrate/API/Web 镜像，执行 `0036 → 0037` 迁移，并用 `--no-deps --no-build` 只替换 API/Web。Worker 与 PostgreSQL 进程保持原状，不重处理资料或启动旧队列。
+- 发布后四服务 healthy、schema 0037；API readiness、Web health 与登录页正常，OpenAPI 登录参数包含 `remember`。真实勾选登录、关闭再打开浏览器及 DSH 中 PAT 复用还需登录态交互验收；本次未使用管理员凭据。
