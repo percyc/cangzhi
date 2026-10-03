@@ -62,6 +62,7 @@ function harness(name, props, fetcher) {
     react, 'next/navigation': { useParams: () => ({ id: props.documentId }), useRouter: () => ({ push() {}, refresh() {} }) },
     'next/link': () => null, 'react-markdown': () => null, 'remark-breaks': () => null, 'remark-gfm': () => null,
     '@/lib/paths': { withApiBasePath: (value) => value },
+    '@/lib/navigation-guard': { useUnsavedChanges() {} },
     '@/components/ChunkingPreview': () => null, '@/components/CurrentChunkPreview': () => null, '@/components/KnowledgeEnhancement': () => null,
   };
   vm.runInNewContext(code, { module: evaluatedModule, exports: evaluatedModule.exports, require: (id) => Object.hasOwn(mocks, id) ? mocks[id] : require(id), window, fetch: fetcher, AbortController, URLSearchParams, console }, { filename });

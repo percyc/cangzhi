@@ -1,5 +1,7 @@
 'use client';
 
+import { useUnsavedChanges } from '@/lib/navigation-guard';
+
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -291,6 +293,14 @@ function DocumentDetail({ documentId }: { documentId: string }) {
     content: string | null;
     headingPath: string[];
   } | null>(null);
+
+  const metadataDirty = Boolean(document && editingMetadata && (
+    draftTitle !== document.title || draftSummary !== (document.summary?.summary ?? '') ||
+    [...draftTagIds].sort().join(',') !== document.tags.map((tag) => tag.id).sort().join(',')
+  ));
+  const categoryDirty = Boolean(document && selectedCategoryId !== (document.primary_category?.id ?? ''));
+  useUnsavedChanges(metadataDirty || categoryDirty || savingMetadata || savingCategory,
+    '资料整理信息还有未保存的修改。离开后需要重新编辑，确定离开吗？');
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -671,6 +681,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
 
       <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
         <button type="button" disabled={savingMetadata} onClick={() => {
+          if (editingMetadata && metadataDirty && !window.confirm('放弃未保存的标题、摘要和标签修改吗？')) return;
           // Both entering and explicitly cancelling start from the newest server snapshot.
           setDraftTitle(document.title);
           setDraftSummary(document.summary?.summary ?? '');

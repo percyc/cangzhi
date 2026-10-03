@@ -3,11 +3,12 @@
 import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { safeLoginReturn } from '@/lib/login-return';
 
 function LoginInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const next = searchParams?.get('next') ?? '/documents';
+  const next = safeLoginReturn(searchParams?.get('next'));
   const setupRequired = searchParams?.get('setup') === 'required';
 
   const [username, setUsername] = useState('');

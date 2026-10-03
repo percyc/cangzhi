@@ -4,12 +4,14 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { apiErrorMessage } from '@/lib/usability';
+import { useUnsavedChanges } from '@/lib/navigation-guard';
 
 export default function NewLinkPage() {
   const router = useRouter();
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  useUnsavedChanges(Boolean(url.trim()) || loading, '网页链接尚未保存，离开后需要重新填写。确定离开吗？');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

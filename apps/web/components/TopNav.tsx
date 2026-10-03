@@ -12,6 +12,8 @@ import {
 
 import { fetchAuthStatus, type AuthStatus } from '@/lib/api';
 import { activeNavigation } from '@/lib/usability';
+import { confirmNavigation, runWithoutNavigationGuard } from '@/lib/navigation-guard';
+import { safeLoginReturn } from '@/lib/login-return';
 
 const NAV_ITEMS = [
   { href: '/documents', label: '知识库', icon: 'library' },
@@ -45,6 +47,7 @@ export function TopNav() {
   const pathname = usePathname() ?? '/';
   const router = useRouter();
   const [state, setState] = useState<LoadState>({ kind: 'pending' });
+  const [loginHref, setLoginHref] = useState('/login');
   const [workspaceState, setWorkspaceState] = useState<WorkspaceLoadState>({
     kind: 'idle',
   });
@@ -53,7 +56,10 @@ export function TopNav() {
     let cancelled = false;
     const refreshStatus = () => fetchAuthStatus()
       .then((data) => {
-        if (!cancelled) setState({ kind: 'ready', status: data });
+        if (!cancelled) {
+          setState({ kind: 'ready', status: data });
+          setLoginHref(`/login?next=${encodeURIComponent(safeLoginReturn(window.location.pathname + window.location.search + window.location.hash))}`);
+        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -63,10 +69,17 @@ export function TopNav() {
         });
       });
     void refreshStatus();
+    const onFocus = () => { if (document.visibilityState === 'visible') void refreshStatus(); };
+    const timer = window.setInterval(onFocus, 60000);
     window.addEventListener('cangzhi:auth-updated', refreshStatus);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
     return () => {
       cancelled = true;
       window.removeEventListener('cangzhi:auth-updated', refreshStatus);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+      window.clearInterval(timer);
     };
   }, [pathname]);
 
@@ -96,6 +109,7 @@ export function TopNav() {
   }, [pathname, isAuthenticated]);
 
   const handleLogout = async () => {
+    if (!confirmNavigation()) return;
     try {
       const response = await fetch('/api/auth/logout', {
         method: 'POST',
@@ -109,7 +123,7 @@ export function TopNav() {
       });
       return;
     }
-    router.replace('/login');
+    runWithoutNavigationGuard(() => router.replace('/login'));
     router.refresh();
   };
 
@@ -154,7 +168,7 @@ export function TopNav() {
           )}
           {state.kind === 'ready' && status && !status.authenticated && !status.setup_required && (
             <Link
-              href="/login"
+              href={loginHref}
               className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
             >
               登录
@@ -223,6 +237,12 @@ export function TopNav() {
       {error && (
         <div className="border-t border-red-200 bg-red-50 text-xs text-red-700">
           <div className="mx-auto max-w-7xl px-4 py-2 sm:px-6">{error}</div>
+        </div>
+      )}
+      {status && !status.authenticated && !status.setup_required && (
+        <div role="status" className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs leading-5 text-amber-900">
+          登录已失效，此页不会自动关闭。随手记与问题草稿保留在当前标签页；未保存的设置请先复制非敏感内容。
+          <Link href={loginHref} className="ml-2 font-semibold underline">重新登录并返回</Link>
         </div>
       )}
     </header>
@@ -501,10 +521,11 @@ function WorkspaceSelector({ state }: { state: WorkspaceLoadState }) {
 
   const handleSelect = (slug: string) => {
     if (current?.slug === slug) return;
-    setWorkspaceCookie(slug);
-    if (typeof window !== 'undefined') {
+    if (!confirmNavigation()) return;
+    runWithoutNavigationGuard(() => {
+      setWorkspaceCookie(slug);
       window.location.reload();
-    }
+    });
   };
 
   return (

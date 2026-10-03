@@ -4,6 +4,7 @@ import { Suspense } from 'react';
 import { TopNav } from '@/components/TopNav';
 import { PageGuide } from '@/components/PageGuide';
 import { WEB_BASE_PATH } from '@/lib/paths';
+import { NavigationGuard } from '@/lib/navigation-guard';
 
 import './globals.css';
 
@@ -42,6 +43,7 @@ export default function RootLayout({
         </head>
       )}
       <body>
+        <NavigationGuard />
         <TopNav />
         <Suspense fallback={null}><PageGuide /></Suspense>
         {children}

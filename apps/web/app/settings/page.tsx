@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { confirmNavigation, useUnsavedChanges } from '@/lib/navigation-guard';
 
 import {
   discoverAIModels,
@@ -245,6 +246,7 @@ export default function SettingsPage() {
   const dirtyPanelCount =
     Number(chatDirty) + Number(embeddingDirty) + Number(ocrDirty);
   const anyDirty = dirtyPanelCount > 0;
+  useUnsavedChanges(Boolean(config) && anyDirty, '模型设置还有未保存的修改。为保护密钥，此表单不会缓存到浏览器。确定离开吗？');
   const activePanelDirty = activePanel === 'chat'
     ? chatDirty
     : activePanel === 'embedding'
@@ -614,11 +616,11 @@ export default function SettingsPage() {
           }
         }}
         beforeNavigate={(section) =>
-          ['chat', 'embedding', 'ocr'].includes(section) && section === activePanel
+          ['chat', 'embedding', 'ocr'].includes(section)
             ? true
             : section === activePanel ||
               !anyDirty ||
-              window.confirm('模型设置还有未保存的修改，确定离开当前页面吗？')
+              confirmNavigation()
         }
       />
 

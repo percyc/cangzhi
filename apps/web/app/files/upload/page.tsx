@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useUnsavedChanges } from '@/lib/navigation-guard';
 
 type FileStatus = 'pending' | 'uploading' | 'done' | 'error';
 
@@ -58,6 +59,9 @@ export default function FileUploadPage() {
   const pendingOrFailedCount = items.filter(
     (item) => item.status === 'pending' || item.status === 'error',
   ).length;
+  useUnsavedChanges(uploading || pendingOrFailedCount > 0, uploading
+    ? '文件正在上传。离开可能中断传输，已收到的文件仍会继续处理。确定离开吗？'
+    : '还有未上传的文件。浏览器不能自动恢复文件选择，离开后需要重新选择。确定离开吗？');
   const overallProgress =
     items.length === 0
       ? 0
