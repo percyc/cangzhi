@@ -144,3 +144,85 @@ def test_inbox_requires_authentication(client):
     test_client, _ = client
     app.dependency_overrides.pop(require_admin)
     assert test_client.get("/api/documents/inbox").status_code == 401
+
+
+def test_optional_disabled_vector_does_not_create_attention(client):
+    from sqlalchemy import select
+    from apps.api.models.auth import AIRuntimeConfig
+
+    http, _ = client
+    created = http.post("/api/notes", json={"title": "Synthetic organized", "content": "Synthetic facts"}).json()
+    version_id = created["current_version"]["id"]
+    async def prepare():
+        async for db in app.dependency_overrides[get_db]():
+            await _seed_base(db, created["id"], version_id)
+            config = await db.scalar(select(AIRuntimeConfig))
+            config.active_embedding_profile_id = None
+            await db.commit()
+    asyncio.run(prepare())
+    payload = http.get("/api/documents/inbox?filter=all").json()
+    assert payload["items"][0]["pipeline"]["stages"]["embedding"]["status"] == "disabled"
+    assert payload["items"][0]["pipeline"]["keyword_searchable"] is True
+    assert payload["counts"]["completed"] == 1
+    assert payload["counts"]["attention"] == payload["counts"]["not_vectorized"] == 0
+    assert http.get("/api/documents/inbox?filter=attention").json()["items"] == []
+
+
+def test_database_snapshot_error_is_a_source_issue_without_hiding_available_data(client):
+    from apps.api.models.database_source import DatabaseSnapshot, DatabaseSource
+    from apps.api.models.datasets import KnowledgeDataset
+
+    http, _ = client
+    created = http.post("/api/notes", json={"title": "Synthetic snapshot", "content": "Synthetic facts"}).json()
+    version_id = created["current_version"]["id"]
+    async def prepare():
+        async for db in app.dependency_overrides[get_db]():
+            await _seed_base(db, created["id"], version_id)
+            source = DatabaseSource(name="Synthetic source", engine="mysql", host="example.invalid", port=3306,
+                database_name="synthetic", username="readonly", password_cipher="synthetic-not-a-key", status="error")
+            dataset = KnowledgeDataset(document_id=created["id"], document_version_id=version_id,
+                name="Synthetic table", sheet_name="synthetic", region_index=0)
+            db.add_all([source, dataset])
+            await db.flush()
+            db.add(DatabaseSnapshot(source_id=source.id, document_id=created["id"], dataset_id=dataset.id,
+                schema_name="synthetic", table_name="facts", last_error="Synthetic refresh failure"))
+            healthy = Document(title="Synthetic healthy sibling", source_type=DocumentSourceType.file)
+            db.add(healthy)
+            await db.flush()
+            healthy_version = DocumentVersion(document_id=healthy.id, version_number=1,
+                content_hash="healthy", raw_content="Synthetic healthy facts", processing_status="ready")
+            db.add(healthy_version)
+            await db.flush()
+            healthy.current_version_id = healthy_version.id
+            healthy_dataset = KnowledgeDataset(document_id=healthy.id, document_version_id=healthy_version.id,
+                name="Synthetic healthy table", sheet_name="healthy", region_index=0)
+            db.add(healthy_dataset)
+            await db.flush()
+            db.add(DatabaseSnapshot(source_id=source.id, document_id=healthy.id, dataset_id=healthy_dataset.id,
+                schema_name="synthetic", table_name="healthy"))
+            db.add(Workspace(slug="isolated", name="Synthetic empty space", settings={}))
+            await db.commit()
+    asyncio.run(prepare())
+    payload = http.get("/api/documents/inbox?filter=source_issue").json()
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["origin"] == {"kind": "database", "label": "Synthetic source", "connector_available": True, "source_status": "failed"}
+    assert item["pipeline"]["keyword_searchable"] is True
+    assert http.get("/api/documents/inbox?filter=source_issue", headers={"X-Cangzhi-Workspace": "isolated"}).json()["total"] == 0
+
+
+def test_governance_only_table_remains_a_real_todo_without_vector_repair(client):
+    http, _ = client
+    created = http.post("/api/notes", json={"title": "Synthetic governance", "content": "Synthetic facts"}).json()
+    version_id = created["current_version"]["id"]
+    async def prepare():
+        async for db in app.dependency_overrides[get_db]():
+            await _seed_base(db, created["id"], version_id)
+            version = await db.get(DocumentVersion, version_id)
+            version.meta = {"spreadsheet_processing": {"mode": "governance", "governance_required": True}}
+            await db.commit()
+    asyncio.run(prepare())
+    payload = http.get("/api/documents/inbox?filter=attention").json()
+    assert payload["total"] == payload["counts"]["needs_organization"] == 1
+    assert payload["counts"]["not_vectorized"] == 0
+    assert payload["items"][0]["pipeline"]["stages"]["embedding"]["status"] == "skipped"

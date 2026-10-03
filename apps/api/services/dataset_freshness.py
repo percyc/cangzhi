@@ -98,7 +98,11 @@ async def get_datasets_freshness(
             else None
         )
         interval_seconds = int(source.freshness_interval_minutes) * 60
-        stale = snapshot_at is None or bool(
+        # A failed refresh invalidates the freshness guarantee even before
+        # the age threshold (for example, a previously populated table now
+        # returns no rows). Keep serving the version-bound old snapshot only
+        # under background/manual policy, never as a fresh strict result.
+        stale = bool(snapshot.last_error) or snapshot_at is None or bool(
             age_seconds is not None and age_seconds >= interval_seconds
         )
         output[snapshot.dataset_id] = {

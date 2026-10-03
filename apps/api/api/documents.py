@@ -42,6 +42,7 @@ from ..services.processing_status import (
     repair_document_vectors,
 )
 from ..services.inbox import InboxFilter, list_inbox
+from ..services.processing_retry import ProcessingRetryError, retry_failed_stages
 from ..services.webdav import WebDAVError, download_file
 from ..storage import get_storage
 from ..storage.base import BlobStorage
@@ -54,6 +55,7 @@ from .schemas import (
     DocumentListItemResponse,
     DocumentMetadataUpdateRequest,
     DocumentReprocessResponse,
+    DocumentRetryResponse,
     DocumentResponse,
     DocumentSummaryResponse,
     DocumentTagsUpdateRequest,
@@ -1025,6 +1027,16 @@ async def preview_document(
         content_length=blob.file_size,
         disposition="inline",
     )
+
+
+@router.post("/{document_id}/retry-failed", response_model=DocumentRetryResponse)
+async def retry_document_failed_stages(
+    document_id: int, db: AsyncSession = Depends(get_db)
+):
+    try:
+        return await retry_failed_stages(db, document_id)
+    except ProcessingRetryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
 
 
 @router.post("/{document_id}/reprocess", response_model=DocumentReprocessResponse)

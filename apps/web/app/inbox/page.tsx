@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { retryFailedDocuments } from '@/lib/processing-recovery';
 
 type DocumentItem = {
   id: number;
@@ -267,25 +268,20 @@ export default function InboxPage() {
     setFeedback('');
     aborterRef.current?.abort();
     clearPollTimer();
-    let succeeded = false;
     try {
-      const results = await Promise.allSettled(
-        currentPageParseFailures.map(async (d) => {
-          const r = await fetch(`/api/documents/${d.id}/reprocess`, {
-            method: 'POST',
-          });
-          if (!r.ok) throw new Error(`资料 ${d.id} 重试提交失败`);
-        }),
+      const { submitted, unchanged, failures } = await retryFailedDocuments(currentPageParseFailures.map((d) => d.id));
+      if (mountedRef.current) setFeedback(
+        `已提交 ${submitted} 份，已排队或无需重试 ${unchanged} 份，失败 ${failures.length} 份。` +
+        (failures.length ? ` ${failures.map((item) => item.message).join('；')}` : ''),
       );
-      const failed = results.find((result) => result.status === 'rejected');
-      if (failed?.status === 'rejected') throw failed.reason;
-      succeeded = true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '批量重试失败');
+      if (mountedRef.current) setFeedback(caught instanceof Error ? caught.message : '批量重试失败');
     } finally {
       mutationRef.current = false;
-      setRetrying(false);
-      if (succeeded) await performLoad();
+      if (mountedRef.current) {
+        setRetrying(false);
+        await performLoad();
+      }
     }
   };
 
@@ -344,7 +340,7 @@ export default function InboxPage() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900">收件箱</h1>
           <p className="mt-1 text-sm text-slate-500">
-            只处理需要关注的资料：处理中、失败、待整理和尚未建立语义索引的内容。
+            集中处理入库失败、待整理、来源异常，以及已启用索引的缺失任务。未启用向量不算异常。
           </p>
           <p className="mt-1 text-xs text-slate-400">
             批量操作仅作用于当前页（每页 {PAGE_SIZE} 条），不会影响其他页。
@@ -357,12 +353,12 @@ export default function InboxPage() {
               onClick={retryFailed}
               disabled={!canAct || currentPageParseFailures.length === 0}
               className="rounded border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 disabled:opacity-40"
-              title="仅对当前页解析或整理失败的资料重新提交处理"
-              aria-label="重试当前页解析或整理失败"
+              title="只恢复当前页失败的解析、切片或整理阶段，不重跑成功阶段，不主动重新抓取网页"
+              aria-label="重试当前页失败阶段"
             >
               {retrying
                 ? '正在提交…'
-                : `重试本页失败（${currentPageParseFailures.length}）`}
+                : `重试本页失败阶段（${currentPageParseFailures.length}）`}
             </button>
             <button
               type="button"
@@ -411,7 +407,7 @@ export default function InboxPage() {
             className="ml-3 underline disabled:opacity-40">重新加载</button>
         </p>
       )}
-      {feedback && <p className="mt-4 text-sm text-violet-700">{feedback}</p>}
+      {feedback && <p role="status" className="mt-4 text-sm text-violet-700">{feedback}</p>}
       {!error && (
         <>
           <div className="mt-5 hidden overflow-x-auto rounded-xl border border-slate-200 bg-white sm:block">
@@ -439,6 +435,7 @@ export default function InboxPage() {
                         >
                           {document.title}
                         </Link>
+                        <SourceIssue origin={document.origin} />
                       </td>
                       <StatusCell stage={pipeline.stages.parsing} />
                       <StatusCell stage={pipeline.stages.understanding} />
@@ -475,7 +472,7 @@ export default function InboxPage() {
                               : 'text-slate-400'
                           }
                         >
-                          {pipeline.vector_searchable ? '可语义检索' : '语义未就绪'}
+                          {pipeline.vector_searchable ? '可语义检索' : embedding.status === 'disabled' ? '语义检索未启用（可选）' : '语义未就绪'}
                         </p>
                       </td>
                     </tr>
@@ -517,6 +514,7 @@ export default function InboxPage() {
                   >
                     {document.title}
                   </Link>
+                  <SourceIssue origin={document.origin} />
                   <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
                     <div
                       title={
@@ -602,7 +600,7 @@ export default function InboxPage() {
                           : 'text-slate-400'
                       }
                     >
-                      {pipeline.vector_searchable ? '可语义检索' : '语义未就绪'}
+                      {pipeline.vector_searchable ? '可语义检索' : embedding.status === 'disabled' ? '语义检索未启用（可选）' : '语义未就绪'}
                     </span>
                   </div>
                 </li>
@@ -642,6 +640,16 @@ export default function InboxPage() {
         </div>
       )}
     </main>
+  );
+}
+
+function SourceIssue({ origin }: { origin: DocumentItem['origin'] }) {
+  if (!origin || (origin.connector_available && !['failed', 'missing'].includes(origin.source_status ?? ''))) return null;
+  return (
+    <p className="mt-1 text-xs text-amber-800">
+      {origin.kind === 'database' ? '来源刷新异常，当前展示仍是已有快照。' : '来源连接或远端文件异常。'}
+      <Link href="/settings/sources" className="ml-1 underline">查看来源</Link>
+    </p>
   );
 }
 

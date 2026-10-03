@@ -686,7 +686,7 @@ async def import_table(
         await db.rollback()
         if exc.code in {"invalid_identifier", "schema_not_found", "table_not_found"}:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        if exc.code in {"row_limit_exceeded"}:
+        if exc.code in {"row_limit_exceeded", "empty_snapshot_refresh"}:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         if exc.code in {"document_trashed"}:
             raise HTTPException(status_code=409, detail=str(exc)) from None

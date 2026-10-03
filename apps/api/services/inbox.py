@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.documents import Document
+from ..models.database_source import DatabaseSnapshot, DatabaseSource
 from ..models.taxonomy import Category, DocumentCategory
 from ..models.webdav import WebDAVEntry, WebDAVSource
 from .processing_status import load_pipeline_statuses
@@ -111,6 +112,23 @@ async def list_inbox(
             if webdav_ids
             else {}
         )
+        database_origins = {
+            row.document_id: {
+                "kind": "database",
+                "label": row.name,
+                "connector_available": True,
+                # "error" is also set by a single table refresh. Do not make
+                # every healthy sibling table a to-do because of that one table.
+                # "failed" denotes the source-wide connection test failure.
+                "source_status": "failed" if row.last_error or row.status == "failed" else "idle",
+            }
+            for row in (await db.execute(
+                select(DatabaseSnapshot.document_id, DatabaseSource.name,
+                       DatabaseSource.status, DatabaseSnapshot.last_error)
+                .join(DatabaseSource, DatabaseSource.id == DatabaseSnapshot.source_id)
+                .where(DatabaseSnapshot.document_id.in_([d.id for d in batch]))
+            )).all()
+        }
         for document in batch:
             pipeline = pipelines.get(document.current_version_id)
             if pipeline is None:
@@ -142,7 +160,7 @@ async def list_inbox(
                     },
                 }
             category = categories.get(document.current_version_id)
-            origin = None
+            origin = database_origins.get(document.id)
             if document.external_source == "webdav":
                 origin = {
                     "kind": "webdav",
@@ -164,9 +182,15 @@ async def list_inbox(
                 "processing": pipeline["overall_status"] == "processing",
                 "failed": pipeline["overall_status"] == "failed",
                 "completed": pipeline["overall_status"] == "completed",
-                "needs_organization": bool(category and category["slug"] == "inbox"),
+                "needs_organization": (
+                    bool(category and category["slug"] == "inbox")
+                    or pipeline["stages"]["chunking"]["status"] == "skipped"
+                ),
                 "source_issue": source_issue,
-                "not_vectorized": not pipeline["vector_searchable"],
+                "not_vectorized": (
+                    pipeline["stages"]["embedding"]["status"] not in {"disabled", "skipped"}
+                    and not pipeline["vector_searchable"]
+                ),
             }
             flags["attention"] = (
                 not flags["completed"]

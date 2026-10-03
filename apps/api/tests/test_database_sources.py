@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,12 @@ from apps.api.models.datasets import DatasetArtifact, DatasetField, KnowledgeDat
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.table_rows import StructuredTableRow
-from apps.api.models.taxonomy import DocumentCategory, DocumentTag, Tag
+from apps.api.models.taxonomy import (
+    DocumentCategory,
+    DocumentSummary,
+    DocumentTag,
+    Tag,
+)
 from apps.api.models.workspaces import DEFAULT_WORKSPACE_SLUG, Workspace
 from apps.api.security.secrets import (
     decrypt_secret,
@@ -37,7 +42,11 @@ from apps.api.services.database_source import (
     DatabaseSourceError,
     validate_database_host,
 )
-from apps.api.services.dataset_execution import DatasetExecutionError
+from apps.api.services.dataset_execution import (
+    DatasetExecutionError,
+    execute_dataset_query,
+)
+from apps.api.services.dataset_freshness import get_dataset_freshness
 from apps.api.services.workspaces import (
     bind_workspace_context,
     clear_workspace_context,
@@ -822,31 +831,21 @@ def test_reimport_reuses_unchanged_field_semantics_and_bounds_ai_work(
     assert (job is not None) is (expected_pending > 0)
 
 
-def test_empty_table_is_skipped_and_removes_previous_snapshot(
+def test_first_empty_table_is_skipped_without_creating_documents(
     client, monkeypatch, tmp_path
 ):
     test_client, _ = client
-    _install_fake_driver(monkeypatch, rows=[(1, "alpha")])
+    _install_fake_driver(monkeypatch, rows=[])
     source_id = test_client.post(
         "/api/database-sources", json=_create_source_payload()
     ).json()["id"]
-    first = _import_via_api(test_client, source_id).json()
-    artifact_path = (
-        Path(tmp_path)
-        / "storage"
-        / "datasets"
-        / str(first["dataset_id"])
-        / "v1.parquet"
-    )
-    assert artifact_path.is_file()
-
-    _install_fake_driver(monkeypatch, rows=[])
     response = _import_via_api(test_client, source_id)
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"] == "skipped"
     assert body["skip_reason"] == "empty_table"
-    assert body["removed_existing"] is True
+    assert body["removed_existing"] is False
+    assert body["reused_document"] is False
     assert body["document_id"] is None
     assert body["dataset_id"] is None
     assert _query_counts() == {
@@ -855,7 +854,207 @@ def test_empty_table_is_skipped_and_removes_previous_snapshot(
         "versions": 0,
         "snapshots": 0,
     }
-    assert not artifact_path.exists()
+    assert list((tmp_path / "storage").rglob("*.parquet")) == []
+
+
+@pytest.mark.parametrize("entrypoint", ["api", "worker"])
+def test_empty_refresh_preserves_history_and_semantics_until_nonempty_recovery(
+    client, monkeypatch, tmp_path, entrypoint
+):
+    test_client, _ = client
+    _install_fake_driver(monkeypatch, rows=[(1, "alpha")])
+    source_id = test_client.post(
+        "/api/database-sources", json=_create_source_payload()
+    ).json()["id"]
+    _import_via_api(test_client, source_id)
+    imported = _import_via_api(test_client, source_id).json()
+    artifact_path = (
+        tmp_path / "storage" / "datasets" / str(imported["dataset_id"]) / "v1.parquet"
+    )
+    artifact_bytes = artifact_path.read_bytes()
+
+    async def seed_edits():
+        generator = app.dependency_overrides[get_db]()
+        db = await anext(generator)
+        try:
+            document = await db.get(Document, imported["document_id"])
+            document.title = "人工维护的订单资料"
+            db.add(
+                DocumentSummary(
+                    document_id=document.id,
+                    document_version_id=imported["document_version_id"],
+                    summary="人工确认的摘要",
+                    source="manual",
+                )
+            )
+            fields = list(
+                (
+                    await db.scalars(
+                        select(DatasetField)
+                        .where(DatasetField.dataset_id == imported["dataset_id"])
+                        .order_by(DatasetField.position)
+                    )
+                ).all()
+            )
+            for field, origin in zip(fields, ("manual", "ai")):
+                field.description = f"{origin} 字段说明"
+                field.semantic_source = origin
+                field.aliases = [f"{field.name}别名"]
+            await db.commit()
+        finally:
+            await generator.aclose()
+
+    async def inspect_facts():
+        generator = app.dependency_overrides[get_db]()
+        db = await anext(generator)
+        try:
+            # Compare every stored fact/derived record, not only table counts.
+            facts = {}
+            for model in (
+                Document,
+                DocumentVersion,
+                KnowledgeDataset,
+                DatasetField,
+                DatasetArtifact,
+                StructuredTableRow,
+                DocumentChunk,
+                DocumentSummary,
+                DocumentCategory,
+                DocumentTag,
+                ProcessingJob,
+            ):
+                records = (await db.scalars(select(model).order_by(model.id))).all()
+                facts[model.__tablename__] = [
+                    {
+                        attribute.key: getattr(record, attribute.key)
+                        for attribute in model.__mapper__.column_attrs
+                    }
+                    for record in records
+                ]
+            snapshot = await db.get(DatabaseSnapshot, imported["snapshot_id"])
+            source = await db.get(DatabaseSource, source_id)
+            facts["snapshot_identity"] = (
+                snapshot.id,
+                snapshot.document_id,
+                snapshot.dataset_id,
+                snapshot.row_count,
+                snapshot.snapshot_fingerprint,
+                snapshot.snapshot_at,
+                source.last_sync_at,
+            )
+            return facts, snapshot.last_error, source.status, source.last_error
+        finally:
+            await generator.aclose()
+
+    asyncio.run(seed_edits())
+    before, _, _, _ = asyncio.run(inspect_facts())
+    assert len(before["document_versions"]) == 2
+    _install_fake_driver(monkeypatch, rows=[])
+    if entrypoint == "api":
+        response = _import_via_api(test_client, source_id)
+        assert response.status_code == 409, response.text
+        assert "已保留原有快照和历史版本" in response.json()["detail"]
+    else:
+        from apps.worker.services.processor import _refresh_database_snapshot_async
+
+        @asynccontextmanager
+        async def worker_db():
+            generator = app.dependency_overrides[get_db]()
+            db = await anext(generator)
+            try:
+                yield db
+            finally:
+                await generator.aclose()
+
+        monkeypatch.setattr("apps.api.core.db.AsyncSessionLocal", worker_db)
+        monkeypatch.setattr(
+            "apps.worker.services.processor.settings.storage_path",
+            str(tmp_path / "storage"),
+        )
+        with pytest.raises(DatabaseSourceError) as caught:
+            asyncio.run(_refresh_database_snapshot_async(imported["snapshot_id"], 1))
+        assert caught.value.code == "empty_snapshot_refresh"
+
+    after, snapshot_error, source_status, source_error = asyncio.run(inspect_facts())
+    assert after == before
+    assert artifact_path.read_bytes() == artifact_bytes
+    assert source_status == "error"
+    assert "已保留原有快照和历史版本" in snapshot_error
+    assert source_error == snapshot_error
+
+    _install_fake_driver(monkeypatch, rows=[(2, "beta")])
+    response = _import_via_api(test_client, source_id)
+    assert response.status_code == 201, response.text
+    recovered = response.json()
+    assert recovered["document_id"] == imported["document_id"]
+    assert recovered["snapshot_id"] == imported["snapshot_id"]
+    assert recovered["version_number"] == 3
+    assert recovered["semantic_reused_fields"] == 2
+    assert recovered["semantic_ai_fields"] == 0
+    _, snapshot_error, source_status, source_error = asyncio.run(inspect_facts())
+    assert snapshot_error is None and source_error is None
+    assert source_status == "idle"
+    dataset_response = test_client.get(f"/api/datasets/{recovered['dataset_id']}")
+    assert dataset_response.status_code == 200, dataset_response.text
+    assert dataset_response.json()["source_freshness"]["stale"] is False
+    assert dataset_response.json()["source_freshness"]["last_error"] is None
+
+
+@pytest.mark.parametrize("mode", ["strict", "background", "manual"])
+def test_empty_refresh_is_stale_even_before_age_threshold(
+    client, monkeypatch, tmp_path, mode
+):
+    test_client, _ = client
+    _install_fake_driver(monkeypatch, rows=[(1, "alpha")])
+    source_id = test_client.post(
+        "/api/database-sources", json=_create_source_payload(freshness_mode=mode)
+    ).json()["id"]
+    imported = _import_via_api(test_client, source_id).json()
+    _install_fake_driver(monkeypatch, rows=[])
+    assert _import_via_api(test_client, source_id).status_code == 409
+
+    async def inspect_query():
+        generator = app.dependency_overrides[get_db]()
+        db = await anext(generator)
+        try:
+            bind_workspace_context(db.sync_session, 1, DEFAULT_WORKSPACE_SLUG)
+            dataset = await db.get(KnowledgeDataset, imported["dataset_id"])
+            freshness = await get_dataset_freshness(db, dataset)
+            assert freshness["age_seconds"] < freshness["refresh_interval_minutes"] * 60
+            assert freshness["stale"] is True
+            assert freshness["last_error"]
+            if mode == "strict":
+                with pytest.raises(DatasetExecutionError) as caught:
+                    await execute_dataset_query(
+                        db,
+                        dataset.id,
+                        {"columns": ["id", "name"]},
+                        storage_root=tmp_path / "storage",
+                    )
+                assert caught.value.code == "dataset_stale"
+            else:
+                result = await execute_dataset_query(
+                    db,
+                    dataset.id,
+                    {"columns": ["id", "name"]},
+                    storage_root=tmp_path / "storage",
+                )
+                assert result["rows"][0]["name"] == "alpha"
+                assert result["document_version_id"] == imported["document_version_id"]
+                assert result["source_freshness"]["stale"] is True
+                assert result["warnings"]
+            job = await db.scalar(
+                select(ProcessingJob).where(
+                    ProcessingJob.document_id == imported["document_id"],
+                    ProcessingJob.stage == "database_refresh",
+                )
+            )
+            assert (job is not None) is (mode != "manual")
+        finally:
+            clear_workspace_context(db.sync_session)
+            await generator.aclose()
+
+    asyncio.run(inspect_query())
 
 
 def test_failed_import_rolls_back_db_and_storage(client, monkeypatch, tmp_path):

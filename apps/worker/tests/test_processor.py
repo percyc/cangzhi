@@ -25,6 +25,7 @@ from apps.api.models.processing import ProcessingJob
 from apps.api.models.taxonomy import Category, DocumentCategory, DocumentSummary
 from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.api.models.workspaces import Workspace
+from apps.api.services.database_source import DatabaseSourceError
 from apps.worker.core.config import settings as worker_settings
 from apps.worker.services.processor import (
     _process_database_refresh,
@@ -1288,13 +1289,22 @@ def test_database_refresh_job_completes_without_discarding_snapshot(
     assert session.get(DatabaseSnapshot, snapshot.id) is not None
 
 
-def test_database_refresh_failure_keeps_snapshot_and_retries(session, monkeypatch):
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("remote unavailable"),
+        DatabaseSourceError("empty_snapshot_refresh", "远程表为空，已保留原有快照"),
+    ],
+)
+def test_database_refresh_failure_keeps_snapshot_and_retries(
+    session, monkeypatch, error
+):
     source, document, dataset, snapshot, job = _database_refresh_fixture(
         session, engine_name="mysql"
     )
 
     async def failed_refresh(_snapshot_id, _workspace_id):
-        raise RuntimeError("remote unavailable")
+        raise error
 
     monkeypatch.setattr(
         "apps.worker.services.processor._refresh_database_snapshot_async",
@@ -1308,8 +1318,19 @@ def test_database_refresh_failure_keeps_snapshot_and_retries(session, monkeypatc
     assert job.status == "retry"
     assert job.retry_count == 1
     assert source.status == "error"
-    assert snapshot.last_error == "remote unavailable"
+    assert snapshot.last_error == str(error)
     assert session.get(KnowledgeDataset, dataset.id) is not None
+    version = session.get(DocumentVersion, document.current_version_id)
+    assert version.processing_status == "ready"
+    for _ in range(2):
+        assert _process_database_refresh(session, job, document) is False
+    session.refresh(job)
+    session.refresh(snapshot)
+    assert job.status == "failed"
+    assert job.retry_count == 3
+    assert job.next_retry_at is None
+    assert session.get(KnowledgeDataset, dataset.id) is not None
+    assert version.processing_status == "ready"
 
 
 def test_dataset_semantics_smart_mode_only_generates_missing_fields(

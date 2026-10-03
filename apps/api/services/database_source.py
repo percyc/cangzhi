@@ -1175,6 +1175,9 @@ async def import_database_table(
     On any failure (remote error, dataset build, commit) the database
     transaction is rolled back and any newly published parquet file is
     deleted. The previous active artifact, if any, remains queryable.
+    An empty refresh of an existing snapshot persists only an error
+    diagnostic before raising; its content and successful-sync time remain
+    unchanged. A first import of an empty table is skipped.
     """
 
     _public_engine(source.engine)
@@ -1206,19 +1209,28 @@ async def import_database_table(
                 DatabaseSnapshot.table_name == table_name,
             )
         )
-        removed_existing = existing_snapshot is not None
+        if existing_snapshot is not None:
+            # An empty read can mean a transient upstream condition, changed
+            # permissions, or a genuinely emptied table. None authorizes a
+            # destructive cleanup of the knowledge already stored here. Keep
+            # both the content and its original freshness timestamp unchanged.
+            message = (
+                f"远程表 {schema_name}.{table_name} 本次读取为空，已保留原有快照和历史版本；"
+                "请核对来源数据后重试。保留的数据不是本次成功刷新的结果。"
+            )
+            existing_snapshot.last_error = message
+            source.status = "error"
+            source.last_error = message
+            db.add_all([existing_snapshot, source])
+            # Persist the diagnostic before raising: HTTP callers roll back
+            # after domain errors, and the worker uses a separate session.
+            await db.commit()
+            raise DatabaseSourceError("empty_snapshot_refresh", message)
         source.status = "idle"
         source.last_error = None
         source.last_sync_at = datetime.now(timezone.utc)
         db.add(source)
-        if existing_snapshot is not None:
-            await _purge_database_snapshots(
-                db,
-                [existing_snapshot],
-                storage_root=storage_root,
-            )
-        else:
-            await db.commit()
+        await db.commit()
         return DatabaseImportResult(
             document_id=None,
             document_version_id=None,
@@ -1228,10 +1240,10 @@ async def import_database_table(
             row_count=0,
             column_count=len(columns),
             fingerprint=fingerprint,
-            reused_document=removed_existing,
+            reused_document=False,
             status="skipped",
             skip_reason="empty_table",
-            removed_existing=removed_existing,
+            removed_existing=False,
             semantic_refresh_mode=source.semantic_refresh_mode or "smart",
         )
 

@@ -494,6 +494,35 @@ def test_search_allows_filter_without_query(search_db):
     assert [hit["title"] for hit in body["hits"]] == ["仅筛选链接"]
 
 
+@pytest.mark.parametrize("query", ["", "   "])
+def test_filter_only_search_honors_page_limit_and_offset(search_db, query):
+    async def seed():
+        for index in range(3):
+            await _seed_document(
+                search_db,
+                title=f"分页笔记 {index}",
+                source_type=DocumentSourceType.note,
+                body="合成筛选分页资料。",
+            )
+
+    asyncio.run(seed())
+    client = TestClient(app)
+    pages = []
+    for offset in range(4):
+        response = client.post(
+            "/api/search",
+            json={"query": query, "source_types": ["note"], "limit": 1, "offset": offset},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 3
+        assert body["limit"] == 1
+        assert body["offset"] == offset
+        assert len(body["hits"]) == (1 if offset < 3 else 0)
+        pages.extend(hit["document_id"] for hit in body["hits"])
+    assert len(set(pages)) == 3
+
+
 def test_search_no_results(search_db):
     asyncio.run(
         _seed_document(

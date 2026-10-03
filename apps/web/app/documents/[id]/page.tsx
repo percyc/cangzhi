@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
@@ -183,6 +183,7 @@ type DatasetField = {
 
 type KnowledgeDataset = {
   id: number;
+  document_version_id: number;
   name: string;
   sheet_name: string;
   region_index: number;
@@ -247,6 +248,13 @@ const sourceTypeLabels: Record<string, string> = {
 
 export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
+  // Next.js may reuse this route component when moving between documents.
+  // Drafts, previews and in-flight requests belong to exactly one document.
+  return <DocumentDetail key={params.id} documentId={params.id} />;
+}
+
+function DocumentDetail({ documentId }: { documentId: string }) {
+  const params = { id: documentId };
   const router = useRouter();
   const [document, setDocument] = useState<Document | null>(null);
   const [latestJob, setLatestJob] = useState<ProcessingJob | null>(null);
@@ -265,6 +273,13 @@ export default function DocumentDetailPage() {
   const [draftTitle, setDraftTitle] = useState('');
   const [draftSummary, setDraftSummary] = useState('');
   const [draftTagIds, setDraftTagIds] = useState<number[]>([]);
+  const [metadataChanged, setMetadataChanged] = useState(false);
+  const editingMetadataRef = useRef(false);
+  const categoryDirtyRef = useRef(false);
+  const savingRef = useRef(false);
+  const documentSnapshotRef = useRef<Document | null>(null);
+  const loadSequenceRef = useRef(0);
+  const loadControllerRef = useRef<AbortController | null>(null);
   const [pipelineExpanded, setPipelineExpanded] = useState(false);
   const [returnToAsk, setReturnToAsk] = useState(false);
   const [datasets, setDatasets] = useState<KnowledgeDataset[]>([]);
@@ -324,17 +339,21 @@ export default function DocumentDetailPage() {
   };
 
   const loadData = useCallback(async () => {
+    if (savingRef.current) return;
+    loadControllerRef.current?.abort();
+    const controller = new AbortController();
+    loadControllerRef.current = controller;
+    const sequence = ++loadSequenceRef.current;
+    const options = { cache: 'no-store' as const, signal: controller.signal };
     try {
       const [documentResponse, jobResponse, pipelineResponse, categoriesResponse, tagsResponse, datasetsResponse] =
         await Promise.all([
-          fetch(`/api/documents/${params.id}`, { cache: 'no-store' }),
-          fetch(`/api/documents/${params.id}/latest-job`, { cache: 'no-store' }),
-          fetch(`/api/documents/${params.id}/processing-status`, {
-            cache: 'no-store',
-          }),
-          fetch(`/api/categories`, { cache: 'no-store' }),
-          fetch(`/api/tags`, { cache: 'no-store' }),
-          fetch(`/api/datasets?document_id=${params.id}`, { cache: 'no-store' }),
+          fetch(`/api/documents/${documentId}`, options),
+          fetch(`/api/documents/${documentId}/latest-job`, options),
+          fetch(`/api/documents/${documentId}/processing-status`, options),
+          fetch(`/api/categories`, options),
+          fetch(`/api/tags`, options),
+          fetch(`/api/datasets?document_id=${documentId}`, options),
         ]);
       if (!documentResponse.ok) {
         throw new Error(documentResponse.status === 404 ? '资料不存在' : '读取失败');
@@ -344,7 +363,24 @@ export default function DocumentDetailPage() {
       if (!categoriesResponse.ok) throw new Error('读取分类失败');
       if (!tagsResponse.ok) throw new Error('读取标签失败');
       if (!datasetsResponse.ok) throw new Error('读取数据集失败');
-      const documentBody = (await documentResponse.json()) as Document;
+      const [documentBody, jobBody, pipelineBody, categoryBody, tagBody, datasetBody] = await Promise.all([
+        documentResponse.json() as Promise<Document>,
+        jobResponse.json() as Promise<ProcessingJob | null>,
+        pipelineResponse.json() as Promise<ProcessingPipeline>,
+        categoriesResponse.json() as Promise<CategoryOption[]>,
+        tagsResponse.json() as Promise<TagOption[]>,
+        datasetsResponse.json() as Promise<KnowledgeDataset[]>,
+      ]);
+      if (controller.signal.aborted || sequence !== loadSequenceRef.current) return;
+      const previous = documentSnapshotRef.current;
+      if (previous && (editingMetadataRef.current || categoryDirtyRef.current) && (
+        previous.current_version?.id !== documentBody.current_version?.id ||
+        previous.title !== documentBody.title ||
+        previous.summary?.summary !== documentBody.summary?.summary ||
+        previous.primary_category?.id !== documentBody.primary_category?.id ||
+        previous.tags.map((tag) => tag.id).join(',') !== documentBody.tags.map((tag) => tag.id).join(',')
+      )) setMetadataChanged(true);
+      documentSnapshotRef.current = documentBody;
       setDocument(documentBody);
       const filename = (
         documentBody.current_version?.blob?.original_filename ??
@@ -357,44 +393,65 @@ export default function DocumentDetailPage() {
         contentType === 'application/pdf' ||
         documentBody.current_version?.preview_blob
       );
-      setPreviewMode(opensWithPaginatedPreview ? 'original' : 'parsed');
-      setLatestJob(await jobResponse.json());
-      setPipeline((await pipelineResponse.json()) as ProcessingPipeline);
-      const categoryBody = (await categoriesResponse.json()) as CategoryOption[];
+      // Choose a default only on entry; background progress must not navigate
+      // away from the user's current preview or discard an unfinished edit.
+      if (!previous) setPreviewMode(opensWithPaginatedPreview ? 'original' : 'parsed');
+      else setPreviewMode((current) => (
+        current === 'original' && !opensWithPaginatedPreview ||
+        (current === 'chunks' || current === 'compare') && documentBody.current_version?.meta?.spreadsheet_processing
+      ) ? 'parsed' : current);
+      setLatestJob(jobBody);
+      setPipeline(pipelineBody);
       setCategories(categoryBody);
-      setTagOptions((await tagsResponse.json()) as TagOption[]);
-      setDatasets((await datasetsResponse.json()) as KnowledgeDataset[]);
-      setSelectedCategoryId(documentBody.primary_category?.id ?? '');
-      setDraftTitle(documentBody.title);
-      setDraftSummary(documentBody.summary?.summary ?? '');
-      setDraftTagIds(documentBody.tags.map((tag) => tag.id));
+      setTagOptions(tagBody);
+      setDatasets(datasetBody.filter((item) => item.document_version_id === documentBody.current_version?.id));
+      if (!categoryDirtyRef.current) setSelectedCategoryId(documentBody.primary_category?.id ?? '');
+      if (!editingMetadataRef.current) {
+        setDraftTitle(documentBody.title);
+        setDraftSummary(documentBody.summary?.summary ?? '');
+        setDraftTagIds(documentBody.tags.map((tag) => tag.id));
+      }
       setError('');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '读取失败');
+      if (!controller.signal.aborted && sequence === loadSequenceRef.current) {
+        setError(caught instanceof Error ? caught.message : '读取失败');
+      }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted && sequence === loadSequenceRef.current) {
+        loadControllerRef.current = null;
+        setLoading(false);
+      }
     }
-  }, [params.id]);
+  }, [documentId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadData(), 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      loadControllerRef.current?.abort();
+    };
   }, [loadData]);
 
   useEffect(() => {
     if (pipeline?.overall_status !== 'processing') return;
-    const timer = window.setInterval(() => void loadData(), 3000);
+    const timer = window.setInterval(() => {
+      if (!loadControllerRef.current) void loadData();
+    }, 3000);
     return () => window.clearInterval(timer);
   }, [pipeline?.overall_status, loadData]);
 
-  const handleRetry = async () => {
+  const handleRetry = async (full = false) => {
+    if (retrying) return;
+    if (full && !window.confirm(document?.source_type === 'url'
+      ? '将重新抓取网页并重新解析、整理和构建索引。仅恢复失败任务请用“重试失败阶段”。确定完整重新处理吗？'
+      : '将重新解析原文件，并重新整理和构建索引。仅恢复失败任务请用“重试失败阶段”。确定完整重新处理吗？')) return;
     setRetrying(true);
     try {
-      const response = await fetch(`/api/documents/${params.id}/reprocess`, {
+      const response = await fetch(`/api/documents/${params.id}/${full ? 'reprocess' : 'retry-failed'}`, {
         method: 'POST',
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.detail || '提交重试失败');
+      if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : body.detail?.message || '提交重试失败');
       await loadData();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '提交重试失败');
@@ -404,7 +461,11 @@ export default function DocumentDetailPage() {
   };
 
   const handleSaveCategory = async () => {
-    if (selectedCategoryId === '') return;
+    if (selectedCategoryId === '' || savingRef.current) return;
+    savingRef.current = true;
+    loadControllerRef.current?.abort();
+    loadControllerRef.current = null;
+    ++loadSequenceRef.current;
     setSavingCategory(true);
     setCategoryMessage('');
     try {
@@ -421,7 +482,10 @@ export default function DocumentDetailPage() {
         throw new Error(body.detail || '保存分类失败');
       }
       const updated = (await response.json()) as Document;
+      documentSnapshotRef.current = updated;
       setDocument(updated);
+      categoryDirtyRef.current = false;
+      if (!editingMetadataRef.current) setMetadataChanged(false);
       setSelectedCategoryId(updated.primary_category?.id ?? '');
       setCategoryMessage('主分类已更新');
     } catch (caught) {
@@ -429,12 +493,17 @@ export default function DocumentDetailPage() {
         caught instanceof Error ? caught.message : '保存分类失败',
       );
     } finally {
+      savingRef.current = false;
       setSavingCategory(false);
     }
   };
 
   const handleSaveMetadata = async () => {
-    if (!draftTitle.trim()) return;
+    if (!draftTitle.trim() || savingRef.current) return;
+    savingRef.current = true;
+    loadControllerRef.current?.abort();
+    loadControllerRef.current = null;
+    ++loadSequenceRef.current;
     setSavingMetadata(true);
     setError('');
     try {
@@ -456,11 +525,16 @@ export default function DocumentDetailPage() {
         body: JSON.stringify({ tag_ids: draftTagIds }),
       });
       if (!tagsResponse.ok) throw new Error('标签保存失败');
-      setDocument((await tagsResponse.json()) as Document);
+      const updated = (await tagsResponse.json()) as Document;
+      documentSnapshotRef.current = updated;
+      setDocument(updated);
+      editingMetadataRef.current = false;
       setEditingMetadata(false);
+      if (!categoryDirtyRef.current) setMetadataChanged(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '整理信息保存失败');
     } finally {
+      savingRef.current = false;
       setSavingMetadata(false);
     }
   };
@@ -476,6 +550,7 @@ export default function DocumentDetailPage() {
   const version = document.current_version;
   const status = version?.processing_status || 'created';
   const canRetry = ['failed', 'unsupported'].includes(status);
+  const hasRetryableFailure = pipeline && [pipeline.stages.parsing, pipeline.stages.chunking, pipeline.stages.understanding].some((stage) => stage.status === 'failed');
   const metadata = version?.structured_content?.metadata;
   const spreadsheetProcessing = version?.meta?.spreadsheet_processing;
   const spreadsheetNeedsGovernance = Boolean(
@@ -595,7 +670,15 @@ export default function DocumentDetailPage() {
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
-        <button type="button" onClick={() => setEditingMetadata((value) => !value)} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+        <button type="button" disabled={savingMetadata} onClick={() => {
+          // Both entering and explicitly cancelling start from the newest server snapshot.
+          setDraftTitle(document.title);
+          setDraftSummary(document.summary?.summary ?? '');
+          setDraftTagIds(document.tags.map((tag) => tag.id));
+          editingMetadataRef.current = !editingMetadata;
+          setEditingMetadata(!editingMetadata);
+          if (!categoryDirtyRef.current) setMetadataChanged(false);
+        }} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
           {editingMetadata ? '取消编辑' : '编辑信息'}
         </button>
         {document.source_type === 'note' && (
@@ -619,9 +702,14 @@ export default function DocumentDetailPage() {
         <a href={withApiBasePath(`/api/exports/documents/${document.id}/json`)} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
           导出 JSON
         </a>
+        {hasRetryableFailure && (
+          <button type="button" onClick={() => void handleRetry()} disabled={retrying} className="rounded border border-amber-500 px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-50">
+            {retrying ? '正在提交…' : '重试失败阶段'}
+          </button>
+        )}
         {canRetry && (
-          <button type="button" onClick={handleRetry} disabled={retrying} className="rounded border border-amber-500 px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-50">
-            {retrying ? '正在提交…' : '重新处理'}
+          <button type="button" onClick={() => void handleRetry(true)} disabled={retrying} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+            {retrying ? '正在提交…' : '完整重新处理'}
           </button>
         )}
         <button type="button" onClick={handleDelete} disabled={deleting} className="ml-auto rounded px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50">
@@ -629,16 +717,22 @@ export default function DocumentDetailPage() {
         </button>
       </div>
 
+      {metadataChanged && (
+        <p role="status" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          文档版本或服务器整理信息已更新。你的未保存内容已保留，请核对后再保存；取消编辑或还原分类会使用最新整理信息。
+        </p>
+      )}
+
       {editingMetadata && (
         <section className="mt-4 rounded-xl border border-blue-200 bg-blue-50/40 p-4">
           <h2 className="font-semibold text-slate-900">编辑整理信息</h2>
           <label className="mt-3 block text-sm text-slate-700">
             标题
-            <input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2" />
+            <input value={draftTitle} disabled={savingMetadata} onChange={(event) => setDraftTitle(event.target.value)} className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2" />
           </label>
           <label className="mt-3 block text-sm text-slate-700">
             摘要
-            <textarea value={draftSummary} onChange={(event) => setDraftSummary(event.target.value)} rows={4} className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2" />
+            <textarea value={draftSummary} disabled={savingMetadata} onChange={(event) => setDraftSummary(event.target.value)} rows={4} className="mt-1 block w-full rounded border border-slate-300 bg-white px-3 py-2" />
           </label>
           <div className="mt-3">
             <p className="text-sm text-slate-700">标签</p>
@@ -647,7 +741,7 @@ export default function DocumentDetailPage() {
                 {tagOptions.map((tag) => {
                   const selected = draftTagIds.includes(tag.id);
                   return (
-                    <button key={tag.id} type="button" onClick={() => setDraftTagIds((current) => selected ? current.filter((id) => id !== tag.id) : [...current, tag.id])} className={`rounded-full border px-2 py-1 text-xs ${selected ? 'border-blue-700 bg-blue-700 text-white' : 'border-slate-300 text-slate-600'}`}>
+                    <button key={tag.id} type="button" disabled={savingMetadata} onClick={() => setDraftTagIds((current) => selected ? current.filter((id) => id !== tag.id) : [...current, tag.id])} className={`rounded-full border px-2 py-1 text-xs ${selected ? 'border-blue-700 bg-blue-700 text-white' : 'border-slate-300 text-slate-600'}`}>
                       #{tag.name}
                     </button>
                   );
@@ -655,7 +749,7 @@ export default function DocumentDetailPage() {
               </div>
             </div>
           </div>
-          <button type="button" disabled={savingMetadata || !draftTitle.trim()} onClick={handleSaveMetadata} className="mt-4 rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50">
+          <button type="button" disabled={savingMetadata || savingCategory || !draftTitle.trim()} onClick={handleSaveMetadata} className="mt-4 rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50">
             {savingMetadata ? '保存中…' : '保存整理信息'}
           </button>
         </section>
@@ -684,13 +778,15 @@ export default function DocumentDetailPage() {
               <span className="text-slate-400">未分类</span>
             )}
             <select
+              aria-label="主分类"
               value={selectedCategoryId}
               onChange={event => {
                 const value = event.target.value;
+                categoryDirtyRef.current = (value === '' ? '' : Number(value)) !== (document.primary_category?.id ?? '');
                 setSelectedCategoryId(value === '' ? '' : Number(value));
                 setCategoryMessage('');
               }}
-              disabled={savingCategory}
+              disabled={savingCategory || savingMetadata}
               className="ml-2 rounded border border-slate-300 px-2 py-1.5 text-sm"
             >
               <option value="">选择分类</option>
@@ -698,9 +794,17 @@ export default function DocumentDetailPage() {
                 <option key={category.id} value={category.id}>{category.name}</option>
               ))}
             </select>
-            <button type="button" onClick={handleSaveCategory} disabled={savingCategory || selectedCategoryId === ''} className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50">
+            <button type="button" onClick={handleSaveCategory} disabled={savingCategory || savingMetadata || selectedCategoryId === ''} className="rounded bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50">
               {savingCategory ? '保存中…' : '保存'}
             </button>
+            {selectedCategoryId !== (document.primary_category?.id ?? '') && (
+              <button type="button" disabled={savingCategory || savingMetadata} onClick={() => {
+                categoryDirtyRef.current = false;
+                setSelectedCategoryId(document.primary_category?.id ?? '');
+                setCategoryMessage('');
+                if (!editingMetadataRef.current) setMetadataChanged(false);
+              }} className="rounded px-2 py-1.5 text-sm text-slate-500 hover:bg-slate-50 disabled:opacity-50">还原分类</button>
+            )}
             {categoryMessage && <span className="text-xs text-slate-500">{categoryMessage}</span>}
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
@@ -759,7 +863,7 @@ export default function DocumentDetailPage() {
         </details>
       )}
 
-      <KnowledgeEnhancement key={params.id} docId={params.id} />
+      <KnowledgeEnhancement key={`${params.id}:${version?.id}`} docId={params.id} />
       {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
       {latestJob?.last_error && status === 'failed' && (
         <div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">
@@ -806,16 +910,17 @@ export default function DocumentDetailPage() {
           </div>
           {previewMode === 'original' && (
             <iframe
+              key={version?.id}
               title={`${document.title} 原文预览`}
               src={`${previewUrl}${citationTarget?.page ? `#page=${citationTarget.page}` : ''}`}
               className="h-[72vh] min-h-[560px] w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
             />
           )}
           {previewMode === 'chunks' && pipeline && !spreadsheetProcessing && (
-            <CurrentChunkPreview key={`current-${params.id}`} documentId={params.id} />
+            <CurrentChunkPreview key={`current-${params.id}:${version?.id}`} documentId={params.id} />
           )}
           {previewMode === 'compare' && pipeline && !spreadsheetProcessing && (
-            <ChunkingPreview key={`compare-${params.id}`} documentId={params.id} />
+            <ChunkingPreview key={`compare-${params.id}:${version?.id}`} documentId={params.id} />
           )}
         </section>
 
@@ -828,7 +933,7 @@ export default function DocumentDetailPage() {
       )}
 
       {previewMode !== 'parsed' ? null : datasets.length > 0 ? (
-        <DatasetWorkspace datasets={datasets} />
+        <DatasetWorkspace key={`${document.id}:${version?.id}`} datasets={datasets} />
       ) : document.content_kind === 'spreadsheet' ? (
         <SpreadsheetGovernanceSummary processing={spreadsheetProcessing} />
       ) : version?.raw_content ? (
@@ -888,26 +993,100 @@ function SpreadsheetGovernanceSummary({ processing }: { processing: DocumentVers
   );
 }
 
+type DatasetPage = {
+  dataset_id: number;
+  offset: number;
+  total: number;
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+};
+
+function DatasetRows({ datasetId, identity }: { datasetId: number; identity: string }) {
+  const [offset, setOffset] = useState(0);
+  const [attempt, setAttempt] = useState(0);
+  const [result, setResult] = useState<{ key: string; preview: DatasetPage | null; error: string } | null>(null);
+  const pageSize = 50;
+  const requestKey = `${identity}:${offset}:${attempt}`;
+  // A response is never rendered under a different dataset/version/page heading,
+  // including the render before effect cleanup runs.
+  const current = result?.key === requestKey ? result : null;
+  const preview = current?.preview;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/datasets/${datasetId}/rows?offset=${offset}&limit=${pageSize}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('数据预览读取失败')))
+      .then((body: DatasetPage) => {
+        if (controller.signal.aborted) return;
+        if (body.dataset_id !== datasetId || body.offset !== offset) throw new Error('数据预览与当前表格或页码不一致，请重试');
+        setResult({ key: requestKey, preview: body, error: '' });
+      })
+      .catch((caught) => {
+        if (!controller.signal.aborted) setResult({ key: requestKey, preview: null, error: caught instanceof Error ? caught.message : '数据预览读取失败' });
+      });
+    return () => controller.abort();
+  }, [datasetId, offset, requestKey]);
+
+  return (
+    <div className="p-4" aria-busy={!current}>
+      {!current && <p role="status" className="py-8 text-center text-sm text-slate-500">正在读取当前页…</p>}
+      {current?.error && (
+        <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          <p>{current.error}。未显示其他表格或页码的旧数据。</p>
+          <div className="mt-3 flex gap-2">
+            <button type="button" onClick={() => setAttempt((value) => value + 1)} className="rounded border border-red-300 px-3 py-1.5">重试当前页</button>
+            {offset > 0 && <button type="button" onClick={() => setOffset(0)} className="rounded border border-red-300 px-3 py-1.5">返回第一页</button>}
+          </div>
+        </div>
+      )}
+      {preview && (
+        <>
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="min-w-full whitespace-nowrap text-left text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-3 py-2">原始行</th>{preview.columns.map((column) => <th key={column} className="px-3 py-2 font-medium">{column}</th>)}</tr></thead>
+              <tbody className="divide-y divide-slate-100">{preview.rows.map((row, index) => <tr key={`${String(row.row_number)}-${index}`} className="hover:bg-cyan-50/40"><td className="px-3 py-2 font-mono text-xs text-slate-400">{String(row.row_number ?? '')}</td>{preview.columns.map((column) => <td key={column} className="max-w-72 truncate px-3 py-2 text-slate-700" title={String(row[column] ?? '')}>{String(row[column] ?? '') || '—'}</td>)}</tr>)}</tbody>
+            </table>
+          </div>
+          <div className="mt-3 flex items-center justify-between text-sm text-slate-500">
+            <span>{preview.total === 0 ? '暂无数据行' : `第 ${Math.min(offset + 1, preview.total)}–${Math.min(offset + pageSize, preview.total)} 行，共 ${preview.total.toLocaleString('zh-CN')} 行`}</span>
+            <div className="flex gap-2">
+              <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))} className="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40">上一页</button>
+              <button type="button" disabled={offset + pageSize >= preview.total} onClick={() => setOffset(offset + pageSize)} className="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40">下一页</button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
-  const [datasetItems, setDatasetItems] = useState(datasets);
   const [selectedId, setSelectedId] = useState(datasets[0]?.id ?? 0);
   const [tab, setTab] = useState<'data' | 'fields'>('data');
-  const [offset, setOffset] = useState(0);
-  const [preview, setPreview] = useState<{
-    total: number;
-    columns: string[];
-    rows: Array<Record<string, unknown>>;
-  } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [semanticUpdate, setSemanticUpdate] = useState<{ source: KnowledgeDataset; value: KnowledgeDataset } | null>(null);
   const [semanticLoading, setSemanticLoading] = useState(false);
   const [semanticMessage, setSemanticMessage] = useState('');
+  const [semanticIdentity, setSemanticIdentity] = useState('');
   const [semanticMode, setSemanticMode] = useState<'smart' | 'full'>('smart');
-  const pageSize = 50;
-  const dataset = datasetItems.find((item) => item.id === selectedId) ?? datasetItems[0];
+  const semanticControllerRef = useRef<AbortController | null>(null);
+  const sourceDataset = datasets.find((item) => item.id === selectedId) ?? datasets[0];
+  // Parent polling remains authoritative; a local AI result is only an overlay
+  // until that exact source snapshot is refreshed.
+  const dataset = semanticUpdate?.source === sourceDataset ? semanticUpdate.value : sourceDataset;
+  const datasetIdentity = dataset ? `${dataset.id}:${dataset.document_version_id}:${dataset.execution?.artifact_version ?? 'pending'}:${dataset.execution?.backend ?? ''}` : '';
+  const currentSemanticLoading = semanticIdentity === datasetIdentity && semanticLoading;
+  const currentSemanticMessage = semanticIdentity === datasetIdentity ? semanticMessage : '';
+
+  useEffect(() => () => semanticControllerRef.current?.abort(), [datasetIdentity]);
 
   const generateSemantics = async () => {
-    if (!dataset || semanticLoading) return;
+    if (!dataset || currentSemanticLoading || semanticControllerRef.current && !semanticControllerRef.current.signal.aborted) return;
+    const controller = new AbortController();
+    semanticControllerRef.current = controller;
+    setSemanticIdentity(datasetIdentity);
     setSemanticLoading(true);
     setSemanticMessage('');
     try {
@@ -915,43 +1094,28 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: semanticMode }),
+        signal: controller.signal,
       });
       const body = await response.json().catch(() => ({}));
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : '字段说明生成失败');
       const updated = body.dataset as KnowledgeDataset;
-      setDatasetItems((current) => current.map((item) => item.id === updated.id ? updated : item));
+      if (updated.id !== dataset.id || updated.document_version_id !== dataset.document_version_id) throw new Error('数据集版本已变化，请刷新后重试');
+      setSemanticUpdate({ source: sourceDataset, value: updated });
       setSemanticMessage(
         body.requested_fields === 0
           ? '所有字段已有可复用说明，本次没有调用模型'
           : `已更新 ${body.updated_fields ?? 0}/${body.requested_fields ?? 0} 个待处理字段说明`,
       );
     } catch (caught) {
-      setSemanticMessage(caught instanceof Error ? caught.message : '字段说明生成失败');
+      if (!controller.signal.aborted) setSemanticMessage(caught instanceof Error ? caught.message : '字段说明生成失败');
     } finally {
-      setSemanticLoading(false);
+      if (!controller.signal.aborted) {
+        semanticControllerRef.current = null;
+        setSemanticLoading(false);
+      }
     }
   };
-
-  useEffect(() => {
-    if (!dataset) return;
-    const controller = new AbortController();
-    fetch(`/api/datasets/${dataset.id}/rows?offset=${offset}&limit=${pageSize}`, {
-      cache: 'no-store',
-      signal: controller.signal,
-    })
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error('数据预览读取失败')))
-      .then((body) => {
-        setPreview(body);
-        setError('');
-      })
-      .catch((caught) => {
-        if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : '数据预览读取失败');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [dataset, offset]);
 
   if (!dataset) return null;
   const completeness = dataset.profile.quality?.completeness;
@@ -976,9 +1140,14 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
             <h2 className="mt-1 text-xl font-semibold text-slate-950">数据集工作区</h2>
             <p className="mt-1 text-sm text-slate-600">表格使用结构化查询，不再把全部内容作为长文档渲染。</p>
           </div>
-          {datasetItems.length > 1 && (
-            <select value={dataset.id} onChange={(event) => { setLoading(true); setSelectedId(Number(event.target.value)); setOffset(0); }} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
-              {datasetItems.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          {datasets.length > 1 && (
+            <select aria-label="选择数据集" value={dataset.id} onChange={(event) => {
+              semanticControllerRef.current?.abort();
+              setSemanticLoading(false);
+              setSemanticMessage('');
+              setSelectedId(Number(event.target.value));
+            }} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
+              {datasets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           )}
         </div>
@@ -990,11 +1159,17 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
           <DatasetMetric label="来源位置" value={`${dataset.sheet_name} · ${dataset.source_row_start ?? '-'}–${dataset.source_row_end ?? '-'}`} />
         </div>
         {dataset.source_freshness?.kind === 'database_snapshot' && (
-          <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${dataset.source_freshness.stale ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+          <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${dataset.source_freshness.stale || dataset.source_freshness.last_error ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
             数据库快照：{dataset.source_freshness.snapshot_at ? new Date(dataset.source_freshness.snapshot_at).toLocaleString('zh-CN') : '未记录时间'}
             {dataset.source_freshness.stale ? ' · 已过期' : ' · 当前有效'}
             {dataset.source_freshness.refresh_pending ? ' · 已安排刷新' : ''}
             {dataset.source_freshness.refresh_mode === 'manual' ? ' · 仅手动刷新' : dataset.source_freshness.refresh_mode === 'strict' ? ' · 严格新鲜' : ' · 过期后台刷新'}
+            {dataset.source_freshness.last_error && (
+              <p className="mt-2" role="status">
+                最近刷新未完成：{dataset.source_freshness.last_error}。已有快照已保留，当前预览不代表源库最新数据。
+                {' '}<Link href="/settings/sources" className="underline">检查数据库来源</Link>
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -1004,34 +1179,17 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
         ))}
       </div>
       {tab === 'data' ? (
-        <div className="p-4">
-          {loading && <p className="py-8 text-center text-sm text-slate-500">正在读取当前页…</p>}
-          {error && <p className="py-4 text-sm text-red-700">{error}</p>}
-          {!loading && preview && (
-            <>
-              <div className="overflow-x-auto rounded-xl border border-slate-200">
-                <table className="min-w-full whitespace-nowrap text-left text-sm">
-                  <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-3 py-2">原始行</th>{preview.columns.map((column) => <th key={column} className="px-3 py-2 font-medium">{column}</th>)}</tr></thead>
-                  <tbody className="divide-y divide-slate-100">{preview.rows.map((row, index) => <tr key={`${String(row.row_number)}-${index}`} className="hover:bg-cyan-50/40"><td className="px-3 py-2 font-mono text-xs text-slate-400">{String(row.row_number ?? '')}</td>{preview.columns.map((column) => <td key={column} className="max-w-72 truncate px-3 py-2 text-slate-700" title={String(row[column] ?? '')}>{String(row[column] ?? '') || '—'}</td>)}</tr>)}</tbody>
-                </table>
-              </div>
-              <div className="mt-3 flex items-center justify-between text-sm text-slate-500">
-                <span>第 {offset + 1}–{Math.min(offset + pageSize, preview.total)} 行，共 {preview.total.toLocaleString('zh-CN')} 行</span>
-                <div className="flex gap-2"><button type="button" disabled={offset === 0} onClick={() => { setLoading(true); setOffset(Math.max(0, offset - pageSize)); }} className="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40">上一页</button><button type="button" disabled={offset + pageSize >= preview.total} onClick={() => { setLoading(true); setOffset(offset + pageSize); }} className="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40">下一页</button></div>
-              </div>
-            </>
-          )}
-        </div>
+        <DatasetRows key={datasetIdentity} datasetId={dataset.id} identity={datasetIdentity} />
       ) : (
         <div className="p-4">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-3">
             <div><p className="text-sm font-medium text-slate-800">字段语义画像</p><p className="mt-0.5 text-xs text-slate-500">类型、统计和样例来自程序；AI 说明仅作问法映射，不改变原始数据。</p></div>
             <div className="flex flex-wrap items-center gap-2">
-              <select value={semanticMode} onChange={(event) => setSemanticMode(event.target.value as 'smart' | 'full')} disabled={semanticLoading} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
+              <select value={semanticMode} onChange={(event) => setSemanticMode(event.target.value as 'smart' | 'full')} disabled={currentSemanticLoading} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
                 <option value="smart">智能补充（推荐）</option>
                 <option value="full">全量重新生成</option>
               </select>
-              <button type="button" disabled={semanticLoading || semanticEstimate === 0} onClick={generateSemantics} className="rounded-lg border border-cyan-300 bg-white px-3 py-2 text-sm font-medium text-cyan-800 hover:bg-cyan-50 disabled:opacity-50">{semanticLoading ? '正在分析…' : semanticEstimate === 0 ? '无需补充' : `处理 ${boundedSemanticEstimate}${semanticEstimate > 320 ? `/${semanticEstimate}` : ''} 个字段`}</button>
+              <button type="button" disabled={currentSemanticLoading || semanticEstimate === 0} onClick={generateSemantics} className="rounded-lg border border-cyan-300 bg-white px-3 py-2 text-sm font-medium text-cyan-800 hover:bg-cyan-50 disabled:opacity-50">{currentSemanticLoading ? '正在分析…' : semanticEstimate === 0 ? '无需补充' : `处理 ${boundedSemanticEstimate}${semanticEstimate > 320 ? `/${semanticEstimate}` : ''} 个字段`}</button>
             </div>
           </div>
           <p className="mb-3 text-xs leading-5 text-slate-500">
@@ -1040,7 +1198,7 @@ function DatasetWorkspace({ datasets }: { datasets: KnowledgeDataset[] }) {
               : `将重新生成全部 ${dataset.fields.length} 个字段的说明、单位和别名，模型消耗更高。`}
             {semanticEstimate > 320 ? ' 单次最多处理前 320 个字段，其余保持待补充。' : ''}
           </p>
-          {semanticMessage && <p className={`mb-3 rounded-lg px-3 py-2 text-sm ${semanticMessage.includes('失败') || semanticMessage.includes('配置') ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{semanticMessage}</p>}
+          {currentSemanticMessage && <p className={`mb-3 rounded-lg px-3 py-2 text-sm ${currentSemanticMessage.includes('失败') || currentSemanticMessage.includes('配置') ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{currentSemanticMessage}</p>}
           <div className="grid gap-3 md:grid-cols-2">
             {dataset.fields.map((field) => (
               <div key={field.id} className="rounded-xl border border-slate-200 p-4">

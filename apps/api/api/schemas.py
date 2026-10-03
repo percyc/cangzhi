@@ -219,6 +219,13 @@ class DocumentReprocessResponse(BaseModel):
     job_id: int | None = None
 
 
+class DocumentRetryResponse(BaseModel):
+    success: bool
+    message: str
+    job_ids: list[int]
+    stages: list[str]
+
+
 class DocumentCategoryUpdateRequest(BaseModel):
     category_id: int
 

@@ -384,11 +384,12 @@ async def search_documents(
         MAX_LIMIT,
         max(requested_limit + requested_offset, requested_limit * 4),
     )
+    filters_only = not (query or "").strip()
     lexical = await _search_documents_lexical(
         db,
         query=query,
-        limit=candidate_limit,
-        offset=0,
+        limit=requested_limit if filters_only else candidate_limit,
+        offset=requested_offset if filters_only else 0,
         category_ids=category_ids,
         category_slugs=category_slugs,
         tag_ids=tag_ids,
@@ -400,7 +401,7 @@ async def search_documents(
         document_boundary=document_boundary,
         matches_none=matches_none,
     )
-    if not (query or "").strip():
+    if filters_only:
         return lexical
 
     from .hybrid_retrieval import recall_vector_chunks, rrf_scores

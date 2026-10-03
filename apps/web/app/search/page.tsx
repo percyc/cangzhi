@@ -1,8 +1,9 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
+import { SEARCH_PAGE_SIZE, readSearchLocation, searchLocationHref, searchEvidenceHref } from '@/lib/ask-search-state';
 
 type Highlight = { start: number; end: number };
 
@@ -100,18 +101,36 @@ function SearchSkeleton() {
 
 function SearchClient() {
   const searchParams = useSearchParams();
-
-  const [query, setQuery] = useState(() => searchParams.get('q') ?? '');
+  const initial = readSearchLocation(new URLSearchParams(searchParams.toString()));
+  const [query, setQuery] = useState(initial.query);
   const [debouncedQuery, setDebouncedQuery] = useState(query);
-  const [categorySlugs, setCategorySlugs] = useState<string[]>([]);
-  const [tagSlugs, setTagSlugs] = useState<string[]>([]);
-  const [sourceTypes, setSourceTypes] = useState<string[]>([]);
+  const [categorySlugs, setCategorySlugs] = useState<string[]>(initial.categorySlugs);
+  const [tagSlugs, setTagSlugs] = useState<string[]>(initial.tagSlugs);
+  const [sourceTypes, setSourceTypes] = useState<string[]>(initial.sourceTypes);
+  const [page, setPage] = useState(initial.page);
+  const writtenLocationRef = useRef(searchParams.toString());
+  const restoringLocationRef = useRef<string | null>(null);
   const [filters, setFilters] = useState<FiltersPayload | null>(null);
   const [filtersError, setFiltersError] = useState<string | null>(null);
   const [state, setState] = useState<State>({ kind: 'idle' });
   const [retryNonce, setRetryNonce] = useState(0);
   const hasAnyFilter =
     categorySlugs.length > 0 || tagSlugs.length > 0 || sourceTypes.length > 0;
+
+  useEffect(() => {
+    // Browser back/forward and links restore the entire search, not only its text.
+    const incoming = searchParams.toString();
+    if (incoming === writtenLocationRef.current) return;
+    writtenLocationRef.current = incoming;
+    const location = readSearchLocation(new URLSearchParams(incoming));
+    restoringLocationRef.current = searchLocationHref(location);
+    setQuery(location.query);
+    setDebouncedQuery(location.query.trim());
+    setCategorySlugs(location.categorySlugs);
+    setTagSlugs(location.tagSlugs);
+    setSourceTypes(location.sourceTypes);
+    setPage(location.page);
+  }, [searchParams]);
 
   useEffect(() => {
     fetch('/api/search/filters', { cache: 'no-store' })
@@ -131,19 +150,26 @@ function SearchClient() {
   useEffect(() => {
     const handle = window.setTimeout(() => {
       const trimmed = query.trim();
+      if (trimmed !== debouncedQuery) setPage(1);
       setDebouncedQuery(trimmed);
       if (!trimmed && !hasAnyFilter) {
         setState({ kind: 'idle' });
       }
     }, 250);
     return () => window.clearTimeout(handle);
-  }, [query, hasAnyFilter]);
+  }, [query, debouncedQuery, hasAnyFilter]);
 
   useEffect(() => {
+    const href = searchLocationHref({ query: debouncedQuery, categorySlugs, tagSlugs, sourceTypes, page });
+    if (restoringLocationRef.current && restoringLocationRef.current !== href) return;
+    restoringLocationRef.current = null;
+    writtenLocationRef.current = href.split('?')[1] ?? '';
+    window.history.replaceState(null, '', href);
     if (!debouncedQuery && !hasAnyFilter) {
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     const run = async () => {
       setState({ kind: 'loading' });
       try {
@@ -152,32 +178,26 @@ function SearchClient() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             query: debouncedQuery,
-            limit: 20,
-            offset: 0,
+            limit: SEARCH_PAGE_SIZE,
+            offset: (page - 1) * SEARCH_PAGE_SIZE,
             category_slugs: categorySlugs,
             tag_slugs: tagSlugs,
             source_types: sourceTypes,
           }),
+          signal: controller.signal,
         });
         if (cancelled) {
           return;
         }
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
-          throw new Error(body.detail || '搜索请求失败');
+          throw new Error(typeof body.detail === 'string' ? body.detail : body.detail?.message || '搜索请求失败');
         }
         const payload = (await response.json()) as SearchResponse;
         if (cancelled) {
           return;
         }
         setState({ kind: 'ready', payload });
-        const params = new URLSearchParams();
-        if (debouncedQuery) params.set('q', debouncedQuery);
-        window.history.replaceState(
-          null,
-          '',
-          params.size ? `/search?${params.toString()}` : '/search',
-        );
       } catch (err) {
         if (cancelled) {
           return;
@@ -191,6 +211,7 @@ function SearchClient() {
     void run();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [
     debouncedQuery,
@@ -199,19 +220,23 @@ function SearchClient() {
     sourceTypes,
     retryNonce,
     hasAnyFilter,
+    page,
   ]);
 
   const toggleCategory = (slug: string) => {
+    setPage(1);
     setCategorySlugs((prev) =>
       prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
     );
   };
   const toggleTag = (slug: string) => {
+    setPage(1);
     setTagSlugs((prev) =>
       prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
     );
   };
   const toggleSourceType = (value: string) => {
+    setPage(1);
     setSourceTypes((prev) =>
       prev.includes(value) ? prev.filter((s) => s !== value) : [...prev, value],
     );
@@ -234,6 +259,7 @@ function SearchClient() {
         className="mt-6"
         onSubmit={(event) => {
           event.preventDefault();
+          setPage(1);
           setDebouncedQuery(query.trim());
           setRetryNonce((value) => value + 1);
         }}
@@ -265,6 +291,7 @@ function SearchClient() {
                 setCategorySlugs([]);
                 setTagSlugs([]);
                 setSourceTypes([]);
+                setPage(1);
               }}
               className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
             >
@@ -304,15 +331,23 @@ function SearchClient() {
             onRetry={() => setRetryNonce((value) => value + 1)}
           />
         )}
-        {(debouncedQuery || hasAnyFilter) && state.kind === 'ready' &&
-          (state.payload.hits.length === 0 ? (
-            <EmptyState
-              heading="没有找到匹配的资料"
-              description="试试调整关键词、清空筛选，或确认相关资料已经被成功解析。"
-            />
-          ) : (
-            <Results payload={state.payload} />
-          ))}
+        {(debouncedQuery || hasAnyFilter) && state.kind === 'ready' && (
+          <>
+            {state.payload.hits.length === 0 ? (
+              <EmptyState
+                heading={page > 1 ? '这一页没有更多结果' : '没有找到匹配的资料'}
+                description={page > 1 ? '可以返回上一页，或缩小范围重新搜索。关键词检索只返回有界候选，不代表已遍历全部资料。' : '试试调整关键词、清空筛选，或确认相关资料已经被成功解析。'}
+              />
+            ) : <Results payload={state.payload} />}
+            <nav aria-label="搜索结果分页" className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs text-slate-500">第 {page} 页 · 每页最多 {SEARCH_PAGE_SIZE} 条</p>
+              <div className="flex gap-2">
+                <button type="button" disabled={page <= 1} onClick={() => setPage((current) => current - 1)} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-40">上一页</button>
+                <button type="button" disabled={state.payload.hits.length === 0 || state.payload.offset + state.payload.hits.length >= state.payload.total || (state.payload.retrieval?.mode !== 'filters' && !state.payload.retrieval?.vector_used && state.payload.offset + state.payload.hits.length >= 50) || page >= 501} onClick={() => setPage((current) => current + 1)} className="rounded-lg border px-3 py-2 text-sm disabled:opacity-40">下一页</button>
+              </div>
+            </nav>
+          </>
+        )}
       </section>
     </main>
   );
@@ -438,15 +473,16 @@ function Results({ payload }: { payload: SearchResponse }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        命中 {payload.total} 条 ·{' '}
+        {payload.retrieval?.mode === 'filters' ? `筛选命中 ${payload.total} 条` : payload.retrieval?.vector_used ? `本次召回 ${payload.total} 个候选` : `关键词命中 ${payload.total} 条（可浏览前 50 个候选）`} ·{' '}
         {payload.retrieval?.mode === 'filters'
           ? '按更新时间展示筛选结果'
           : payload.retrieval?.vector_used
             ? '关键词 + 向量混合排序'
             : '关键词排序'}{' '}
         ·
-        显示 {payload.hits.length} 条
+        显示第 {payload.offset + 1}–{payload.offset + payload.hits.length} 条
       </p>
+      {payload.retrieval?.mode !== 'filters' && <p className="text-xs text-slate-500">关键词与混合检索使用有界候选，候选数不是全库统计；需要完整浏览时请清空关键词，使用分类、标签或来源筛选。</p>}
       {payload.retrieval?.degraded_reason && (
         <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           {payload.retrieval.degraded_reason}
@@ -473,7 +509,7 @@ function Results({ payload }: { payload: SearchResponse }) {
                 <p className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
                   {evidence.context || evidence.snippet}
                 </p>
-                <Link href={`/documents/${evidence.document_id}?chunk_id=${evidence.chunk.id}${evidence.chunk.page ? `&page=${evidence.chunk.page}` : ''}`} className="mt-2 inline-block text-sm text-slate-700 underline">
+                <Link href={searchEvidenceHref(evidence.document_id, evidence.chunk)} className="mt-2 inline-block text-sm text-slate-700 underline">
                   查看来源文档
                 </Link>
               </details>
@@ -492,7 +528,7 @@ function ResultHeader({ hit }: { hit: SearchHit }) {
   return (
     <div className="flex flex-wrap items-baseline gap-2">
       <Link
-        href={`/documents/${hit.document_id}`}
+        href={searchEvidenceHref(hit.document_id, hit.chunk)}
         className="text-base font-semibold text-slate-900 hover:underline"
       >
         {hit.title}

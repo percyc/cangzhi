@@ -6,6 +6,7 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
+import { askPreferencesKey, validateAskPreferences } from '@/lib/ask-search-state';
 import {
   EvidenceDrawer,
   type EvidenceCitation,
@@ -190,8 +191,6 @@ type AskStreamEvent =
   | { type: 'result'; data: AskResponse }
   | { type: 'error'; error: { code?: string; message?: string } };
 
-const ASK_SESSION_KEY = 'cangzhi:ask-preferences:v2';
-
 export default function AskPage() {
   return (
     <Suspense fallback={<AskSkeleton />}>
@@ -223,6 +222,7 @@ function AskClient() {
   const [connectorIds, setConnectorIds] = useState<number[]>([]);
   const [filterOpen, setFilterOpen] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
+  const [preferencesNotice, setPreferencesNotice] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -236,52 +236,57 @@ function AskClient() {
   const endRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const requestAbortRef = useRef<AbortController | null>(null);
+  const historyAbortRef = useRef<AbortController | null>(null);
+  const viewRevisionRef = useRef(0);
+  const questionRevisionRef = useRef(0);
+  const questionRef = useRef(question);
+  const conversationRef = useRef(conversationId);
+  const preferencesKeyRef = useRef<string | null>(null);
+  const conversationListRevisionRef = useRef(0);
+  questionRef.current = question;
+  conversationRef.current = conversationId;
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      viewRevisionRef.current += 1;
       requestAbortRef.current?.abort();
+      historyAbortRef.current?.abort();
     };
   }, []);
 
   useEffect(() => {
+    if (sessionReady || !facets || scopes.length === 0) return;
     const timer = window.setTimeout(() => {
+      const key = askPreferencesKey(document.cookie);
+      preferencesKeyRef.current = key;
       try {
-        const saved = window.sessionStorage.getItem(ASK_SESSION_KEY);
-        if (saved) {
-          const value = JSON.parse(saved) as {
-            scopeSlug?: string;
-            categoryIds?: number[];
-            tagIds?: number[];
-            sourceTypes?: string[];
-            connectorIds?: number[];
-            question?: string;
-            mode?: 'quick' | 'deep';
-          };
-          if (typeof value.scopeSlug === 'string') setScopeSlug(value.scopeSlug);
-          if (Array.isArray(value.categoryIds)) setCategoryIds(value.categoryIds);
-          if (Array.isArray(value.tagIds)) setTagIds(value.tagIds);
-          if (Array.isArray(value.sourceTypes)) setSourceTypes(value.sourceTypes);
-          if (Array.isArray(value.connectorIds))
-            setConnectorIds(value.connectorIds);
-          if (!searchParams.get('q') && typeof value.question === 'string') {
-            setQuestion(value.question);
-          }
-          if (value.mode === 'quick' || value.mode === 'deep') setMode(value.mode);
+        const saved = window.sessionStorage.getItem(key);
+        const { preferences, filtersRemoved } = validateAskPreferences(saved ? JSON.parse(saved) : null, { ...facets, scopes });
+        setScopeSlug(preferences.scopeSlug);
+        setCategoryIds(preferences.categoryIds);
+        setTagIds(preferences.tagIds);
+        setSourceTypes(preferences.sourceTypes);
+        setConnectorIds(preferences.connectorIds);
+        setMode(preferences.mode);
+        if (!searchParams.get('q') && questionRevisionRef.current === 0) {
+          setQuestion(preferences.question);
         }
+        if (filtersRemoved) setPreferencesNotice('已移除当前空间中失效的知识范围或筛选项，请确认范围后再提问。');
       } catch {
-        window.sessionStorage.removeItem(ASK_SESSION_KEY);
+        // Storage can be unavailable in private or restricted browser contexts.
       } finally {
         setSessionReady(true);
       }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [searchParams]);
+  }, [facets, scopes, searchParams, sessionReady]);
 
   useEffect(() => {
-    if (!sessionReady) return;
-    window.sessionStorage.setItem(
-      ASK_SESSION_KEY,
+    if (!sessionReady || !preferencesKeyRef.current) return;
+    try { window.sessionStorage.setItem(
+      preferencesKeyRef.current,
       JSON.stringify({
         scopeSlug,
         categoryIds,
@@ -291,7 +296,7 @@ function AskClient() {
         question,
         mode,
       }),
-    );
+    ); } catch { /* A storage failure must not block asking. */ }
   }, [
     scopeSlug,
     categoryIds,
@@ -304,28 +309,33 @@ function AskClient() {
   ]);
 
   useEffect(() => {
+    if (!sessionReady) return;
     let cancelled = false;
+    const revision = viewRevisionRef.current;
+    const listRevision = ++conversationListRevisionRef.current;
     const load = async () => {
       try {
         const response = await fetch('/api/ask/conversations', { cache: 'no-store' });
         if (!response.ok) throw new Error('问答记录加载失败');
         const payload = (await response.json()) as { items: ConversationSummary[] };
-        if (cancelled) return;
+        if (cancelled || listRevision !== conversationListRevisionRef.current) return;
         setConversations(payload.items);
-        if (!searchParams.get('q') && payload.items[0]) {
+        if (!searchParams.get('q') && !questionRef.current && questionRevisionRef.current === 0 && revision === viewRevisionRef.current && payload.items[0]) {
           await loadConversation(payload.items[0].id);
         }
       } catch (reason) {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : '问答记录加载失败');
+        if (!cancelled && revision === viewRevisionRef.current) setError(reason instanceof Error ? reason.message : '问答记录加载失败');
       }
     };
     void load();
     return () => { cancelled = true; };
-  // Initial cloud restore only; URL search params are stable for this page mount.
+  // Restore local workspace preferences before deciding whether to open history.
+  // Do not reopen history when a later URL or input change occurs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sessionReady]);
 
   useEffect(() => {
+    let cancelled = false;
     Promise.all([
       fetch('/api/v1/knowledge/scopes', { cache: 'no-store' }).then(
         async (response) => {
@@ -350,37 +360,68 @@ function AskClient() {
           if (!response.ok) throw new Error('数据集状态加载失败');
           return (await response.json()) as DatasetSummary;
         },
-      ),
+      ).catch(() => null),
     ])
       .then(([scopeResult, status, facetResult, datasetResult]) => {
+        if (cancelled) return;
         setScopes(scopeResult.items);
         setProviderReady(status.provider_configured);
         setFacets(facetResult);
         setDatasetSummary(datasetResult);
       })
       .catch((reason: unknown) => {
+        if (cancelled) return;
         setError(reason instanceof Error ? reason.message : '初始化失败');
       });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [turns, loading, liveAnalysis]);
 
-  const refreshConversations = async () => {
+  const refreshConversations = async (revision = viewRevisionRef.current) => {
+    const listRevision = ++conversationListRevisionRef.current;
     const response = await fetch('/api/ask/conversations', { cache: 'no-store' });
     if (!response.ok) throw new Error('问答记录加载失败');
     const payload = (await response.json()) as { items: ConversationSummary[] };
-    if (mountedRef.current) setConversations(payload.items);
+    if (mountedRef.current && revision === viewRevisionRef.current && listRevision === conversationListRevisionRef.current) setConversations(payload.items);
+  };
+
+  const invalidateViewRequests = () => {
+    viewRevisionRef.current += 1;
+    requestAbortRef.current?.abort();
+    requestAbortRef.current = null;
+    historyAbortRef.current?.abort();
+    historyAbortRef.current = null;
+    setLoading(false);
+    setLiveAnalysis(null);
+    setHistoryLoading(false);
+    setSelectedCitation(null);
+    return viewRevisionRef.current;
+  };
+
+  const editQuestion = (value: string) => {
+    questionRevisionRef.current += 1;
+    questionRef.current = value;
+    setQuestion(value);
   };
 
   async function loadConversation(id: number) {
+    const revision = invalidateViewRequests();
+    const controller = new AbortController();
+    historyAbortRef.current = controller;
+    setConversationId(id);
+    conversationRef.current = id;
+    setTurns([]);
+    setError(null);
     setHistoryLoading(true);
+    const isCurrent = () => mountedRef.current && viewRevisionRef.current === revision && !controller.signal.aborted;
     try {
-      const response = await fetch(`/api/ask/conversations/${id}`, { cache: 'no-store' });
+      const response = await fetch(`/api/ask/conversations/${id}`, { cache: 'no-store', signal: controller.signal });
       if (!response.ok) throw new Error('问答记录读取失败');
       const payload = (await response.json()) as ConversationDetail;
-      if (!mountedRef.current) return;
+      if (!isCurrent()) return;
       setConversationId(payload.id);
       setTurns(payload.turns.map((turn) => ({
         id: turn.id,
@@ -392,15 +433,22 @@ function AskClient() {
       setHistoryOpen(false);
       setError(null);
       window.history.replaceState(null, '', '/ask');
+    } catch (reason) {
+      if (isCurrent()) setError(reason instanceof Error ? reason.message : '问答记录读取失败');
     } finally {
-      if (mountedRef.current) setHistoryLoading(false);
+      if (isCurrent()) {
+        historyAbortRef.current = null;
+        setHistoryLoading(false);
+      }
     }
   }
 
   const startNewConversation = () => {
+    invalidateViewRequests();
+    conversationRef.current = null;
     setConversationId(null);
     setTurns([]);
-    setQuestion('');
+    editQuestion('');
     setError(null);
     setHistoryOpen(false);
     window.history.replaceState(null, '', '/ask');
@@ -409,15 +457,18 @@ function AskClient() {
   const deleteConversation = async (id: number) => {
     const response = await fetch(`/api/ask/conversations/${id}`, { method: 'DELETE' });
     if (!response.ok) throw new Error('删除问答记录失败');
-    if (conversationId === id) startNewConversation();
+    if (conversationRef.current === id) startNewConversation();
     await refreshConversations();
   };
 
   const runAsk = async () => {
     const trimmed = question.trim();
-    if (!trimmed || loading || requestAbortRef.current) return;
+    if (!trimmed || !sessionReady || historyLoading || loading || requestAbortRef.current) return;
+    const revision = invalidateViewRequests();
+    const questionRevision = questionRevisionRef.current;
     const controller = new AbortController();
     requestAbortRef.current = controller;
+    const isCurrent = () => mountedRef.current && viewRevisionRef.current === revision && requestAbortRef.current === controller && !controller.signal.aborted;
     setLoading(true);
     setError(null);
     const contextLabel = buildContextLabel(
@@ -440,8 +491,6 @@ function AskClient() {
       });
     }
     let targetConversationId = conversationId;
-    let createdConversation = false;
-    let answerSaved = false;
     try {
       if (targetConversationId === null) {
         const createdResponse = await fetch('/api/ask/conversations', {
@@ -452,8 +501,9 @@ function AskClient() {
         });
         if (!createdResponse.ok) throw new Error('无法创建问答记录');
         const created = (await createdResponse.json()) as ConversationSummary;
+        if (!isCurrent()) return;
         targetConversationId = created.id;
-        createdConversation = true;
+        conversationRef.current = created.id;
         setConversationId(created.id);
       }
       const requestBody = {
@@ -491,9 +541,9 @@ function AskClient() {
         mode === 'deep'
           ? await readAskStream(response, (event) => {
               if (event.type !== 'progress') return;
-              if (!mountedRef.current) return;
+              if (!isCurrent()) return;
               setLiveAnalysis((current) => {
-                if (!current) return current;
+                if (!current || !isCurrent()) return current;
                 const steps = event.step
                   ? [...current.steps, event.step]
                   : current.steps;
@@ -516,7 +566,8 @@ function AskClient() {
               });
             })
           : ((await response.json()) as AskResponse);
-      setTurns((current) => [
+      if (!isCurrent()) return;
+      setTurns((current) => viewRevisionRef.current !== revision ? current : [
         ...current,
         {
           id: body.history?.turn_id ?? Date.now(),
@@ -526,24 +577,18 @@ function AskClient() {
           mode,
         },
       ]);
-      setQuestion('');
+      if (questionRevision === questionRevisionRef.current) setQuestion('');
       window.history.replaceState(null, '', '/ask');
-      answerSaved = true;
-      void refreshConversations().catch(() => undefined);
+      void refreshConversations(revision).catch(() => undefined);
     } catch (reason) {
-      if (createdConversation && !answerSaved && targetConversationId !== null) {
-        await fetch(`/api/ask/conversations/${targetConversationId}`, { method: 'DELETE' }).catch(() => undefined);
-        if (mountedRef.current) setConversationId(null);
-      }
-      if (reason instanceof DOMException && reason.name === 'AbortError') return;
-      if (mountedRef.current) {
+      // A lost response does not prove the server failed to save the answer.
+      // Never delete a conversation automatically on cancellation/network failure.
+      if (isCurrent()) {
         setError(reason instanceof Error ? reason.message : '问答失败');
       }
     } finally {
-      if (requestAbortRef.current === controller) {
+      if (isCurrent()) {
         requestAbortRef.current = null;
-      }
-      if (mountedRef.current) {
         setLiveAnalysis(null);
         setLoading(false);
       }
@@ -551,7 +596,8 @@ function AskClient() {
   };
 
   const cancelAsk = () => {
-    requestAbortRef.current?.abort();
+    invalidateViewRequests();
+    setError(null);
   };
 
   const selectedScope = scopes.find((item) => item.slug === scopeSlug);
@@ -610,6 +656,7 @@ function AskClient() {
               <button
                 key={`${scope.system ? 'system' : 'saved'}-${scope.slug}`}
                 type="button"
+                disabled={!sessionReady}
                 onClick={() => changeScope(scope.slug)}
                 className={`w-full rounded-xl px-3 py-2 text-left text-sm transition ${
                   scopeSlug === scope.slug
@@ -654,6 +701,7 @@ function AskClient() {
             </Link>
             <button
               type="button"
+              disabled={!sessionReady}
               onClick={() => setFilterOpen(true)}
               className="flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2 py-2 text-left hover:bg-slate-100"
             >
@@ -670,6 +718,7 @@ function AskClient() {
           </div>
           <button
             type="button"
+            disabled={!sessionReady}
             onClick={() => setMode((current) => current === 'quick' ? 'deep' : 'quick')}
             className={`shrink-0 rounded-xl px-3 py-2 text-xs font-semibold sm:hidden ${
               mode === 'deep'
@@ -687,6 +736,7 @@ function AskClient() {
             <div className="absolute right-0 z-30 mt-2 w-40 rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-xl shadow-slate-950/10">
               <button
                 type="button"
+                disabled={!sessionReady}
                 onClick={(event) => {
                   setFilterOpen(true);
                   event.currentTarget.closest('details')?.removeAttribute('open');
@@ -726,6 +776,7 @@ function AskClient() {
                 <button
                   key={item}
                   type="button"
+                  disabled={!sessionReady}
                   onClick={() => setMode(item)}
                   className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
                     mode === item
@@ -744,6 +795,7 @@ function AskClient() {
             </div>
             <select
               value={scopeSlug}
+              disabled={!sessionReady}
               onChange={(event) => changeScope(event.target.value)}
               className="min-w-28 max-w-40 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 lg:hidden"
               aria-label="知识范围"
@@ -756,6 +808,7 @@ function AskClient() {
             </select>
             <button
               type="button"
+              disabled={!sessionReady}
               onClick={() => setFilterOpen((current) => !current)}
               className={`shrink-0 rounded-xl border px-3 py-2 text-xs font-medium ${
                 refinementCount > 0
@@ -821,7 +874,7 @@ function AskClient() {
           </div>
         )}
 
-        {filterOpen && (
+        {filterOpen && sessionReady && (
           <>
             <div className="hidden sm:block">
               <FacetPanel
@@ -872,6 +925,7 @@ function AskClient() {
                         <button
                           key={`mobile-${scope.slug}`}
                           type="button"
+                          disabled={!sessionReady}
                           onClick={() => changeScope(scope.slug)}
                           className={`rounded-full border px-3 py-1.5 text-xs font-medium ${
                             scopeSlug === scope.slug
@@ -916,7 +970,7 @@ function AskClient() {
           {turns.length === 0 && !loading && (
             <WelcomeState
               disabled={providerReady === false}
-              onExample={setQuestion}
+              onExample={editQuestion}
             />
           )}
           <div className="mx-auto w-full max-w-5xl space-y-6 sm:space-y-8">
@@ -950,6 +1004,13 @@ function AskClient() {
               </Link>
             </p>
           )}
+          {!sessionReady && !error && (
+            <p role="status" className="mb-3 text-xs text-slate-500">正在加载当前空间的知识范围与问答偏好，你可以先输入问题…</p>
+          )}
+          {preferencesNotice && (
+            <p role="status" className="mb-3 rounded-xl bg-amber-50 px-4 py-3 text-xs text-amber-800">{preferencesNotice}</p>
+          )}
+          {historyLoading && <p role="status" className="mb-3 text-sm text-slate-500">正在读取所选问答记录…</p>}
           {error && (
             <p className="mb-3 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">
               {error}
@@ -964,6 +1025,7 @@ function AskClient() {
               {mode === 'quick' && (
                 <button
                   type="button"
+                  disabled={!sessionReady}
                   onClick={() => setMode('deep')}
                   className="font-medium text-indigo-700 hover:underline"
                 >
@@ -981,7 +1043,7 @@ function AskClient() {
           >
             <textarea
               value={question}
-              onChange={(event) => setQuestion(event.target.value)}
+              onChange={(event) => editQuestion(event.target.value)}
               onKeyDown={(event) => {
                 if (
                   event.key === 'Enter' &&
@@ -1009,7 +1071,7 @@ function AskClient() {
             ) : (
               <button
                 type="submit"
-                disabled={!question.trim() || providerReady === false}
+                disabled={!question.trim() || !sessionReady || historyLoading || providerReady === false}
                 className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
               >
                 发送
