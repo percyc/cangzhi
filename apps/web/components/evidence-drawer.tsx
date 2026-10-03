@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
@@ -75,21 +75,40 @@ type EvidenceRows = {
 export function EvidenceDrawer({
   citation,
   onClose,
+  active = true,
 }: {
   citation: EvidenceCitation | null;
   onClose: () => void;
+  active?: boolean;
 }) {
+  if (!citation) return (
+    <section aria-label="引用证据" className="flex h-full flex-col items-center justify-center gap-3 bg-slate-50 p-6 text-center">
+      <p className="text-sm font-semibold text-slate-700">在回答旁核对原文</p>
+      <p className="max-w-xs text-xs leading-6 text-slate-500">点击回答中的引用编号，原文、文档版本或精确数据行会显示在这里；不会离开当前问答。</p>
+      <button type="button" onClick={onClose} className="rounded-lg border px-3 py-2 text-xs text-slate-600">收起证据</button>
+    </section>
+  );
+  // A different citation (including different contributing rows) starts a clean
+  // reader. Collapsing the panel does not unmount it or lose its scroll/view.
+  return <EvidenceReader key={JSON.stringify(citation)} citation={citation} onClose={onClose} active={active} />;
+}
+
+function EvidenceReader({ citation, onClose, active }: { citation: EvidenceCitation; onClose: () => void; active: boolean }) {
   const [context, setContext] = useState<EvidenceContext | null>(null);
   const [rows, setRows] = useState<EvidenceRows | null>(null);
   const [loading, setLoading] = useState(Boolean(citation));
   const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
+  const requestRevisionRef = useRef(0);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const [view, setView] = useState<'parsed' | 'original'>(
     citation?.evidence_type === 'pdf_word' ? 'original' : 'parsed',
   );
 
   useEffect(() => {
-    if (!citation) return;
     const controller = new AbortController();
+    const revision = ++requestRevisionRef.current;
+    const isCurrent = () => !controller.signal.aborted && revision === requestRevisionRef.current;
     void (async () => {
       try {
         const response = await fetch(
@@ -98,6 +117,8 @@ export function EvidenceDrawer({
         );
         if (!response.ok) throw new Error(await apiError(response, '证据读取失败'));
         const resolved = (await response.json()) as EvidenceContext;
+        if (!isCurrent()) return;
+        if (resolved.document_id !== citation.document_id || resolved.document_version_id !== citation.document_version_id) throw new Error('证据版本与引用不一致，请重新打开引用核对。');
         setContext(resolved);
         const datasetId = citation.dataset_id ?? resolved.dataset?.dataset_id;
         const sourceRows = citation.source_rows ?? [];
@@ -118,63 +139,50 @@ export function EvidenceDrawer({
           if (!rowResponse.ok) {
             throw new Error(await apiError(rowResponse, '原始数据行读取失败'));
           }
-          setRows((await rowResponse.json()) as EvidenceRows);
+          const resolvedRows = (await rowResponse.json()) as EvidenceRows;
+          if (!isCurrent()) return;
+          setRows(resolvedRows);
         }
       } catch (reason) {
-        if (!controller.signal.aborted) {
+        if (isCurrent()) {
           setError(reason instanceof Error ? reason.message : '证据读取失败');
         }
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (isCurrent()) setLoading(false);
       }
     })();
     return () => controller.abort();
-  }, [citation]);
+  }, [citation, retry]);
 
   useEffect(() => {
-    if (!citation) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    const close = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', close);
-    return () => {
-      document.body.style.overflow = previous;
-      window.removeEventListener('keydown', close);
-    };
-  }, [citation, onClose]);
+    if (active) headingRef.current?.focus({ preventScroll: true });
+  }, [active]);
 
   const originalUrl = useMemo(() => {
-    if (!context) return null;
+    if (!context || context.evidence_type !== 'pdf_word') return null;
     const raw =
       context.document_type === 'pdf'
         ? context.original_url ?? context.preview_url
         : context.preview_url ?? context.original_url;
     if (!raw) return null;
-    const mounted = raw.startsWith('/api/') ? withApiBasePath(raw) : raw;
+    // Embed only our version-bound PDF endpoints, never a website or executable URL.
+    const safe = safePreviewPath(raw, context.document_id, context.document_version_id);
+    if (!safe) return null;
+    const mounted = withApiBasePath(safe);
     return mounted && context.page ? `${mounted}#page=${context.page}` : mounted;
   }, [context]);
 
-  if (!citation) return null;
   const isDataset =
     citation.evidence_type === 'dataset' || context?.evidence_type === 'dataset';
 
   return (
-    <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="引用证据">
-      <button
-        type="button"
-        aria-label="关闭证据"
-        className="absolute inset-0 bg-slate-950/35 backdrop-blur-[1px]"
-        onClick={onClose}
-      />
-      <aside className="absolute inset-0 flex h-[100dvh] flex-col bg-white shadow-2xl sm:left-auto sm:w-[min(860px,94vw)]">
+      <section aria-label="引用证据" className="flex h-full min-h-0 min-w-0 flex-col bg-white" onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); onClose(); } }}>
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-4 pt-[max(1rem,env(safe-area-inset-top))] pb-3 sm:gap-4 sm:px-6 sm:py-4">
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-600">
               {isDataset ? '数据证据' : '原文证据'} · 版本 {citation.document_version_id}
             </p>
-            <h2 className="mt-1 truncate text-base font-semibold text-slate-900">
+            <h2 ref={headingRef} tabIndex={-1} className="mt-1 break-words text-base font-semibold text-slate-900 outline-none">
               {citation.title}
             </h2>
             <p className="mt-1 text-xs text-slate-500">
@@ -187,8 +195,7 @@ export function EvidenceDrawer({
             onClick={onClose}
             className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
           >
-            <span className="sm:hidden">← 返回对话</span>
-            <span className="hidden sm:inline">关闭</span>
+            收起证据
           </button>
         </header>
 
@@ -199,16 +206,16 @@ export function EvidenceDrawer({
           </nav>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/60 p-4 sm:p-6">
+        <div className="min-h-0 flex-1 overflow-y-auto break-words bg-slate-50/60 p-4 [overflow-wrap:anywhere] sm:p-5">
           {loading && <p className="text-sm text-slate-500">正在核对引用版本并读取证据…</p>}
-          {error && <p className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-          {context && isDataset && <DatasetEvidence citation={citation} context={context} rows={rows} />}
-          {context && !isDataset && view === 'original' && originalUrl && (
+          {error && <div role="alert" className="mb-3 rounded-xl bg-red-50 p-3 text-sm text-red-700"><p>{error}</p><button type="button" onClick={() => { requestRevisionRef.current += 1; setContext(null); setRows(null); setError(''); setLoading(true); setRetry((value) => value + 1); }} className="mt-2 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold">重试证据读取</button></div>}
+          {context && !loading && !error && isDataset && <DatasetEvidence citation={citation} context={context} rows={rows} />}
+          {context && !loading && !error && !isDataset && view === 'original' && originalUrl && (
             <div className="h-full min-h-[20rem] overflow-hidden rounded-2xl border border-slate-200 bg-white">
               <iframe title={`${citation.title} 原版预览`} src={originalUrl} className="h-full w-full" />
             </div>
           )}
-          {context && !isDataset && (view === 'parsed' || !originalUrl) && (
+          {context && !loading && !error && !isDataset && (view === 'parsed' || !originalUrl) && (
             <DocumentEvidence context={context} citation={citation} />
           )}
         </div>
@@ -219,7 +226,7 @@ export function EvidenceDrawer({
             onClick={onClose}
             className="text-xs font-semibold text-slate-700 sm:hidden"
           >
-            ← 返回对话
+            ← 返回问答
           </button>
           <span className="hidden text-[11px] text-slate-400 sm:inline">证据固定到回答生成时的版本</span>
           <Link
@@ -229,8 +236,7 @@ export function EvidenceDrawer({
             查看完整文档 →
           </Link>
         </footer>
-      </aside>
-    </div>
+      </section>
   );
 }
 
@@ -251,8 +257,14 @@ function DocumentEvidence({
       </section>
       <section className="rounded-2xl border border-slate-200 bg-white p-5">
         <p className="mb-4 text-[11px] font-semibold text-slate-500">所在章节 / 段落</p>
-        <div className="prose prose-slate max-w-none text-sm leading-7">
-          <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+        <div className="prose prose-slate max-w-none text-sm leading-7 [&_table]:block [&_table]:overflow-x-auto">
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={{
+            img: ({ alt }) => <span className="text-xs text-slate-400">[图片未自动加载{alt ? `：${alt}` : ''}]</span>,
+            a: ({ href, children }) => {
+              const safe = safeHttpLink(href);
+              return safe ? <a href={safe} target="_blank" rel="noopener noreferrer" className="underline">{children}</a> : <span>{children}</span>;
+            },
+          }}>
             {context.context_markdown || context.snippet}
           </ReactMarkdown>
         </div>
@@ -318,7 +330,7 @@ function DatasetEvidence({
           </div>
         ) : (
           <p className="p-4 text-xs leading-5 text-slate-500">
-            {citation.source_rows?.length ? '正在读取原始贡献行…' : '该引用来自旧版回答，只能显示当时保存的片段；重新提问后会记录精确贡献行。'}
+            {citation.source_rows?.length ? '该版本未返回对应的原始贡献行，请核对引用或重试读取。' : '该引用来自旧版回答，只能显示当时保存的片段；重新提问后会记录精确贡献行。'}
           </p>
         )}
       </section>
@@ -358,4 +370,19 @@ async function apiError(response: Response, fallback: string) {
   } catch {
     return fallback;
   }
+}
+
+function safePreviewPath(raw: string, documentId: number, versionId: number): string | null {
+  if (!raw.startsWith('/api/')) return null;
+  try {
+    const url = new URL(raw, 'https://cangzhi.invalid');
+    if (url.origin !== 'https://cangzhi.invalid' || ![`/api/documents/${documentId}/preview`, `/api/documents/${documentId}/original`].includes(url.pathname)) return null;
+    const versions = url.searchParams.getAll('version_id');
+    return versions.length === 1 && versions[0] === String(versionId) ? `${url.pathname}${url.search}` : null;
+  } catch { return null; }
+}
+
+function safeHttpLink(raw?: string): string | null {
+  if (!raw) return null;
+  try { const url = new URL(raw); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch { return null; }
 }

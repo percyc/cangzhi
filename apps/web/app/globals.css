@@ -153,7 +153,7 @@ details > summary::-webkit-details-marker {
     height: 100dvh;
     min-height: 100dvh;
     max-height: 100dvh;
-    padding: 0 !important;
+    padding: 0.5rem !important;
   }
 }
 

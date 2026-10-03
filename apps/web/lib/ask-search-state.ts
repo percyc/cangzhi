@@ -1,9 +1,10 @@
 // UI state only: retrieval and authorization remain owned by the API.
-export function askPreferencesKey(cookie: string): string {
+export function askPreferencesKey(cookie: string, documentIds: readonly number[] = []): string {
   const raw = cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith('cangzhi_workspace='))?.slice('cangzhi_workspace='.length);
   let workspace = 'default';
   try { workspace = raw ? decodeURIComponent(raw) : workspace; } catch { /* Invalid cookies use the server default. */ }
-  return `cangzhi:ask-preferences:v3:${encodeURIComponent(workspace)}`;
+  const documents = [...new Set(documentIds)].sort((a, b) => a - b);
+  return `cangzhi:ask-preferences:v3:${encodeURIComponent(workspace)}${documents.length ? `:documents:${documents.join(',')}` : ''}`;
 }
 
 export type AskPreferences = {

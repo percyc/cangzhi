@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test:ux": "node --test tests/*.test.cjs"
+    "test:ux": "node --test tests/*.test.cjs",
+    "test:browser": "node tests/browser/workbench.cjs"
   },
   "dependencies": {
     "next": "16.2.12",
@@ -25,6 +26,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "9.39.5",
     "eslint-config-next": "16.2.12",
+    "playwright": "1.63.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.7.2"

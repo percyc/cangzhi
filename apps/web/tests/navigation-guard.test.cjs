@@ -11,7 +11,7 @@ function load(file, globals = {}, mocks = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText;
   const mod = { exports: {} };
-  vm.runInNewContext(code, { module: mod, exports: mod.exports, require: id => mocks[id] || require(id), URL, queueMicrotask, ...globals });
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require: id => mocks[id] || require(id), URL, setTimeout, ...globals });
   return mod.exports;
 }
 
@@ -77,7 +77,7 @@ test('approved navigation bypass lasts for this event only, including nesting', 
     s.lib.runWithoutNavigationGuard(() => assert.equal(s.lib.confirmNavigation(), true));
   });
   assert.equal(s.lib.confirmNavigation(), true);
-  await Promise.resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(s.lib.confirmNavigation(), false);
   s.cleanup();
 });
@@ -102,13 +102,39 @@ test('cancelled browser back restores the indexed position without losing Next s
   s.cleanup();
 });
 
-test('cancelled browser forward moves backward rather than pushing a duplicate entry', () => {
+test('cancelled browser forward moves backward rather than pushing a duplicate entry', async () => {
   const s = surface(), first = s.window.history.state;
   s.window.history.pushState({}, '', '/documents'); const second = s.window.history.state;
   s.windowEvents.popstate(s.event({ state: first }));
+  await new Promise(resolve => setTimeout(resolve, 0));
   s.lib.registerUnsavedChanges('未保存');
   s.windowEvents.popstate(s.event({ state: second }));
   assert.deepEqual(s.moves, [-1]);
+  s.cleanup();
+});
+
+test('a router replacement during traversal cannot stamp the previous position onto the destination', () => {
+  const s = surface(), first = s.window.history.state;
+  s.window.history.pushState({ tree: 'next' }, '', '/editor');
+  s.lib.registerUnsavedChanges('未保存');
+  s.window.history.state = first; // Browser moved before a router insertion effect.
+  s.window.history.replaceState({ tree: 'router' }, '', '/notes/new');
+  assert.equal(s.window.history.state.__cangzhiNavigationPosition, 0);
+  const back = s.event({ state: first }); s.windowEvents.popstate(back);
+  assert.equal(back.stopped, true); assert.deepEqual(s.moves, [1]);
+  s.cleanup();
+});
+
+test('native hash entries receive an index and are protected on later return from an editor', () => {
+  const s = surface();
+  s.window.history.state = null;
+  s.windowEvents.hashchange();
+  const anchor = s.window.history.state;
+  assert.equal(anchor.__cangzhiNavigationPosition, 1);
+  s.window.history.pushState({}, '', '/editor');
+  s.lib.registerUnsavedChanges('未保存');
+  const back = s.event({ state: anchor }); s.windowEvents.popstate(back);
+  assert.equal(back.stopped, true); assert.deepEqual(s.moves, [1]);
   s.cleanup();
 });
 

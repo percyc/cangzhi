@@ -127,6 +127,13 @@ export function TopNav() {
     router.refresh();
   };
 
+  const handleLogin = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    const destination = safeLoginReturn(window.location.pathname + window.location.search + window.location.hash);
+    router.push(`/login?next=${encodeURIComponent(destination)}`);
+  };
+
   if (pathname === '/login' || pathname === '/setup') return null;
 
   const status = state.kind === 'ready' ? state.status : null;
@@ -169,6 +176,7 @@ export function TopNav() {
           {state.kind === 'ready' && status && !status.authenticated && !status.setup_required && (
             <Link
               href={loginHref}
+              onClick={handleLogin}
               className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
             >
               登录
@@ -242,7 +250,7 @@ export function TopNav() {
       {status && !status.authenticated && !status.setup_required && (
         <div role="status" className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs leading-5 text-amber-900">
           登录已失效，此页不会自动关闭。随手记与问题草稿保留在当前标签页；未保存的设置请先复制非敏感内容。
-          <Link href={loginHref} className="ml-2 font-semibold underline">重新登录并返回</Link>
+          <Link href={loginHref} onClick={handleLogin} className="ml-2 font-semibold underline">重新登录并返回</Link>
         </div>
       )}
     </header>

@@ -195,6 +195,7 @@ OCR 深度增强和领域解析按[路线图](docs/ROADMAP.md)逐步推进。文
 - [协作者约定：开工前必读与协作约束](AGENTS.md)
 - [项目状态：当前阶段、进行中、风险与下一步](docs/PROJECT_STATUS.md)
 - [全局页面易用性审查与后续改进](docs/USABILITY_REVIEW.md)
+- [阅读工作台、草稿恢复与隔离浏览器验收](docs/WEB_WORKBENCH.md)
 - [开发日志：按时间追加的变更记录](docs/DEVLOG.md)
 - [产品定位：解决的问题、用户闭环与产品边界](docs/PRODUCT.md)
 - [技术架构：事实源、处理管线、检索和安全边界](docs/ARCHITECTURE.md)

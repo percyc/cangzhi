@@ -625,6 +625,7 @@ export default function SettingsPage() {
       />
 
       <form className="mt-6 space-y-6" onSubmit={handleSave}>
+        <fieldset disabled={saveState === 'saving'} className="min-w-0 space-y-6">
         {activePanel === 'chat' && (
         <section className="space-y-5 rounded-2xl border-2 border-blue-200 bg-white p-5 shadow-sm">
           <header className="border-b border-blue-100 pb-4">
@@ -1409,6 +1410,7 @@ export default function SettingsPage() {
             )}
           </div>
         </div>
+        </fieldset>
       </form>
     </main>
   );

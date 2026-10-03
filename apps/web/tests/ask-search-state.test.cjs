@@ -30,9 +30,10 @@ function text(element) {
 const facets = { categories: [{ id: 1, slug: 'one', name: 'One', document_count: 3 }], tags: [], source_types: [{ value: 'note', label: '笔记' }], connectors: [] };
 const answer = value => ({ question: value, answer: value, citations: [], evidence: [], provider: 'mock', model: 'mock', insufficient_evidence: false });
 function harness(route, fetcher, params = '', storage = new Map()) {
-  const slots = [], pending = [], requests = [], timers = new Map();
+  const slots = [], pending = [], requests = [], timers = new Map(), guards = [];
   let cursor = 0, dirty = false, tree, timerId = 0;
-  const current = { params: new URLSearchParams(params), href: '' };
+  const current = { params: new URLSearchParams(params), href: `/${route}${params ? `?${params}` : ''}`, confirm: true };
+  const location = { pathname: `/${route}`, search: params ? `?${params}` : '' };
   const hooks = {
     Suspense: () => null,
     useState(initial) {
@@ -53,13 +54,20 @@ function harness(route, fetcher, params = '', storage = new Map()) {
     react: hooks, 'next/link': 'a', 'next/navigation': { useSearchParams: () => current.params },
     'react-markdown': 'markdown', 'remark-breaks': () => {}, 'remark-gfm': () => {},
     '@/components/evidence-drawer': { EvidenceDrawer: 'drawer' }, '@/lib/ask-search-state': helpers,
+    '@/components/knowledge-preview': { KnowledgePreview: 'knowledge-preview' },
+    '@/lib/paths': { withBasePath: value => value },
+    '@/lib/navigation-guard': { useUnsavedChanges: (...args) => guards.push(args) },
   }, {
     fetch: (url, init = {}) => { requests.push({ url, ...init }); return fetcher(url, init); },
-    document: { cookie: 'cangzhi_workspace=test-space' },
+    HTMLElement: class HTMLElement {},
+    document: { cookie: 'cangzhi_workspace=test-space', activeElement: null },
     window: {
-      history: { replaceState: (_state, _title, href) => { current.href = href; } },
+      location,
+      history: { replaceState: (_state, _title, href) => { current.href = href; location.search = href.includes('?') ? `?${href.split('?')[1]}` : ''; } },
       sessionStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
       setTimeout: fn => { timers.set(++timerId, fn); return timerId; }, clearTimeout: id => timers.delete(id),
+      requestAnimationFrame: fn => fn(),
+      confirm: () => current.confirm,
     },
   }).default().props.children.type;
   const render = () => { cursor = 0; dirty = false; tree = component(); for (const effect of pending.splice(0)) effect(); };
@@ -68,12 +76,12 @@ function harness(route, fetcher, params = '', storage = new Map()) {
   };
   const button = label => nodes(tree).find(node => node.type === 'button' && text(node) === label);
   return {
-    flush, requests, current, storage,
+    flush, requests, current, storage, guards,
     get tree() { return tree; }, button,
     type: value => nodes(tree).find(node => node.type === (route === 'ask' ? 'textarea' : 'input')).props.onChange({ target: { value } }),
     submit: () => nodes(tree).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }),
     click: label => { assert.ok(button(label), `Missing button ${label}`); button(label).props.onClick(); },
-    navigate: async params => { current.params = new URLSearchParams(params); dirty = true; await flush(); },
+    navigate: async params => { current.params = new URLSearchParams(params); location.search = params ? `?${params}` : ''; current.href = location.pathname + location.search; dirty = true; await flush(); },
   };
 }
 function askFetcher(custom) {
@@ -253,4 +261,51 @@ test('an old search cannot replace newer results, even when the transport ignore
   first.resolve(json(payload('first'))); await h.flush();
   assert.equal(nodes(h.tree).find(node => node.props.payload)?.props.payload.query, 'second');
   assert.equal(h.current.href, '/search?q=second');
+});
+test('single-document asks isolate and restore their own draft after refresh/login without changing the workspace draft', async () => {
+  const normalKey = helpers.askPreferencesKey('cangzhi_workspace=test-space');
+  const documentKey = helpers.askPreferencesKey('cangzhi_workspace=test-space', [20]);
+  const storage = new Map([[normalKey, JSON.stringify({ question: 'workspace draft', categoryIds: [1] })]]);
+  const fetcher = askFetcher(url => url === '/api/v1/knowledge/ask' ? Promise.resolve(json(answer('restricted answer'))) : null);
+  const h = harness('ask', fetcher, 'document_ids=20', storage); await h.flush();
+  assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, '');
+  h.type('document-specific draft'); await h.flush();
+  assert.equal(JSON.parse(storage.get(documentKey)).question, 'document-specific draft');
+  assert.equal(JSON.parse(storage.get(normalKey)).question, 'workspace draft');
+  const returned = harness('ask', fetcher, 'document_ids=20', storage); await returned.flush();
+  assert.equal(nodes(returned.tree).find(node => node.type === 'textarea').props.value, 'document-specific draft');
+  returned.submit(); await returned.flush();
+  const request = JSON.parse(returned.requests.find(item => item.url === '/api/v1/knowledge/ask').body);
+  assert.deepEqual(request.document_ids, [20]); assert.deepEqual(request.category_ids, []);
+  assert.equal(JSON.parse(storage.get(normalKey)).question, 'workspace draft');
+  assert.equal(helpers.askPreferencesKey('cangzhi_workspace=test-space', [21, 20, 21]), helpers.askPreferencesKey('cangzhi_workspace=test-space', [20, 21]));
+});
+test('invalid document selection never silently sends an unrestricted ask', async () => {
+  const h = harness('ask', askFetcher(() => null), 'document_ids=bad&q=question'); await h.flush();
+  assert.equal(h.button('发送').props.disabled, true); h.submit(); await h.flush();
+  assert.equal(h.requests.some(item => item.url === '/api/v1/knowledge/ask'), false);
+});
+test('workbench area changes and evidence collapse preserve input and selected citation without dialogs', async () => {
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask' ? Promise.resolve(json(answer('answer'))) : null));
+  await h.flush(); h.type('question'); await h.flush(); h.submit(); await h.flush(); h.type('draft to preserve'); await h.flush();
+  const selected = { id: 1, document_id: 20, document_version_id: 21, chunk_id: 22, title: 'Synthetic', heading_path: [], page: null, paragraph_index: null, source_type: 'note', source_url: null, snippet: 'Evidence' };
+  nodes(h.tree).find(node => node.props.turn).props.onOpenCitation(selected); await h.flush();
+  assert.equal(nodes(h.tree).find(node => node.props.id === 'ask-evidence').props.className.startsWith('flex'), true);
+  const drawer = nodes(h.tree).find(node => node.type === 'drawer'); assert.equal(drawer.props.citation, selected);
+  drawer.props.onClose(); await h.flush();
+  assert.equal(nodes(h.tree).find(node => node.type === 'drawer').props.citation, selected);
+  h.click('范围与记录'); await h.flush(); h.click('问答'); await h.flush();
+  assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, 'draft to preserve');
+  assert.equal(nodes(h.tree).some(node => node.props.role === 'dialog' || node.props['aria-modal']), false);
+  h.click('收起侧栏'); await h.flush(); assert.ok(h.button('范围与记录'));
+});
+test('new conversation protects a draft when confirmation is declined', async () => {
+  const h = harness('ask', askFetcher(() => null)); await h.flush(); h.type('keep me'); await h.flush(); h.current.confirm = false;
+  h.click('＋ 新建'); await h.flush(); assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, 'keep me');
+});
+test('storage failure is visible and enables leave protection instead of silently losing the draft', async () => {
+  const storage = new Map(); storage.set = () => { throw new Error('storage unavailable'); };
+  const h = harness('ask', askFetcher(() => null), '', storage); await h.flush(); h.type('unsaved'); await h.flush();
+  assert.match(text(h.tree), /浏览器无法保存草稿/); assert.equal(h.guards.at(-1)[0], true);
+  h.click('清空草稿'); await h.flush(); assert.equal(h.guards.at(-1)[0], false);
 });

@@ -7,6 +7,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { askPreferencesKey, validateAskPreferences } from '@/lib/ask-search-state';
+import { useUnsavedChanges } from '@/lib/navigation-guard';
 import {
   EvidenceDrawer,
   type EvidenceCitation,
@@ -210,6 +211,10 @@ function AskSkeleton() {
 
 function AskClient() {
   const searchParams = useSearchParams();
+  const documentSelection = searchParams.get('document_ids') ?? '';
+  const parsedDocumentIds = documentSelection.split(',').filter(Boolean).map(Number);
+  const [documentIds, setDocumentIds] = useState<number[]>(parsedDocumentIds.every((id) => Number.isSafeInteger(id) && id > 0) && parsedDocumentIds.length <= 50 ? [...new Set(parsedDocumentIds)] : []);
+  const [invalidDocumentSelection, setInvalidDocumentSelection] = useState(Boolean(documentSelection) && (parsedDocumentIds.length === 0 || parsedDocumentIds.length > 50 || parsedDocumentIds.some((id) => !Number.isSafeInteger(id) || id <= 0)));
   const [question, setQuestion] = useState(searchParams.get('q') ?? '');
   const [mode, setMode] = useState<'quick' | 'deep'>('quick');
   const [scopeSlug, setScopeSlug] = useState('all');
@@ -223,10 +228,13 @@ function AskClient() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [preferencesNotice, setPreferencesNotice] = useState<string | null>(null);
+  const [draftStorageAvailable, setDraftStorageAvailable] = useState(true);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [mobileArea, setMobileArea] = useState<'chat' | 'library' | 'evidence'>('chat');
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [liveAnalysis, setLiveAnalysis] = useState<LiveAnalysis | null>(null);
@@ -243,8 +251,13 @@ function AskClient() {
   const conversationRef = useRef(conversationId);
   const preferencesKeyRef = useRef<string | null>(null);
   const conversationListRevisionRef = useRef(0);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const citationTriggerRef = useRef<HTMLElement | null>(null);
+  const followOutputRef = useRef(true);
   questionRef.current = question;
   conversationRef.current = conversationId;
+  useUnsavedChanges(!draftStorageAvailable && Boolean(question.trim()), '浏览器未能保存问答草稿，离开会丢失输入。确定离开吗？');
+  const askHref = () => documentIds.length ? `/ask?document_ids=${documentIds.join(',')}` : '/ask';
 
   useEffect(() => {
     mountedRef.current = true;
@@ -259,16 +272,16 @@ function AskClient() {
   useEffect(() => {
     if (sessionReady || !facets || scopes.length === 0) return;
     const timer = window.setTimeout(() => {
-      const key = askPreferencesKey(document.cookie);
+      const key = askPreferencesKey(document.cookie, documentIds);
       preferencesKeyRef.current = key;
       try {
         const saved = window.sessionStorage.getItem(key);
         const { preferences, filtersRemoved } = validateAskPreferences(saved ? JSON.parse(saved) : null, { ...facets, scopes });
-        setScopeSlug(preferences.scopeSlug);
-        setCategoryIds(preferences.categoryIds);
-        setTagIds(preferences.tagIds);
-        setSourceTypes(preferences.sourceTypes);
-        setConnectorIds(preferences.connectorIds);
+        setScopeSlug(documentSelection ? 'all' : preferences.scopeSlug);
+        setCategoryIds(documentSelection ? [] : preferences.categoryIds);
+        setTagIds(documentSelection ? [] : preferences.tagIds);
+        setSourceTypes(documentSelection ? [] : preferences.sourceTypes);
+        setConnectorIds(documentSelection ? [] : preferences.connectorIds);
         setMode(preferences.mode);
         if (!searchParams.get('q') && questionRevisionRef.current === 0) {
           setQuestion(preferences.question);
@@ -276,17 +289,18 @@ function AskClient() {
         if (filtersRemoved) setPreferencesNotice('已移除当前空间中失效的知识范围或筛选项，请确认范围后再提问。');
       } catch {
         // Storage can be unavailable in private or restricted browser contexts.
+        setDraftStorageAvailable(false);
       } finally {
         setSessionReady(true);
       }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [facets, scopes, searchParams, sessionReady]);
+  }, [facets, scopes, searchParams, sessionReady, documentSelection, documentIds]);
 
   useEffect(() => {
     if (!sessionReady || !preferencesKeyRef.current) return;
     try { window.sessionStorage.setItem(
-      preferencesKeyRef.current,
+      askPreferencesKey(document.cookie, documentIds),
       JSON.stringify({
         scopeSlug,
         categoryIds,
@@ -296,7 +310,11 @@ function AskClient() {
         question,
         mode,
       }),
-    ); } catch { /* A storage failure must not block asking. */ }
+    ); } catch {
+      // Surface a failed external storage write so navigation can protect the draft.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDraftStorageAvailable(false);
+    }
   }, [
     scopeSlug,
     categoryIds,
@@ -306,6 +324,7 @@ function AskClient() {
     question,
     mode,
     sessionReady,
+    documentIds,
   ]);
 
   useEffect(() => {
@@ -320,7 +339,7 @@ function AskClient() {
         const payload = (await response.json()) as { items: ConversationSummary[] };
         if (cancelled || listRevision !== conversationListRevisionRef.current) return;
         setConversations(payload.items);
-        if (!searchParams.get('q') && !questionRef.current && questionRevisionRef.current === 0 && revision === viewRevisionRef.current && payload.items[0]) {
+        if (!documentSelection && !searchParams.get('q') && !questionRef.current && questionRevisionRef.current === 0 && revision === viewRevisionRef.current && payload.items[0]) {
           await loadConversation(payload.items[0].id);
         }
       } catch (reason) {
@@ -377,7 +396,9 @@ function AskClient() {
   }, []);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (followOutputRef.current && mobileArea === 'chat') endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  // Changing workbench areas must not move the preserved reading position.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turns, loading, liveAnalysis]);
 
   const refreshConversations = async (revision = viewRevisionRef.current) => {
@@ -398,6 +419,7 @@ function AskClient() {
     setLiveAnalysis(null);
     setHistoryLoading(false);
     setSelectedCitation(null);
+    setEvidenceOpen(false);
     return viewRevisionRef.current;
   };
 
@@ -416,6 +438,8 @@ function AskClient() {
     setTurns([]);
     setError(null);
     setHistoryLoading(true);
+    setMobileArea('chat');
+    followOutputRef.current = true;
     const isCurrent = () => mountedRef.current && viewRevisionRef.current === revision && !controller.signal.aborted;
     try {
       const response = await fetch(`/api/ask/conversations/${id}`, { cache: 'no-store', signal: controller.signal });
@@ -430,9 +454,8 @@ function AskClient() {
         contextLabel: turn.context_label ?? '全部知识',
         mode: turn.mode,
       })));
-      setHistoryOpen(false);
       setError(null);
-      window.history.replaceState(null, '', '/ask');
+      window.history.replaceState(null, '', askHref());
     } catch (reason) {
       if (isCurrent()) setError(reason instanceof Error ? reason.message : '问答记录读取失败');
     } finally {
@@ -444,34 +467,46 @@ function AskClient() {
   }
 
   const startNewConversation = () => {
+    if (questionRef.current.trim() && !window.confirm('新建会清空当前输入，已有问答记录不会删除。是否继续？')) return;
     invalidateViewRequests();
     conversationRef.current = null;
     setConversationId(null);
     setTurns([]);
     editQuestion('');
     setError(null);
-    setHistoryOpen(false);
-    window.history.replaceState(null, '', '/ask');
+    setMobileArea('chat');
+    followOutputRef.current = true;
+    window.history.replaceState(null, '', askHref());
   };
 
   const deleteConversation = async (id: number) => {
     const response = await fetch(`/api/ask/conversations/${id}`, { method: 'DELETE' });
     if (!response.ok) throw new Error('删除问答记录失败');
-    if (conversationRef.current === id) startNewConversation();
+    if (conversationRef.current === id) {
+      invalidateViewRequests();
+      conversationRef.current = null;
+      setConversationId(null);
+      setTurns([]);
+      setMobileArea('chat');
+      setError(null);
+      window.history.replaceState(null, '', askHref());
+      // Deleting saved history does not authorize discarding the current input.
+    }
     await refreshConversations();
   };
 
   const runAsk = async () => {
     const trimmed = question.trim();
-    if (!trimmed || !sessionReady || historyLoading || loading || requestAbortRef.current) return;
+    if (!trimmed || invalidDocumentSelection || !sessionReady || historyLoading || loading || requestAbortRef.current) return;
     const revision = invalidateViewRequests();
     const questionRevision = questionRevisionRef.current;
     const controller = new AbortController();
     requestAbortRef.current = controller;
     const isCurrent = () => mountedRef.current && viewRevisionRef.current === revision && requestAbortRef.current === controller && !controller.signal.aborted;
     setLoading(true);
+    followOutputRef.current = true;
     setError(null);
-    const contextLabel = buildContextLabel(
+    const contextLabel = (documentIds.length ? `指定资料 ${documentIds.map((id) => `#${id}`).join('、')} · ` : '') + buildContextLabel(
       selectedScope?.name ?? '全部知识',
       facets,
       categoryIds,
@@ -514,6 +549,7 @@ function AskClient() {
         tag_ids: tagIds,
         source_types: sourceTypes,
         connector_ids: connectorIds,
+        document_ids: documentIds,
         conversation_id: targetConversationId,
         context_label: contextLabel,
       };
@@ -578,7 +614,7 @@ function AskClient() {
         },
       ]);
       if (questionRevision === questionRevisionRef.current) setQuestion('');
-      window.history.replaceState(null, '', '/ask');
+      window.history.replaceState(null, '', askHref());
       void refreshConversations(revision).catch(() => undefined);
     } catch (reason) {
       // A lost response does not prove the server failed to save the answer.
@@ -616,357 +652,78 @@ function AskClient() {
     setScopeSlug(slug);
     clearRefinements();
   };
+  const openCitation = (citation: Citation) => {
+    citationTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSelectedCitation(citation);
+    setEvidenceOpen(true);
+    setMobileArea('evidence');
+  };
+  const closeEvidence = () => {
+    setEvidenceOpen(false);
+    setMobileArea('chat');
+    window.requestAnimationFrame(() => {
+      if (citationTriggerRef.current?.isConnected) citationTriggerRef.current.focus({ preventScroll: true });
+      else inputRef.current?.focus({ preventScroll: true });
+    });
+  };
 
   return (
-    <main className="ask-shell mx-auto flex w-full max-w-[1600px] gap-5 overflow-hidden px-3 py-3 sm:px-4 lg:px-6">
-      <aside className="hidden w-64 shrink-0 lg:block">
-        <div className="sticky top-5 space-y-3">
-          <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-            <div className="flex items-center justify-between px-1">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
-                问答记录
-              </p>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={() => setHistoryOpen(true)} className="text-xs text-slate-500 hover:text-slate-950">管理</button>
-                <button type="button" onClick={startNewConversation} className="text-xs font-medium text-slate-700 hover:text-slate-950">＋ 新建</button>
-              </div>
+    <main className="ask-shell mx-auto flex w-full max-w-[1800px] flex-col gap-3 overflow-hidden">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <button type="button" aria-controls="ask-library" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)} className="hidden rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 lg:block">{historyOpen ? '收起侧栏' : '范围与记录'}</button>
+          <h1 className="text-lg font-semibold text-slate-900">问知识库</h1>
+          <Link href="/search" className="rounded-lg px-2 py-2 text-xs text-slate-500 hover:bg-white">搜资料 ↗</Link>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="hidden rounded-xl bg-slate-100 p-1 sm:flex" aria-label="问答模式">
+            {(['quick', 'deep'] as const).map((item) => (
+              <button key={item} type="button" disabled={!sessionReady} onClick={() => setMode(item)} aria-pressed={mode === item} className={`rounded-lg px-3 py-1.5 text-xs font-medium disabled:opacity-40 ${mode === item ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>{item === 'quick' ? '快速问答' : '深度分析'}</button>
+            ))}
+          </div>
+          <button type="button" disabled={!sessionReady} onClick={() => setMode((current) => current === 'quick' ? 'deep' : 'quick')} title="切换问答模式" className="rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-700 disabled:opacity-40 sm:hidden">{mode === 'deep' ? '深度' : '快速'}</button>
+          <button type="button" aria-controls="ask-evidence" aria-expanded={evidenceOpen} onClick={() => { setEvidenceOpen((value) => !value); setMobileArea('chat'); }} className="hidden rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 lg:block">{evidenceOpen ? '收起证据栏' : '证据工作区'}</button>
+          <button type="button" onClick={startNewConversation} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white">＋ 新建</button>
+        </div>
+      </header>
+      <nav aria-label="问答工作区" className="grid shrink-0 grid-cols-3 gap-1 rounded-xl bg-slate-100 p-1 lg:hidden">
+        {([{ id: 'chat', label: '问答' }, { id: 'library', label: '范围与记录' }, { id: 'evidence', label: '引用证据' }] as const).map((area) => (
+          <button key={area.id} type="button" aria-pressed={mobileArea === area.id} aria-controls={`ask-${area.id === 'chat' ? 'conversation' : area.id}`} onClick={() => { setMobileArea(area.id); if (area.id === 'evidence') setEvidenceOpen(true); }} className={`rounded-lg px-2 py-2 text-xs font-medium ${mobileArea === area.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>{area.label}{area.id === 'evidence' && selectedCitation ? ' · 1' : ''}</button>
+        ))}
+      </nav>
+      <div className="flex min-h-0 flex-1 gap-3">
+        <aside id="ask-library" aria-label="知识范围与问答记录" className={`${mobileArea === 'library' ? 'flex' : 'hidden'} ${historyOpen ? 'lg:flex' : 'lg:hidden'} min-h-0 w-full shrink-0 flex-col overflow-y-auto rounded-2xl border border-slate-200 bg-white p-3 lg:w-60 xl:w-64`}>
+          <section>
+            <div className="flex items-center justify-between gap-2 px-1">
+              <h2 className="text-xs font-semibold text-slate-500">问答记录</h2>
+              <span className="text-[10px] text-slate-400">云端保存</span>
             </div>
-            <div className="mt-2 max-h-56 space-y-1 overflow-y-auto">
-              {conversations.length === 0 ? (
-                <p className="px-2 py-3 text-xs text-slate-400">完成一次提问后会保存到云端</p>
-              ) : conversations.slice(0, 12).map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => void loadConversation(item.id)}
-                  className={`w-full rounded-xl px-2.5 py-2 text-left ${conversationId === item.id ? 'bg-slate-100' : 'hover:bg-slate-50'}`}
-                >
-                  <span className="block truncate text-xs font-medium text-slate-700">{item.title}</span>
-                  <span className="mt-0.5 block text-[10px] text-slate-400">{item.turn_count} 条问答</span>
-                </button>
+            <p className="mt-2 px-1 text-[11px] leading-5 text-slate-400">记录用于回看；每次提问独立检索，不读取此前问答。</p>
+            <div className="mt-2 max-h-64 space-y-1 overflow-y-auto">
+              {conversations.length === 0 ? <p className="px-2 py-3 text-xs text-slate-400">完成一次提问后会保存到云端</p> : conversations.map((item) => (
+                <div key={item.id} className={`group flex items-center gap-1 rounded-xl ${conversationId === item.id ? 'bg-slate-100' : 'hover:bg-slate-50'}`}>
+                  <button type="button" onClick={() => void loadConversation(item.id)} aria-current={conversationId === item.id ? 'true' : undefined} className="min-w-0 flex-1 px-2.5 py-2 text-left"><span className="block truncate text-xs font-medium text-slate-700">{item.title}</span><span className="mt-0.5 block text-[10px] text-slate-400">{item.turn_count} 条问答</span></button>
+                  <button type="button" aria-label={`删除记录：${item.title}`} onClick={() => { if (window.confirm('删除这份问答记录？资料与知识库不受影响。')) void deleteConversation(item.id).catch((reason) => setError(reason instanceof Error ? reason.message : '删除失败')); }} className="rounded-lg px-2 py-2 text-xs text-slate-400 hover:bg-red-50 hover:text-red-600 focus:text-red-600">×</button>
+                </div>
               ))}
             </div>
           </section>
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
-            当前知识范围
-          </p>
-          <div className="mt-3 space-y-1">
-            {scopes.map((scope) => (
-              <button
-                key={`${scope.system ? 'system' : 'saved'}-${scope.slug}`}
-                type="button"
-                disabled={!sessionReady}
-                onClick={() => changeScope(scope.slug)}
-                className={`w-full rounded-xl px-3 py-2 text-left text-sm transition ${
-                  scopeSlug === scope.slug
-                    ? 'bg-slate-900 text-white'
-                    : 'text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                {scope.name}
-              </button>
-            ))}
+          <section className="mt-4 border-t border-slate-100 pt-4">
+            <h2 className="px-1 text-xs font-semibold text-slate-500">本次提问的知识范围</h2>
+            <select aria-label="知识范围" disabled={!sessionReady} value={scopeSlug} onChange={(event) => changeScope(event.target.value)} className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm lg:hidden">{scopes.map((scope) => <option key={scope.slug} value={scope.slug}>{scope.name}</option>)}</select>
+            <div className="mt-2 hidden space-y-1 lg:block">{scopes.map((scope) => <button key={scope.slug} type="button" disabled={!sessionReady} onClick={() => changeScope(scope.slug)} aria-pressed={scopeSlug === scope.slug} className={`w-full rounded-xl px-3 py-2 text-left text-sm disabled:opacity-40 ${scopeSlug === scope.slug ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>{scope.name}</button>)}</div>
+            <button type="button" disabled={!sessionReady} aria-expanded={filterOpen} onClick={() => setFilterOpen((value) => !value)} className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2 text-left text-xs text-slate-600 disabled:opacity-40">细化范围{refinementCount ? ` · ${refinementCount}` : ''}</button>
+            <button type="button" disabled={!sessionReady} onClick={() => setFilterOpen(true)} className="mt-2 text-xs text-slate-500 disabled:opacity-40 lg:hidden">知识范围与筛选</button>
+            {filterOpen && sessionReady && <FacetPanel facets={facets} selectedScope={selectedScope} categoryIds={categoryIds} tagIds={tagIds} sourceTypes={sourceTypes} connectorIds={connectorIds} setCategoryIds={setCategoryIds} setTagIds={setTagIds} setSourceTypes={setSourceTypes} setConnectorIds={setConnectorIds} onClear={clearRefinements} />}
+          </section>
+        </aside>
+        <section id="ask-conversation" aria-label="知识问答" className={`${mobileArea === 'chat' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white lg:flex`}>
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
+            <p className="text-xs text-slate-500">{selectedScope?.name ?? '全部知识'}{refinementCount ? ` · ${refinementCount} 项筛选` : ''} · 检索证据后回答</p>
+            {(documentIds.length > 0 || invalidDocumentSelection) && <div className="flex flex-wrap items-center gap-2 rounded-lg bg-blue-50 px-2 py-1 text-xs text-blue-800"><span>{invalidDocumentSelection ? '资料范围无效，请清除后重新选择' : `仅问指定资料 ${documentIds.map((id) => `#${id}`).join('、')}`}</span><button type="button" onClick={() => { setDocumentIds([]); setInvalidDocumentSelection(false); window.history.replaceState(null, '', '/ask'); }} className="font-semibold underline">清除限定</button></div>}
           </div>
-          <p className="mt-4 border-t border-slate-100 pt-4 text-xs leading-5 text-slate-500">
-            记录会同步到云端，但每次提问仍独立检索，不会自动读取此前问答。
-          </p>
-          <Link
-            href="/search"
-            className="mt-4 block text-xs font-medium text-slate-700 hover:text-slate-950"
-          >
-            切换到精确搜索 →
-          </Link>
-          </div>
-        </div>
-      </aside>
 
-      <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-slate-200 bg-white shadow-sm sm:rounded-3xl">
-        <header className="relative flex h-14 shrink-0 items-center gap-2 border-b border-slate-100 px-3 sm:h-auto sm:flex-wrap sm:justify-between sm:gap-3 sm:px-7 sm:py-4">
-          <div className="hidden min-w-0 sm:block">
-            <h1 className="text-xl font-semibold tracking-tight text-slate-950">
-              问知识库
-            </h1>
-            <p className="mt-1 text-xs text-slate-500">
-              {selectedScope?.name ?? '全部知识'} · 检索证据后回答
-            </p>
-          </div>
-          <div className="flex min-w-0 flex-1 items-center gap-2 sm:hidden">
-            <Link
-              href="/search"
-              aria-label="返回搜索"
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-lg text-slate-600 hover:bg-slate-100"
-            >
-              ←
-            </Link>
-            <button
-              type="button"
-              disabled={!sessionReady}
-              onClick={() => setFilterOpen(true)}
-              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-xl px-2 py-2 text-left hover:bg-slate-100"
-            >
-              <span className="truncate text-sm font-semibold text-slate-900">
-                {selectedScope?.name ?? '全部知识'}
-              </span>
-              {refinementCount > 0 && (
-                <span className="shrink-0 rounded-full bg-slate-900 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                  {refinementCount}
-                </span>
-              )}
-              <span className="shrink-0 text-xs text-slate-400">⌄</span>
-            </button>
-          </div>
-          <button
-            type="button"
-            disabled={!sessionReady}
-            onClick={() => setMode((current) => current === 'quick' ? 'deep' : 'quick')}
-            className={`shrink-0 rounded-xl px-3 py-2 text-xs font-semibold sm:hidden ${
-              mode === 'deep'
-                ? 'bg-indigo-50 text-indigo-700'
-                : 'bg-slate-100 text-slate-700'
-            }`}
-            title="切换问答模式"
-          >
-            {mode === 'deep' ? '深度' : '快速'}
-          </button>
-          <details className="group relative shrink-0 sm:hidden">
-            <summary className="grid h-9 w-9 cursor-pointer list-none place-items-center rounded-xl text-xl leading-none text-slate-600 hover:bg-slate-100" aria-label="更多操作">
-              ⋯
-            </summary>
-            <div className="absolute right-0 z-30 mt-2 w-40 rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-xl shadow-slate-950/10">
-              <button
-                type="button"
-                disabled={!sessionReady}
-                onClick={(event) => {
-                  setFilterOpen(true);
-                  event.currentTarget.closest('details')?.removeAttribute('open');
-                }}
-                className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
-              >
-                知识范围与筛选
-              </button>
-              <button
-                type="button"
-                onClick={(event) => {
-                  setHistoryOpen(true);
-                  event.currentTarget.closest('details')?.removeAttribute('open');
-                }}
-                className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
-              >
-                问答记录
-              </button>
-              <button
-                type="button"
-                onClick={(event) => {
-                  startNewConversation();
-                  event.currentTarget.closest('details')?.removeAttribute('open');
-                }}
-                className="w-full rounded-xl px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
-              >
-                新建问答
-              </button>
-              <Link href="/search" className="block rounded-xl px-3 py-2 text-slate-700 hover:bg-slate-100">
-                精确搜索
-              </Link>
-            </div>
-          </details>
-          <div className="hidden items-center gap-2 sm:flex">
-            <div className="flex shrink-0 rounded-xl bg-slate-100 p-1" aria-label="问答模式">
-              {(['quick', 'deep'] as const).map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  disabled={!sessionReady}
-                  onClick={() => setMode(item)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                    mode === item
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-500 hover:text-slate-800'
-                  }`}
-                  title={
-                    item === 'quick'
-                      ? '一次检索后快速回答'
-                      : '规划并调用多次检索或表格计算后回答'
-                  }
-                >
-                  {item === 'quick' ? '快速问答' : '深度分析'}
-                </button>
-              ))}
-            </div>
-            <select
-              value={scopeSlug}
-              disabled={!sessionReady}
-              onChange={(event) => changeScope(event.target.value)}
-              className="min-w-28 max-w-40 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 lg:hidden"
-              aria-label="知识范围"
-            >
-              {scopes.map((scope) => (
-                <option key={scope.slug} value={scope.slug}>
-                  {scope.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              disabled={!sessionReady}
-              onClick={() => setFilterOpen((current) => !current)}
-              className={`shrink-0 rounded-xl border px-3 py-2 text-xs font-medium ${
-                refinementCount > 0
-                  ? 'border-slate-900 bg-slate-900 text-white'
-                  : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-              }`}
-            >
-              细化范围{refinementCount > 0 ? ` · ${refinementCount}` : ''}
-            </button>
-            {turns.length > 0 && (
-              <button
-                type="button"
-                onClick={startNewConversation}
-                className="shrink-0 rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 hover:bg-slate-50"
-              >
-                新建问答
-              </button>
-            )}
-          </div>
-        </header>
-
-        {historyOpen && (
-          <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="问答记录">
-            <button type="button" aria-label="关闭问答记录" onClick={() => setHistoryOpen(false)} className="absolute inset-0 bg-slate-950/35" />
-            <section className="absolute inset-x-0 bottom-0 flex max-h-[82dvh] flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:inset-x-auto sm:bottom-auto sm:left-1/2 sm:top-1/2 sm:max-h-[72vh] sm:w-[34rem] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl">
-              <header className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
-                <div>
-                  <h2 className="font-semibold text-slate-950">问答记录</h2>
-                  <p className="mt-0.5 text-xs text-slate-500">云端保存，仅用于回看，不作为模型记忆</p>
-                </div>
-                <button type="button" onClick={startNewConversation} className="rounded-xl bg-slate-950 px-3 py-2 text-xs font-medium text-white">新建问答</button>
-              </header>
-              <div className="min-h-0 flex-1 overflow-y-auto p-3">
-                {historyLoading ? (
-                  <p className="p-4 text-sm text-slate-500">正在读取…</p>
-                ) : conversations.length === 0 ? (
-                  <p className="p-4 text-sm text-slate-500">还没有云端问答记录。</p>
-                ) : conversations.map((item) => (
-                  <div key={item.id} className={`mb-1 flex items-center gap-2 rounded-2xl p-2 ${conversationId === item.id ? 'bg-slate-100' : ''}`}>
-                    <button type="button" onClick={() => void loadConversation(item.id)} className="min-w-0 flex-1 px-2 py-1 text-left">
-                      <span className="block truncate text-sm font-medium text-slate-800">{item.title}</span>
-                      <span className="mt-1 block text-xs text-slate-400">{item.turn_count} 条问答</span>
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`删除 ${item.title}`}
-                      onClick={() => {
-                        if (window.confirm('删除这条问答记录？此操作不可恢复。')) {
-                          void deleteConversation(item.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '删除失败'));
-                        }
-                      }}
-                      className="rounded-xl px-3 py-2 text-xs text-red-600 hover:bg-red-50"
-                    >
-                      删除
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <footer className="border-t border-slate-200 px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-                <button type="button" onClick={() => setHistoryOpen(false)} className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700">返回当前问答</button>
-              </footer>
-            </section>
-          </div>
-        )}
-
-        {filterOpen && sessionReady && (
-          <>
-            <div className="hidden sm:block">
-              <FacetPanel
-                facets={facets}
-                selectedScope={selectedScope}
-                categoryIds={categoryIds}
-                tagIds={tagIds}
-                sourceTypes={sourceTypes}
-                connectorIds={connectorIds}
-                setCategoryIds={setCategoryIds}
-                setTagIds={setTagIds}
-                setSourceTypes={setSourceTypes}
-                setConnectorIds={setConnectorIds}
-                onClear={clearRefinements}
-              />
-            </div>
-            <div
-              className="fixed inset-0 z-50 sm:hidden"
-              role="dialog"
-              aria-modal="true"
-              aria-label="知识范围与筛选"
-            >
-              <button
-                type="button"
-                aria-label="关闭知识范围"
-                onClick={() => setFilterOpen(false)}
-                className="absolute inset-0 bg-slate-950/35 backdrop-blur-[1px]"
-              />
-              <section className="absolute inset-x-0 bottom-0 flex max-h-[88dvh] flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl">
-                <header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
-                  <div>
-                    <h2 className="text-base font-semibold text-slate-950">知识范围</h2>
-                    <p className="mt-0.5 text-xs text-slate-500">选择本轮对话可以使用的知识</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setFilterOpen(false)}
-                    className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"
-                  >
-                    关闭
-                  </button>
-                </header>
-                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-                  <div className="border-b border-slate-100 px-5 py-4">
-                    <p className="mb-2 text-xs font-semibold text-slate-600">基础范围</p>
-                    <div className="flex flex-wrap gap-2">
-                      {scopes.map((scope) => (
-                        <button
-                          key={`mobile-${scope.slug}`}
-                          type="button"
-                          disabled={!sessionReady}
-                          onClick={() => changeScope(scope.slug)}
-                          className={`rounded-full border px-3 py-1.5 text-xs font-medium ${
-                            scopeSlug === scope.slug
-                              ? 'border-slate-900 bg-slate-900 text-white'
-                              : 'border-slate-200 bg-white text-slate-600'
-                          }`}
-                        >
-                          {scope.name}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <FacetPanel
-                    facets={facets}
-                    selectedScope={selectedScope}
-                    categoryIds={categoryIds}
-                    tagIds={tagIds}
-                    sourceTypes={sourceTypes}
-                    connectorIds={connectorIds}
-                    setCategoryIds={setCategoryIds}
-                    setTagIds={setTagIds}
-                    setSourceTypes={setSourceTypes}
-                    setConnectorIds={setConnectorIds}
-                    onClear={clearRefinements}
-                  />
-                </div>
-                <footer className="shrink-0 border-t border-slate-200 bg-white px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-                  <button
-                    type="button"
-                    onClick={() => setFilterOpen(false)}
-                    className="w-full rounded-xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white"
-                  >
-                    完成{refinementCount > 0 ? ` · 已选择 ${refinementCount} 项` : ''}
-                  </button>
-                </footer>
-              </section>
-            </div>
-          </>
-        )}
-
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-50/60 px-3 py-4 sm:px-7 sm:py-6">
+        <div onScroll={(event) => { const node = event.currentTarget; followOutputRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 96; }} className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-50/60 px-3 py-4 sm:px-5 sm:py-6">
           {turns.length === 0 && !loading && (
             <WelcomeState
               disabled={providerReady === false}
@@ -978,7 +735,7 @@ function AskClient() {
               <ConversationTurn
                 key={turn.id}
                 turn={turn}
-                onOpenCitation={setSelectedCitation}
+                onOpenCitation={openCitation}
               />
             ))}
             {liveAnalysis ? (
@@ -1016,6 +773,7 @@ function AskClient() {
               {error}
             </p>
           )}
+          {!draftStorageAvailable && <p role="alert" className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">浏览器无法保存草稿，请在离开前复制输入。发送问答仍可正常使用。</p>}
           {datasetSummary && datasetSummary.dataset_count > 0 && (
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] leading-5 text-slate-500">
               <span>
@@ -1042,6 +800,7 @@ function AskClient() {
             className="flex items-end gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-2 focus-within:border-slate-400 focus-within:bg-white"
           >
             <textarea
+              ref={inputRef}
               value={question}
               onChange={(event) => editQuestion(event.target.value)}
               onKeyDown={(event) => {
@@ -1071,25 +830,25 @@ function AskClient() {
             ) : (
               <button
                 type="submit"
-                disabled={!question.trim() || !sessionReady || historyLoading || providerReady === false}
+                disabled={!question.trim() || invalidDocumentSelection || !sessionReady || historyLoading || providerReady === false}
                 className="rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
               >
                 发送
               </button>
             )}
           </form>
+          <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-slate-400"><span title="按工作空间与指定资料范围保存在本浏览器当前标签页；关闭标签页后可能丢失，不是云端草稿。">{draftStorageAvailable ? '草稿保留在本标签页 · 按空间与资料范围隔离' : '草稿尚未保存'}</span><button type="button" disabled={!question} onClick={() => editQuestion('')} className="px-1 py-1 hover:text-slate-700 disabled:opacity-40">清空草稿</button></div>
           <p className="mt-2 text-center text-[10px] leading-4 text-slate-400 sm:text-[11px]">
             <span className="hidden sm:inline">Enter 发送 · Shift+Enter 换行 · </span>{mode === 'deep'
               ? '每次提问独立检索，不读取此前问答 · 深度分析只在持续获得新证据时继续调用工具'
               : '每次提问独立检索，不读取此前问答 · 请核对引用原文'}
           </p>
         </footer>
-        <EvidenceDrawer
-          key={selectedCitation ? `${selectedCitation.document_version_id}:${selectedCitation.chunk_id}` : 'closed'}
-          citation={selectedCitation}
-          onClose={() => setSelectedCitation(null)}
-        />
       </section>
+      <aside id="ask-evidence" aria-label="证据工作区" className={`${evidenceOpen && mobileArea === 'evidence' ? 'flex' : 'hidden'} ${evidenceOpen ? 'lg:flex' : 'lg:hidden'} min-h-0 w-full min-w-0 shrink-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white lg:w-[40%] lg:max-w-[720px]`}>
+        <EvidenceDrawer citation={selectedCitation} active={evidenceOpen && mobileArea === 'evidence'} onClose={closeEvidence} />
+      </aside>
+      </div>
     </main>
   );
 }
@@ -1170,7 +929,7 @@ function FacetPanel({
     connectorIds.length;
   if (!facets) {
     return (
-      <div className="border-b border-slate-100 bg-slate-50 px-5 py-4 text-xs text-slate-500 sm:px-7">
+      <div className="rounded-xl bg-slate-50 px-3 py-4 text-xs text-slate-500">
         正在加载知识筛选项…
       </div>
     );
@@ -1192,7 +951,7 @@ function FacetPanel({
     )
     .slice(0, 24);
   return (
-    <div className="border-b border-slate-100 bg-slate-50/80 px-5 py-5 sm:px-7">
+    <div className="mt-3 rounded-xl bg-slate-50/80 px-3 py-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-slate-900">细化当前知识范围</h2>
@@ -1249,7 +1008,7 @@ function FacetPanel({
         </div>
       </FacetGroup>
 
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
+      <div className="mt-4 grid gap-4">
         <FacetGroup title="来源类型" compact>
           {constrainedSources.length > 0 ? (
             <p className="text-xs text-slate-500">

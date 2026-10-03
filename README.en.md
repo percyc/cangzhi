@@ -229,6 +229,7 @@ Most detailed project documentation is currently maintained in Chinese:
 - [Contributor guide and repository rules](AGENTS.md)
 - [Current project status](docs/PROJECT_STATUS.md)
 - [Global usability review and remaining work (Chinese)](docs/USABILITY_REVIEW.md)
+- [Reading workbench, drafts, and isolated browser tests (Chinese)](docs/WEB_WORKBENCH.md)
 - [Developer handoff](docs/DEVELOPER_HANDOFF.md)
 - [Spreadsheet testing and sample handling](docs/SPREADSHEET_TESTING.md)
 - [Development log](docs/DEVLOG.md)

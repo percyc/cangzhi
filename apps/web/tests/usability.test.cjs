@@ -86,12 +86,27 @@ function noteForm(values) {
   const state = [...values];
   const pushes = [];
   const component = load('app/notes/new/page.tsx', {
-    react: { useState: (initial) => { const key = index++; state[key] ??= initial; return [state[key], value => { state[key] = value; }]; } },
+    react: {
+      useState: (initial) => { const key = index++; state[key] ??= initial; return [state[key], value => { state[key] = value; }]; },
+      useRef: (initial) => ({ current: initial }),
+      useEffect: (callback) => callback(),
+    },
     'next/navigation': { useRouter: () => ({ push: url => pushes.push(url) }) },
     'next/link': () => null,
     '@/lib/usability': ux,
+    '@/components/note-draft-status': { NoteDraftStatus: () => null },
+    '@/lib/navigation-guard': { useUnsavedChanges() {}, runWithoutNavigationGuard: (callback) => callback() },
+    '@/lib/note-drafts': {
+      browserDraftStorage: () => ({}), clearNoteDraft: () => true,
+      noteWorkspace: () => 'default', noteDraftKey: () => 'synthetic-key',
+      readNoteDraft: () => ({ draft: null, status: 'empty' }), writeNoteDraft: () => 'saved',
+    },
   });
-  const form = descendants(component.default()).find(element => element.type === 'form');
+  const originalDocument = global.document;
+  global.document = { cookie: '' };
+  let form;
+  try { form = descendants(component.default()).find(element => element.type === 'form'); }
+  finally { global.document = originalDocument; }
   return { submit: () => form.props.onSubmit({ preventDefault() {} }), state, pushes };
 }
 test('blank note is rejected without an API request', async () => {
