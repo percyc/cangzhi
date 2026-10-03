@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, event, select
 from sqlalchemy.orm import sessionmaker
 
 import apps.api.models  # noqa: F401 - register all mapped tables
@@ -1199,9 +1199,9 @@ class TestEnqueueEmbeddingJobsForNewChunks:
         }
 
 
-def _database_refresh_fixture(session, *, engine_name="postgresql"):
+def _database_refresh_fixture(session, *, engine_name="postgresql", workspace_id=1):
     source = DatabaseSource(
-        workspace_id=1,
+        workspace_id=workspace_id,
         name="warehouse",
         engine=engine_name,
         host="db.example.com",
@@ -1213,7 +1213,7 @@ def _database_refresh_fixture(session, *, engine_name="postgresql"):
         status="idle",
     )
     document = Document(
-        workspace_id=1,
+        workspace_id=workspace_id,
         title="public.sales",
         source_type=DocumentSourceType.file,
     )
@@ -1242,7 +1242,7 @@ def _database_refresh_fixture(session, *, engine_name="postgresql"):
     session.add(dataset)
     session.flush()
     snapshot = DatabaseSnapshot(
-        workspace_id=1,
+        workspace_id=workspace_id,
         source_id=source.id,
         schema_name="public",
         table_name="sales",
@@ -1257,7 +1257,7 @@ def _database_refresh_fixture(session, *, engine_name="postgresql"):
         document_version_id=version.id,
         stage="database_refresh",
         status="processing",
-        idempotency_key=f"db-refresh:test:{engine_name}",
+        idempotency_key=f"db-refresh:test:{engine_name}:{document.id}",
         config_version=f"database-refresh:{snapshot.id}",
         max_retries=3,
     )
@@ -1331,6 +1331,148 @@ def test_database_refresh_failure_keeps_snapshot_and_retries(
     assert job.next_retry_at is None
     assert session.get(KnowledgeDataset, dataset.id) is not None
     assert version.processing_status == "ready"
+
+
+@pytest.fixture
+def database_refresh_sessions(tmp_path):
+    """Real separate transactions with FK cascades, without a source server."""
+    refresh_engine = create_engine(f"sqlite:///{tmp_path / 'refresh.db'}")
+
+    @event.listens_for(refresh_engine, "connect")
+    def enable_foreign_keys(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(refresh_engine)
+    sessions = sessionmaker(bind=refresh_engine)
+    with sessions() as setup:
+        setup.add_all([
+            Workspace(id=1, slug="default", name="Default"),
+            Workspace(id=2, slug="other", name="Other"),
+        ])
+        setup.commit()
+    yield sessions
+    refresh_engine.dispose()
+
+
+@pytest.mark.parametrize("fails_after_commit", [False, True])
+def test_database_refresh_reloads_replaced_snapshot_across_sessions(
+    database_refresh_sessions, monkeypatch, fails_after_commit
+):
+    sessions = database_refresh_sessions
+    with sessions() as session:
+        source, document, dataset, snapshot, job = _database_refresh_fixture(session)
+        other_source, _, _, sibling, _ = _database_refresh_fixture(session)
+        _, _, _, foreign_snapshot, _ = _database_refresh_fixture(session, workspace_id=2)
+        sibling.source_id = source.id
+        sibling.table_name = "unrelated_table"
+        sibling.last_error = "sibling diagnostic"
+        foreign_snapshot.last_error = "other workspace diagnostic"
+        other_source.last_error = "unrelated source diagnostic"
+        session.commit()
+        source_id, document_id, dataset_id = source.id, document.id, dataset.id
+        snapshot_id, job_id = snapshot.id, job.id
+        sibling_id, foreign_id = sibling.id, foreign_snapshot.id
+        other_source_id = other_source.id
+        previous_version_id = document.current_version_id
+        replacement_snapshot_id = snapshot_id + 1000
+
+        async def replace_snapshot(received_snapshot_id, workspace_id):
+            assert received_snapshot_id == snapshot_id
+            assert workspace_id == 1
+            with sessions() as importer:
+                new_version = DocumentVersion(
+                    document_id=document_id, version_number=2,
+                    content_hash="snapshot-v2", processing_status="ready",
+                )
+                importer.add(new_version)
+                importer.flush()
+                new_dataset = KnowledgeDataset(
+                    document_id=document_id, document_version_id=new_version.id,
+                    name="sales", sheet_name="sales", region_index=1,
+                    status="ready", row_count=3, column_count=1, profile={},
+                )
+                importer.add(new_dataset)
+                importer.flush()
+                importer.get(Document, document_id).current_version_id = new_version.id
+                importer.execute(delete(KnowledgeDataset).where(KnowledgeDataset.id == dataset_id))
+                # This is a real ON DELETE CASCADE, not a mocked refresh result.
+                assert importer.get(DatabaseSnapshot, snapshot_id) is None
+                importer.add(DatabaseSnapshot(
+                    id=replacement_snapshot_id, workspace_id=1, source_id=source_id,
+                    schema_name="public", table_name="sales", document_id=document_id,
+                    dataset_id=new_dataset.id, row_count=3, snapshot_fingerprint="v2",
+                    snapshot_at=datetime.datetime.now(datetime.timezone.utc),
+                ))
+                outcome = {
+                    "status": "updated", "dataset_id": new_dataset.id,
+                    "document_version_id": new_version.id, "row_count": 3,
+                }
+                importer.commit()
+            if fails_after_commit:
+                raise RuntimeError("post-import failure")
+            return outcome
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor._refresh_database_snapshot_async",
+            replace_snapshot,
+        )
+        assert _process_database_refresh(session, job, document) is not fails_after_commit
+
+    with sessions() as check:
+        saved_job = check.get(ProcessingJob, job_id)
+        replacement = check.get(DatabaseSnapshot, replacement_snapshot_id)
+        current_document = check.get(Document, document_id)
+        assert check.get(DatabaseSnapshot, snapshot_id) is None
+        assert check.get(KnowledgeDataset, dataset_id) is None
+        assert check.get(DocumentVersion, previous_version_id) is not None
+        assert current_document.current_version_id != previous_version_id
+        assert replacement.row_count == 3
+        assert saved_job.status == ("retry" if fails_after_commit else "completed")
+        assert saved_job.retry_count == int(fails_after_commit)
+        assert replacement.last_error == ("post-import failure" if fails_after_commit else None)
+        assert check.get(DatabaseSource, source_id).status == ("error" if fails_after_commit else "idle")
+        assert check.get(DatabaseSnapshot, sibling_id).last_error == "sibling diagnostic"
+        assert check.get(DatabaseSnapshot, foreign_id).last_error == "other workspace diagnostic"
+        assert check.get(DatabaseSource, other_source_id).last_error == "unrelated source diagnostic"
+
+
+@pytest.mark.parametrize("deleted_kind", ["snapshot", "source", "document", "job"])
+@pytest.mark.parametrize("refresh_failed", [False, True])
+def test_database_refresh_handles_deleted_rows_across_sessions(
+    database_refresh_sessions, monkeypatch, deleted_kind, refresh_failed
+):
+    sessions = database_refresh_sessions
+    with sessions() as session:
+        source, document, dataset, snapshot, job = _database_refresh_fixture(session)
+        ids = {"source": source.id, "document": document.id, "snapshot": snapshot.id, "job": job.id}
+        models = {"source": DatabaseSource, "document": Document, "snapshot": DatabaseSnapshot, "job": ProcessingJob}
+        model = models[deleted_kind]
+
+        async def delete_during_refresh(_snapshot_id, _workspace_id):
+            with sessions() as deleter:
+                deleter.execute(delete(model).where(model.id == ids[deleted_kind]))
+                deleter.commit()
+            if refresh_failed:
+                raise RuntimeError("refresh target removed")
+            return {"status": "updated", "row_count": 2}
+
+        monkeypatch.setattr(
+            "apps.worker.services.processor._refresh_database_snapshot_async",
+            delete_during_refresh,
+        )
+        job_remains = deleted_kind not in {"document", "job"}
+        assert _process_database_refresh(session, job, document) is (job_remains and not refresh_failed)
+
+    with sessions() as check:
+        assert check.get(model, ids[deleted_kind]) is None
+        saved_job = check.get(ProcessingJob, ids["job"])
+        if job_remains:
+            assert saved_job.status == ("retry" if refresh_failed else "completed")
+            assert saved_job.retry_count == int(refresh_failed)
+        else:
+            assert saved_job is None
+        if deleted_kind != "document":
+            assert check.get(Document, ids["document"]) is not None
 
 
 def test_dataset_semantics_smart_mode_only_generates_missing_fields(

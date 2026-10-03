@@ -2422,16 +2422,29 @@ def _process_database_refresh(
     job: ProcessingJob,
     document: Document,
 ) -> bool:
+    # The import runs in a separate session and can replace the dataset,
+    # cascading deletion of the snapshot loaded here. Capture identities
+    # before committing/expiring; even reading an expired object's .id can
+    # raise ObjectDeletedError after a concurrent delete.
+    job_id = job.id
+    document_id = document.id
+    workspace_id = document.workspace_id
     snapshot = session.scalar(
         select(DatabaseSnapshot).where(
-            DatabaseSnapshot.document_id == document.id
+            DatabaseSnapshot.document_id == document_id,
+            DatabaseSnapshot.workspace_id == workspace_id,
         )
     )
     if snapshot is None:
         return _mark_terminal_failure(
             session, job, None, "数据库快照不存在", details={"code": "snapshot_not_found"}
         )
-    source = session.get(DatabaseSource, snapshot.source_id)
+    snapshot_id = snapshot.id
+    source_id = snapshot.source_id
+    source = session.scalar(select(DatabaseSource).where(
+        DatabaseSource.id == source_id,
+        DatabaseSource.workspace_id == workspace_id,
+    ))
     if source is None or not source.is_enabled:
         return _mark_terminal_failure(
             session,
@@ -2446,15 +2459,31 @@ def _process_database_refresh(
     session.commit()
     try:
         outcome = asyncio.run(
-            _refresh_database_snapshot_async(snapshot.id, document.workspace_id)
+            _refresh_database_snapshot_async(snapshot_id, workspace_id)
         )
     except Exception as exc:
         session.expire_all()
-        job = session.get(ProcessingJob, job.id)
-        source = session.get(DatabaseSource, snapshot.source_id)
-        snapshot = session.get(DatabaseSnapshot, snapshot.id)
+        job = session.scalar(select(ProcessingJob).join(
+            Document, Document.id == ProcessingJob.document_id
+        ).where(
+            ProcessingJob.id == job_id,
+            ProcessingJob.document_id == document_id,
+            Document.workspace_id == workspace_id,
+        ))
         if job is None:
             return False
+        source = session.scalar(select(DatabaseSource).where(
+            DatabaseSource.id == source_id,
+            DatabaseSource.workspace_id == workspace_id,
+        ))
+        # If the import committed a replacement before failing, attach the
+        # diagnostic to that current relationship, not to the removed row or
+        # to another table/workspace belonging to the same source.
+        snapshot = session.scalar(select(DatabaseSnapshot).where(
+            DatabaseSnapshot.document_id == document_id,
+            DatabaseSnapshot.source_id == source_id,
+            DatabaseSnapshot.workspace_id == workspace_id,
+        ))
         job.retry_count += 1
         job.finished_at = utc_now()
         job.last_error = f"数据库快照刷新失败：{exc}"
@@ -2476,10 +2505,19 @@ def _process_database_refresh(
         session.commit()
         return False
     session.expire_all()
-    job = session.get(ProcessingJob, job.id)
+    job = session.scalar(select(ProcessingJob).join(
+        Document, Document.id == ProcessingJob.document_id
+    ).where(
+        ProcessingJob.id == job_id,
+        ProcessingJob.document_id == document_id,
+        Document.workspace_id == workspace_id,
+    ))
     if job is None:
         return False
-    source = session.get(DatabaseSource, snapshot.source_id)
+    source = session.scalar(select(DatabaseSource).where(
+        DatabaseSource.id == source_id,
+        DatabaseSource.workspace_id == workspace_id,
+    ))
     job.status = "completed"
     job.finished_at = utc_now()
     job.next_retry_at = None
