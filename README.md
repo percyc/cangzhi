@@ -259,6 +259,10 @@ make doctor
 完整的局域网/公网部署、端口、HTTPS、国内网络、升级、备份和排障说明见
 [部署与首次使用](docs/DEPLOYMENT.md)。
 
+无互联网的内网主机请使用[离线镜像部署](docs/DEPLOYMENT.md#21-内网离线部署只启动已构建镜像)：
+先在有网环境构建并导出全部服务镜像（包含独立的 migrate），加载后用
+`docker compose up -d --no-build --pull never` 启动，不使用会重新构建的 `make upgrade`。
+
 ### 第一次使用
 
 1. 打开 Web，创建唯一管理员账户。登录后直接进入知识库，可以先上传小文件、

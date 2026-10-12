@@ -86,6 +86,59 @@ PostgreSQL 健康 -> Alembic 迁移完成 -> API 健康 -> Web 与 Worker 启动
 设备上的登录会话。修改密码会让其他浏览器会话失效，当前设备可继续使用；外部接入
 令牌（PAT）不会随密码自动撤销，需要时在“设置 → 外部接入”单独撤销。
 
+### 2.1 内网离线部署（只启动已构建镜像）
+
+在有网机器构建，在内网机器只加载和启动。不要在内网执行 `make upgrade` 或
+`up --build`：它们会重新构建并尝试安装依赖。
+
+有网机器在待交付的源码版本下执行（以下假设 Compose 项目名为 `cangzhi`）：
+
+```bash
+docker compose -p cangzhi build api worker migrate web
+docker compose -p cangzhi pull postgres
+docker image save -o ../cangzhi-images.tar \
+  cangzhi-api:latest cangzhi-worker:latest cangzhi-migrate:latest \
+  cangzhi-web:latest pgvector/pgvector:pg16
+sha256sum ../cangzhi-images.tar > ../cangzhi-images.tar.sha256
+```
+
+同时带入同版本 `compose.yaml` 和首次安装所需的 `.env.example`。镜像包不包含
+数据库、原文件或部署密钥；已有实例保留原 `.env`、`storage/` 和数据库卷，升级前备份。
+校验文件中的路径需与内网存放位置一致。构建机器与目标机器的 CPU 架构须一致；
+Web 的根路径/子路径配置也必须在构建时确定。
+
+内网机器执行：
+
+```bash
+sha256sum -c ../cangzhi-images.tar.sha256
+docker load -i ../cangzhi-images.tar
+docker compose -p cangzhi up -d --no-build --pull never
+docker compose -p cangzhi logs --tail=100 migrate
+docker compose -p cangzhi ps -a
+```
+
+**已有实例必须沿用原 Compose 项目名**，不要为了匹配镜像擅自换 `-p`，否则可能使用
+另一个数据库卷。应用服务默认镜像名是 `<项目名>-<服务名>`；若打包端和目标端名称不同，
+用附加 Compose 文件为 api/worker/migrate/web 显式指定包中的 `image`，并在每次命令
+中同时传 `-f compose.yaml -f compose.images.yaml`，保留目标端原项目名。
+只想重新启动已存在且未更新的容器，可用 `docker compose start`；它不会应用新镜像。
+
+`--no-build --pull never` 禁止构建和拉取，缺镜像会直接报错。`migrate` 正常应为
+`Exited (0)`；失败必须修复，不能跳过迁移或删除数据卷。全部镜像齐备后启动不需要
+互联网，但公网模型和网页采集仍需网络；离线使用应配置可达的内网模型。
+
+### 2.2 迁移提示缺少 psycopg
+
+API/Worker 的依赖统一约束为 `sqlalchemy>=2.0,<2.1`。当前同步迁移和 Worker
+使用裸 `postgresql://` URL，镜像安装 `psycopg2-binary`；SQLAlchemy 2.1 把该 URL
+的默认驱动改为 psycopg 3，未限制版本的重建可能报 `No module named 'psycopg'`。
+参见 [SQLAlchemy 2.1 迁移说明](https://docs.sqlalchemy.org/en/21/changelog/migration_21.html)。
+
+更新依赖后必须重新构建 **api、worker、migrate 三个服务**，重新导出并加载镜像。
+`migrate` 虽使用 API Dockerfile，仍有独立镜像名；只更新 api 不会自动更新它。
+不要在内网容器里临时 pip 安装、清空数据卷或绕过迁移。此版本上限是兼容修复，
+不是完整依赖锁；显式同步驱动和可复现依赖锁仍需后续验证。
+
 ## 3. 首次使用清单
 
 建议按以下顺序完成初始化：

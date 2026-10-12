@@ -296,6 +296,11 @@ encrypted and are never displayed back in plaintext.
 For LAN or public deployment, HTTPS, ports, upgrades, backup, and
 troubleshooting, see [Deployment](docs/DEPLOYMENT.md).
 
+For offline hosts, follow the [offline image guide](docs/DEPLOYMENT.md#21-内网离线部署只启动已构建镜像).
+Build and export all service images online, including the separate `migrate` image, then load
+them and run `docker compose up -d --no-build --pull never`. Do not use `make upgrade`
+offline: it rebuilds images.
+
 ### First-time workflow
 
 1. Open the web app and create the sole administrator. After login, start in

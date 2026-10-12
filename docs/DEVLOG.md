@@ -1677,3 +1677,26 @@
 - 局限与后续：既有生产依赖审计仍为1 critical / 2 high，未因本轮引入或消除，CZ-SEC01
   保持未完成；没有扩大服务监听或公网暴露范围。标签页草稿、前端版本核对及真机辅助功能
   边界继续见 `WEB_WORKBENCH.md`。回退优先使用保留镜像，事实源恢复必须另行明确授权。
+
+### 2026-10-12 离线迁移数据库驱动兼容修复（CZ-O05）
+
+- 维护者反馈离线镜像在迁移启动时报缺少 psycopg。核对官方2.1迁移说明及代码：
+  SQLAlchemy2.1的裸PostgreSQL URL改用psycopg3；requirements原来只有下限，
+  同步迁移/Worker没有指定驱动且只安装psycopg2-binary。API异步路径已有asyncpg转换。
+  本轮未接触故障机器，不将本机旧运行镜像误认为用户反馈的2.1.4镜像。
+- 在 `codex/CZ-O05-offline-sqlalchemy` 同时限制API/Worker为`sqlalchemy>=2.0,<2.1`，
+  保持当前驱动与URL契约。新增6项测试约束两份依赖、同步engine/迁移配置及异步驱动加载。
+  显式驱动统一与完整依赖锁另列CZ-O05后续，不宣称这个版本上限解决所有依赖漂移。
+- API/Worker独立标签重建实际安装SQLAlchemy2.0.54、psycopg2-binary2.9.13、asyncpg0.32.0；
+  两镜像pip check通过。无网络容器内认证、健康、数据库来源、新鲜度、处理器及驱动
+  相关103项通过（1条既有Starlette测试客户端弃用警告）；最终Worker镜像驱动6项通过。
+- 独立无外网PostgreSQL16、tmpfs数据、无宿主端口或真实数据挂载下，从空库迁移至0037，
+  再次upgrade head成功；API asyncpg readiness200，Worker同步健康检查和真实空队列
+  进程启动/优雅退出exit0通过。不是全部API/Worker、真实旧数据升级或模型质量验收。
+- 导出使用独立offline-20261012标签，API与migrate共用`d72159fcdc4a`，Worker为
+  `53cd52633552`；Web复用`731fd41f18d5`，数据库沿用`ccc6e83d6e35`，均linux/amd64。
+  包附Compose镜像覆盖文件，保留目标实例原项目名；中英文README链接离线部署指南，
+  明确禁止离线重建/拉取、遗漏migrate、换项目名误用空卷、删除数据库或绕过迁移。
+- 边界：只构建/验证/导出，没有Compose部署、重启现有服务、迁移真实库、推送镜像或
+  Git远端操作。Web未重新构建，CZ-SEC01既有前端安全待办未解决；子路径或ARM目标需
+  另备匹配镜像。打包产物不包含部署环境文件、凭据或用户资料。

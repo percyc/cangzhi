@@ -1,4 +1,5 @@
-sqlalchemy>=2.0
+# Keep in sync with API until explicit driver selection is validated.
+sqlalchemy>=2.0,<2.1
 psycopg2-binary
 pgvector
 cryptography>=42.0
