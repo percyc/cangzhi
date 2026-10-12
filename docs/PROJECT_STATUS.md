@@ -112,7 +112,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
 - 2026-10-12 离线镜像依赖兼容：Codex 在 `codex/CZ-O05-offline-sqlalchemy`
-  将 API/Worker 的 SQLAlchemy 统一限制为 `>=2.0,<2.1`，新镜像实际为 2.0.54；
+  提交 `56fb0c6`，将 API/Worker 的 SQLAlchemy 统一限制为 `>=2.0,<2.1`，新镜像实际为 2.0.54；
   相关回归103项、最终Worker驱动6项、pip check、隔离PostgreSQL从空库迁移至0037
   及重复升级、asyncpg readiness和同步Worker运行通过。补中英文README入口和离线指南。
   未部署、合并、推送，不修改运行数据库或队列；完整依赖锁与前端安全待办仍未完成。
