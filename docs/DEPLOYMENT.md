@@ -139,6 +139,35 @@ API/Worker 的依赖统一约束为 `sqlalchemy>=2.0,<2.1`。当前同步迁移�
 不要在内网容器里临时 pip 安装、清空数据卷或绕过迁移。此版本上限是兼容修复，
 不是完整依赖锁；显式同步驱动和可复现依赖锁仍需后续验证。
 
+**已装同版应用、仅修复本次依赖问题的最小交付：** Web/PostgreSQL 不变，只构建和
+导出 api/worker/migrate。不能默认只换 migrate：Worker 使用相同的同步驱动，可能
+在迁移恢复后继续启动失败。只有另外两项已验证为兼容版本，才能缩小到单镜像修复。
+
+有网构建机（干净工作区，示例项目名 `cangzhi`）：
+
+```bash
+git fetch gitea tag v1.3.1
+git switch --detach v1.3.1
+docker compose -p cangzhi build api worker migrate
+docker save -o ../cangzhi-fix-v1.3.1.tar \
+  cangzhi-api:latest cangzhi-worker:latest cangzhi-migrate:latest
+```
+
+内网原部署目录（已有 Web/PostgreSQL 镜像，先备份，沿用原项目名和覆盖文件）：
+
+```bash
+docker load -i ../cangzhi-fix-v1.3.1.tar
+docker compose up -d --no-build --pull never
+docker compose logs --tail=100 migrate
+docker compose ps -a
+```
+
+没有 `gitea` remote 的构建机用自己的远端名。示例镜像名要求内网项目名为 `cangzhi`；
+若不同，在构建机使用目标项目名并调整导出镜像名，不要改内网实例项目名。
+已使用显式 `image` 或镜像覆盖文件时，构建/导出须匹配其实际引用。
+该三镜像包不是从早期版本升级的通用包；旧应用版本、ARM/子路径或定制优先Worker
+部署需另行匹配版本与启动方案。
+
 ## 3. 首次使用清单
 
 建议按以下顺序完成初始化：
