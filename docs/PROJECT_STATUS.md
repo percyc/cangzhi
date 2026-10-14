@@ -72,7 +72,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
-- `CZ-Q04` 上传代理限额修复已完成隔离验证，待维护者发布；见最近完成。
+- `CZ-Q04` 上传代理限额修复已完成隔离验证，维护者已授权合并推送；部署另行执行。
 
 - `CZ-O05` 当前兼容修复已完成，见最近完成；显式驱动与完整依赖锁仍在 BACKLOG。
 
@@ -120,7 +120,8 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 - 2026-10-14 Web上传代理限额：Codex，`codex/CZ-Q04-upload-proxy-limit`。
   Web构建与API共用MAX_UPLOAD_SIZE_MB，默认代理51MiB、文件50MiB，保留1MiB表单余量。
   Web108项、lint/typecheck、隔离生产构建及5组真实HTTP转发、API上传7项通过。
-  仅合成数据/本机上游验证，不调用模型或真实知识库；未合并、推送、部署，线上仍待更新Web。
+  功能提交`b5448db`；仅合成数据/本机上游验证，不调用模型或真实知识库。
+  后续已获维护者授权合并推送main，线上仍待维护者更新Web，不因代码同步自动部署。
 
 - 2026-10-12 离线镜像依赖兼容：Codex 在 `codex/CZ-O05-offline-sqlalchemy`
   提交 `56fb0c6`，将 API/Worker 的 SQLAlchemy 统一限制为 `>=2.0,<2.1`，新镜像实际为 2.0.54；
