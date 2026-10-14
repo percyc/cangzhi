@@ -1719,3 +1719,25 @@
   保留原Compose项目名、覆盖配置、数据库卷及storage，避免离线重建或跳过迁移。
 - 应用代码未再改动，沿用上一轮103项回归、最终Worker6项与隔离迁移验证；
   本轮仅核对文档、diff和Git状态，不把本标签视为全量功能或依赖安全验收。
+
+### 2026-10-14 Web上传10MiB截断修复（CZ-Q04）
+
+- 日志定位：Web上传请求触发Next.js默认10MiB缓冲上限并报ECONNRESET，API配置为50MiB。
+  故障在转发层，不是DOCX解析失败。实际运行版本为Next16.2.12，配置支持
+  experimental.proxyClientMaxBodySize；此前只核对API上限不足以说明整条上传链路。
+- Codex在`codex/CZ-Q04-upload-proxy-limit`统一Web构建/API运行MAX_UPLOAD_SIZE_MB，
+  默认Web代理51MiB，保留1MiB multipart余量；API继续严格执行50MiB文件上限。
+  无效或非安全整数配置显式失败，Compose传构建参数，Dockerfile在build前设置。
+  不修改鉴权、上传公共契约、解析或模型逻辑，不新增迁移。
+- 单元与静态：Web108项、lint/typecheck通过；API上传7项通过，新增DOCX MIME合成
+  载荷在配置边界处允许、超1字节拒绝且不残留Blob的检查。1条既有Starlette弃用警告。
+  Compose以/dev/null替代环境文件，用100MiB确认API/Web构建/Web运行参数一致。
+- 集成：临时目录复制无环境文件的Web源码，webpack生产构建24页通过；独立loopback
+  Web与合成HTTP上游验证11MiB、50MiB文件请求体完整且SHA256一致，50MiB+1字节的
+  上游413与未鉴权401原样返回，根API别名/子路径/API上传入口共5组通过。
+  不出现Request body exceeded或ECONNRESET；脚本见tests/browser/upload-proxy.cjs。
+  上游为受控测试替身，非实际上传/解析完整DOCX或运行实例端到端验收；API边界另由单测覆盖。
+- 交付：更新DEPLOYMENT中的构建固化、仅Web镜像更新与外部反代限额说明。
+  不读取部署凭据、不修改资料、不合并/推送/打标签/部署；临时Web与合成上游已退出，
+  临时构建目录已移除，无用户数据。在线修复仍需维护者更新Web镜像。
+  超过代理总额度的畸形请求仍可能被Next截断；提高额度会增加并发内存，非分片上传方案。

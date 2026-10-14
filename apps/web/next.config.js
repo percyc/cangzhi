@@ -11,8 +11,20 @@ const basePath = configuredBasePath && configuredBasePath !== '/'
   ? `/${configuredBasePath.replace(/^\/+|\/+$/g, '')}`
   : ''
 
+// Match the API file limit, with 1 MiB reserved for multipart fields/boundaries.
+// This is a build-time setting for production; API still enforces file bytes.
+const uploadLimitMb = Number(process.env.MAX_UPLOAD_SIZE_MB || '50')
+const proxyBodyLimit = (uploadLimitMb + 1) * 1024 * 1024
+if (!Number.isSafeInteger(uploadLimitMb) || uploadLimitMb <= 0 ||
+    !Number.isSafeInteger(proxyBodyLimit)) {
+  throw new Error('MAX_UPLOAD_SIZE_MB must be a positive integer within the safe byte range')
+}
+
 const nextConfig = {
   reactStrictMode: true,
+  experimental: {
+    proxyClientMaxBodySize: proxyBodyLimit,
+  },
   allowedDevOrigins,
   // DSH exposes the complete Cangzhi console through a same-origin gateway.
   // Next must know the mount point at build time so client navigation and

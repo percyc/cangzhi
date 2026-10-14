@@ -1,5 +1,7 @@
 from io import BytesIO
 
+import pytest
+
 from apps.api.core.config import settings
 
 
@@ -154,3 +156,20 @@ def test_file_upload_enforces_configured_limit(client, monkeypatch):
 
     assert response.status_code == 413
     assert list(storage._blob_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("extra_bytes, expected_status", [(0, 201), (1, 413)])
+def test_docx_limit_counts_file_not_multipart_overhead(client, monkeypatch, extra_bytes, expected_status):
+    test_client, storage = client
+    monkeypatch.setattr(settings, "max_upload_size_mb", 1)
+    response = test_client.post(
+        "/api/files/upload",
+        data={"title": "Synthetic upload boundary"},
+        files={"file": (
+            "boundary.docx", BytesIO(b"x" * (1024 * 1024 + extra_bytes)),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )},
+    )
+    assert response.status_code == expected_status
+    if expected_status == 413:
+        assert list(storage._blob_path.iterdir()) == []

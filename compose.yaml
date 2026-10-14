@@ -118,6 +118,7 @@ services:
       args:
         API_URL: http://api:8000
         CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-}
+        MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}
     container_name: cangzhi-web
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
     ports:
@@ -125,6 +126,7 @@ services:
     environment:
       API_URL: http://api:8000
       CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}
     depends_on:
       api:
         condition: service_healthy
