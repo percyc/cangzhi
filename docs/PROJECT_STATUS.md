@@ -72,11 +72,6 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
-- `CZ-Q04` 图片型 Word OCR 兜底已完成代码与隔离验证，负责人 Codex，分支
-  `codex/CZ-Q04-word-ocr-fallback`。复用 PDF 预览与 OCR 限额，阻止空正文假成功；
-  70项相关回归及25项专项通过（部分重叠），断网合成 Word→PDF→本地 OCR 通过。
-  未部署、未重处理历史资料、未调用真实外部模型；详见本轮 DEVLOG。
-
 - `CZ-Q04` 上传代理限额修复已合并推送，并按维护者2026-10-14本轮明确授权仅部署Web；
   发布记录分支`codex/CZ-Q04-upload-deploy`，负责人Codex，无剩余本轮实施项。
 
@@ -120,6 +115,12 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 | 问答记录增强 | `CZ-U02` | 进行中 | 服务端保存与删除已交付；重命名 / 归档 / 搜索 / 按原范围重跑待补 |
 
 ## 4. 最近完成（时间倒序）
+
+- 2026-10-16 图片型 Word OCR 兜底（CZ-Q04）：Codex，分支
+  `codex/CZ-Q04-word-ocr-fallback`，功能提交 `93d8e5d`。复用 PDF 预览与 OCR 限额，
+  阻止空正文假成功；70项相关回归及25项专项通过（部分重叠），断网合成
+  Word→PDF→本地 OCR 通过。Web108项、lint/typecheck通过。
+  未部署、未重处理历史资料、未调用真实外部模型；详见本轮 DEVLOG。
 
 完整记录见 `DEVLOG.md`；本节只列最近若干条以便快速对位。
 
