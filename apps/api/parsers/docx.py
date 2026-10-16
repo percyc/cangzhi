@@ -148,6 +148,10 @@ class DocxParser(BaseParser):
                         "nested_tables_supported": False,
                         "revision_tracking_supported": False,
                         "body_indexed_children": body_index,
+                        "embedded_image_count": sum(
+                            1 for part in doc.part.related_parts.values()
+                            if part.content_type.startswith("image/")
+                        ),
                     },
                 },
             )

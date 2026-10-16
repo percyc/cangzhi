@@ -1423,7 +1423,7 @@ function PdfExtractionSummary({
   return (
     <div className="mt-4 rounded-lg border border-slate-200 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-sm font-medium text-slate-800">PDF 解析摘要</h4>
+        <h4 className="text-sm font-medium text-slate-800">文字提取与 OCR（PDF / Word 预览）</h4>
         <span className="text-xs text-slate-500">
           {statusText}
           {extraction.engine ? ` · ${extraction.engine}` : ''}

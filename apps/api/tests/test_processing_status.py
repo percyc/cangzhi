@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from sqlalchemy import select
 
 from apps.api.core.db import get_db
@@ -650,7 +652,8 @@ def test_vector_repair_endpoint_reports_missing_active_profile(client):
     assert "尚未启用向量模型" in response.json()["detail"]
 
 
-def test_pdf_extraction_summary_is_propagated_to_pipeline(client):
+@pytest.mark.parametrize("document_type", ["pdf", "docx", "doc"])
+def test_pdf_extraction_summary_is_propagated_to_pipeline(client, document_type):
     test_client, _ = client
     created = test_client.post(
         "/api/notes",
@@ -682,7 +685,7 @@ def test_pdf_extraction_summary_is_propagated_to_pipeline(client):
             version.meta = {"ai_status": "not_configured"}
             version.structured_content = {
                 "schema_version": 1,
-                "document_type": "pdf",
+                "document_type": document_type,
                 "blocks": [],
                 "metadata": {
                     "page_count": 12,

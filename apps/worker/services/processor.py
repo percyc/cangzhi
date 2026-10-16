@@ -51,7 +51,7 @@ from apps.api.models.taxonomy import (
 from apps.api.models.webdav import WebDAVEntry, WebDAVSource
 from apps.api.ocr import build_external_ocr_provider
 from apps.api.parsers import get_parser_for_content
-from apps.api.parsers.base import StructuredContent
+from apps.api.parsers.base import ParserResult, StructuredContent
 from apps.api.parsers.pdf import PdfOcrOptions
 from apps.api.parsers.text_sanitize import (
     UnicodeKeyCollisionError,
@@ -142,7 +142,10 @@ STAGE_CYCLE: tuple[str, ...] = (
 
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
-TERMINAL_PARSE_FAILURE_REASONS = frozenset({"spreadsheet_limit_exceeded"})
+TERMINAL_PARSE_FAILURE_REASONS = frozenset({
+    "spreadsheet_limit_exceeded", "word_empty_text", "word_ocr_disabled",
+    "word_ocr_empty", "word_ocr_failed", "word_preview_unavailable",
+})
 
 def _sanitize_structured_content(
     structured: StructuredContent,
@@ -337,6 +340,81 @@ def _is_terminal_parse_failure(details: dict | None) -> bool:
         isinstance(details, dict)
         and details.get("reason") in TERMINAL_PARSE_FAILURE_REASONS
     )
+
+
+def _word_ocr_fallback(
+    session: Session,
+    version: DocumentVersion,
+    result: ParserResult,
+    content: bytes | str,
+    content_type: str,
+    filename: str | None,
+    options: PdfOcrOptions,
+) -> ParserResult:
+    """Use the exact version preview for image-only Word; never OCR text Word.
+
+    Images are only a trigger, not a page count. PDF owns local/external budgets.
+    Empty/failed OCR stops automatic retries to avoid repeatedly spending the
+    external budget. An explicit user retry can try again after configuration
+    is corrected. Source bytes and existing body/indexes are never replaced here.
+    """
+    structured = result.structured_content
+    if (
+        not result.success
+        or structured is None
+        or structured.document_type not in {"doc", "docx"}
+    ):
+        return result
+    if structured.full_text().strip():
+        return result
+
+    def failure(reason: str, message: str, **details) -> ParserResult:
+        return ParserResult(
+            success=False, error_message=message,
+            error_details={"reason": reason, **details},
+        )
+
+    if not structured.metadata.get("docx_extraction", {}).get("embedded_image_count"):
+        return failure("word_empty_text", "Word 未提取到正文或内嵌图片，请检查原文件或导出 PDF 后上传。")
+    if not options.enabled:
+        return failure("word_ocr_disabled", "图片型 Word 没有可提取文字，OCR 已关闭；启用后可手动重试。")
+    if not _ensure_word_pdf_preview(session, version, content, content_type, filename):
+        return failure("word_preview_unavailable", "图片型 Word 转 PDF 失败，无法识别；请检查转换服务或导出 PDF 后上传。")
+    preview = session.get(Blob, version.preview_blob_id)
+    if preview is None:
+        return failure("word_preview_unavailable", "Word 的 PDF 预览缺失，请重新生成预览后重试。")
+    try:
+        pdf_result = get_parser_for_content(
+            "application/pdf", "preview.pdf", pdf_ocr_options=options,
+        ).parse(_read_blob_bytes(preview), "application/pdf")
+    except Exception:
+        # Do not persist upstream responses, credentials or image bytes.
+        return failure("word_ocr_failed", "图片型 Word 识别异常，未自动重复调用；请检查 OCR 服务后手动重试。")
+    pdf_structured = pdf_result.structured_content
+    if not pdf_result.success or pdf_structured is None:
+        return failure("word_ocr_failed", "图片型 Word 的 PDF 识别失败，请检查预览及 OCR 服务后手动重试。")
+    if not pdf_structured.full_text().strip():
+        return failure(
+            "word_ocr_empty",
+            "图片型 Word 识别后仍无正文；请检查预览清晰度、OCR 配置及页数限制后手动重试。",
+            pdf_extraction=pdf_structured.metadata.get("pdf_extraction", {}),
+        )
+    pdf_structured.document_type = structured.document_type
+    pdf_structured.metadata.update({
+        "docx_extraction": {
+            **structured.metadata.get("docx_extraction", {}),
+            "mode": "preview_pdf_ocr",
+            "index_semantics": (
+                "块的 page、bbox 与 paragraph_index 来自当前版本 PDF 预览；"
+                "paragraph_index 为 PDF 解析器内部序号，不对应 DOCX 正文节点。"
+            ),
+        },
+        "word_ocr": {
+            "version": "word-pdf-ocr-v1", "coordinate_source": "preview_pdf",
+            "preview_blob_id": preview.id, "source_format": structured.document_type,
+        },
+    })
+    return pdf_result
 
 
 def _load_content_for_parsing(
@@ -2585,6 +2663,10 @@ def _process_parsing(
                 pdf_ocr_options=pdf_ocr_options,
             )
             result = parser.parse(content_bytes, content_type)
+            result = _word_ocr_fallback(
+                session, version, result, content_bytes, content_type, filename,
+                pdf_ocr_options,
+            )
         except Exception as exc:
             logger.exception("parser_crashed", job_id=job.id)
             return _mark_parse_failure(
