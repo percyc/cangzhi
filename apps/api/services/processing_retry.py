@@ -13,6 +13,19 @@ class ProcessingRetryError(Exception):
         self.status_code = status_code
 
 
+async def check_full_reprocess(db: AsyncSession, document: Document, version: DocumentVersion):
+    """Protect existing stage work; repeated requests for the same run are idempotent."""
+    if (document.meta or {}).get("external_source") == "database":
+        raise ProcessingRetryError("数据库资料请从知识源刷新快照。", 400)
+    active = await db.scalar(select(ProcessingJob).where(
+        ProcessingJob.document_version_id == version.id,
+        ProcessingJob.status.in_(["created", "retry", "processing"]),
+    ).limit(1))
+    if active is not None and not (active.stage == "parsing" and active.config_version == "2"):
+        raise ProcessingRetryError("当前版本还有处理任务，请等待完成后再重新处理。")
+    return active
+
+
 async def retry_failed_stages(db: AsyncSession, document_id: int) -> dict:
     document = await db.scalar(
         select(Document).where(Document.id == document_id).with_for_update()
@@ -59,11 +72,11 @@ async def retry_failed_stages(db: AsyncSession, document_id: int) -> dict:
     if not stages:
         return {"success": True, "message": "没有需要重试的基础处理阶段", "job_ids": [], "stages": []}
     if "parsing" in stages and latest["parsing"].config_version == "2":
-        # A previous full-reprocess request clears organization after parsing.
-        # It cannot safely be disguised as a non-destructive stage recovery.
+        # A full reprocess regenerates AI organization and indexes, with costs
+        # beyond a single-stage retry. Require its explicit confirmation again.
         raise ProcessingRetryError(
             "此解析任务来自完整重新处理，继续会重新生成整理信息；"
-            "普通重试未执行，请到详情页确认“完整重新处理”后再继续"
+            "普通重试未执行，请到详情页确认“重新处理文档”后再继续"
         )
     if "parsing" not in stages and not version.structured_content:
         raise ProcessingRetryError("缺少解析内容，请到详情页检查并明确执行完整重新处理")

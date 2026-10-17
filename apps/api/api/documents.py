@@ -786,6 +786,8 @@ async def update_document_metadata(
     if "summary" in payload.model_fields_set:
         if document.current_version_id is None:
             raise HTTPException(status_code=400, detail="资料没有当前版本")
+        version = await db.get(DocumentVersion, document.current_version_id)
+        version.meta = {**(version.meta or {}), "manual_summary": True}
         summary = (
             await db.execute(
                 select(DocumentSummary).where(
@@ -825,6 +827,8 @@ async def update_document_tags(
         raise HTTPException(status_code=404, detail="资料不存在")
     if document.current_version_id is None:
         raise HTTPException(status_code=400, detail="资料没有当前版本")
+    version = await db.get(DocumentVersion, document.current_version_id)
+    version.meta = {**(version.meta or {}), "manual_tags": True}
     tags = (
         (await db.execute(select(Tag).where(Tag.id.in_(payload.tag_ids))))
         .scalars()
@@ -1045,7 +1049,7 @@ async def reprocess_document(
     db: AsyncSession = Depends(get_db),
     storage: BlobStorage = Depends(get_storage),
 ):
-    document = await db.get(Document, document_id)
+    document = await db.get(Document, document_id, with_for_update=True)
     if document is None or document.is_deleted:
         raise HTTPException(status_code=404, detail="资料不存在")
 
@@ -1054,6 +1058,14 @@ async def reprocess_document(
     version = await db.get(DocumentVersion, document.current_version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="当前版本不存在")
+
+    from ..services.processing_retry import check_full_reprocess, ProcessingRetryError
+    try:
+        active = await check_full_reprocess(db, document, version)
+    except ProcessingRetryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from None
+    if active is not None:
+        return DocumentReprocessResponse(success=True, message="已在处理队列中", job_id=active.id)
 
     document_meta = document.meta or {}
     if document_meta.get("external_source") == "webdav" and version.blob_id is None:
@@ -1134,6 +1146,7 @@ async def reprocess_document(
                 job_id=existing_job.id,
             )
         existing_job.status = "created"
+        existing_job.config_version = "2"
         existing_job.retry_count = 0
         existing_job.next_retry_at = None
         existing_job.last_error = None

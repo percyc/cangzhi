@@ -6,16 +6,17 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from typing import Any
 
 from ..ocr.base import ExternalOcrError, ExternalOcrProvider
 from .base import BaseParser, Block, ParserResult, StructuredContent
+from .ocr_orientation import correct_orientation, restore_boxes
 
 logger = logging.getLogger(__name__)
 
-PDF_OCR_VERSION = "pdf-hybrid-v2"
+PDF_OCR_VERSION = "pdf-hybrid-v3-orientation"
 PDF_OCR_ENGINE = "tesseract"
 PDF_OCR_EXTERNAL_ENGINE = "external-vision"
 
@@ -149,6 +150,7 @@ class PdfParser(BaseParser):
             )
 
         options = self._options
+        self._selected_render = None
         try:
             reader = pypdf.PdfReader(BytesIO(content))
             page_count = len(reader.pages)
@@ -402,7 +404,15 @@ class PdfParser(BaseParser):
                 external_status="completed",
             )
 
+        low_quality_pages = []
+        for page_number in ocr_completed_pages:
+            page_blocks = [b for b in blocks if b.page == page_number and b.extra.get("source") == "ocr"]
+            confidences = [b.extra["confidence"] for b in page_blocks if b.extra.get("confidence") is not None]
+            if confidences and sum(confidences) / len(confidences) < 0.5:
+                low_quality_pages.append(page_number)
         pdf_extraction: dict[str, Any] = {
+            "low_quality_pages": low_quality_pages,
+            "rotation_corrected_pages": sorted({b.page for b in blocks if b.extra.get("rotation_correction")}),
             "version": PDF_OCR_VERSION,
             "engine": PDF_OCR_ENGINE,
             "page_count": page_count,
@@ -434,6 +444,8 @@ class PdfParser(BaseParser):
             pdf_extraction["ocr_status"] = "failed"
         elif ocr_completed_pages:
             pdf_extraction["ocr_status"] = "completed"
+        if low_quality_pages:
+            pdf_extraction["ocr_status"] = "needs_review"
 
         metadata: dict[str, Any] = {
             "page_count": page_count,
@@ -468,6 +480,8 @@ class PdfParser(BaseParser):
         page_number: int,
         options: PdfOcrOptions,
         renderer: Callable[[int], _PageRender],
+        *,
+        correct_direction: bool = True,
     ) -> _PageOcrResult:
         tesseract = (
             self._tesseract_lookup()
@@ -517,7 +531,18 @@ class PdfParser(BaseParser):
             page_width_pt=render.page_width_pt,
             page_height_pt=render.page_height_pt,
         )
-        return _PageOcrResult(page=page_number, lines=lines)
+        result = _PageOcrResult(page=page_number, lines=lines)
+        if correct_direction:
+            result, selected, angle = correct_orientation(
+                render, result,
+                lambda candidate, remaining: self._ocr_page(
+                    page_number, replace(options, timeout_seconds=remaining),
+                    lambda _: candidate, correct_direction=False,
+                ),
+                budget_seconds=min(options.timeout_seconds, 30.0),
+            )
+            self._selected_render = (page_number, selected, angle, render)
+        return result
 
     def _run_external_ocr(
         self,
@@ -539,7 +564,8 @@ class PdfParser(BaseParser):
         if provider is None:
             return _ExternalOcrPageOutcome(error="disabled")
         try:
-            render = ocr_renderer(page_number)
+            selected = getattr(self, "_selected_render", None)
+            render = selected[1] if selected and selected[0] == page_number else ocr_renderer(page_number)
         except Exception:
             logger.exception(
                 "external_ocr_render_failed", extra={"page": page_number}
@@ -581,6 +607,8 @@ class PdfParser(BaseParser):
             page_width_pt=render.page_width_pt,
             page_height_pt=render.page_height_pt,
         )
+        if selected and selected[0] == page_number and selected[2]:
+            internal = restore_boxes(internal, selected[2], selected[3].page_width_pt, selected[3].page_height_pt)
         if not internal:
             return _ExternalOcrPageOutcome(error="empty_response")
         return _ExternalOcrPageOutcome(lines=internal, error=None)
@@ -1173,6 +1201,7 @@ def _record_ocr_outcome(
             "ocr_engine": engine,
             "bbox": bbox,
             "confidence": confidence,
+            "rotation_correction": line.get("rotation_correction", 0),
         }
         if provider:
             extra["provider"] = provider

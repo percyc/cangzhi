@@ -203,12 +203,33 @@ test('failure retry uses the stage endpoint and full reprocess requires confirma
   await find(page.tree, 'button', '重试失败阶段').props.onClick(); await page.settle();
   assert.ok(calls.some((call) => call.url.endsWith('/retry-failed')));
   page.window.confirm = () => false;
-  find(page.tree, 'button', '完整重新处理').props.onClick(); await page.settle();
+  find(page.tree, 'button', '重新处理文档').props.onClick(); await page.settle();
   assert.equal(calls.some((call) => call.url.endsWith('/reprocess')), false);
   page.unmount();
 });
 
 const rowPage = (dataset_id, offset = 0, value = 'A 数据') => ({ dataset_id, offset, total: 120, columns: ['value'], rows: [{ row_number: offset + 1, value }] });
+
+test('completed document exposes reprocessing with explicit cost and preservation confirmation', async () => {
+  const calls = [], doc = documentFixture();
+  doc.current_version.processing_status = 'ready';
+  const base = documentApi(() => doc, calls, pipeline('completed'));
+  const page = await mountDocument(async (url, init) => {
+    if (init?.method === 'POST') { calls.push({ url, init }); return response({ success: true }); }
+    return base(url, init);
+  });
+  const button = find(page.tree, 'button', '重新处理文档');
+  assert.ok(button && !button.props.disabled);
+  page.window.confirm = (message) => {
+    assert.match(message, /OCR/);
+    assert.match(message, /保留人工编辑/);
+    assert.match(message, /模型费用/);
+    return true;
+  };
+  await button.props.onClick(); await page.settle();
+  assert.ok(calls.some(call => call.url.endsWith('/reprocess')));
+  page.unmount();
+});
 
 test('failed next-page load hides old rows and offers same-page retry', async () => {
   let fail = true;

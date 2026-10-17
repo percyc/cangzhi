@@ -127,6 +127,10 @@ def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
         "ocr_failed_pages": failed,
         "ocr_skipped_pages": skipped,
     }
+    if "rotation_corrected_pages" in extraction:
+        summary["rotation_corrected_pages"] = _as_list(extraction["rotation_corrected_pages"])
+    if "low_quality_pages" in extraction:
+        summary["low_quality_pages"] = _as_list(extraction["low_quality_pages"])
 
     # External OCR stage 2 fields. The keys are only attached
     # when the document was parsed after the new code shipped,

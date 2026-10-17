@@ -856,7 +856,7 @@ def _process_understanding(
             select(DocumentTag).where(DocumentTag.document_version_id == version.id)
         ).all()
     )
-    if existing_summary is not None or existing_categories or existing_tags:
+    if (existing_summary is not None or existing_categories or existing_tags) and not (version.meta or {}).get("reprocess_understanding"):
         return _complete_understanding_job(session, job, document, version)
 
     metadata = (
@@ -930,6 +930,10 @@ def _complete_understanding_job(
     document: Document,
     version: DocumentVersion,
 ) -> bool:
+    meta = dict(version.meta or {})
+    meta.pop("reprocess_understanding", None)
+    version.meta = meta
+    session.add(version)
     job.status = "completed"
     job.finished_at = utc_now()
     job.next_retry_at = None
@@ -1979,7 +1983,7 @@ def _apply_inbox_fallback(
                 rationale=reason,
             )
         )
-    else:
+    elif existing_primary.source != "user" and not (version.meta or {}).get("reprocess_understanding"):
         existing_primary.category_id = inbox.id
         existing_primary.source = "fallback"
         existing_primary.rationale = reason
@@ -1991,6 +1995,19 @@ def _apply_inbox_fallback(
     meta["ai_reason"] = reason
     version.meta = meta
     session.add(version)
+
+
+def _add_understanding_unless_user_owned(session: Session, item) -> None:
+    model = type(item)
+    version = session.get(DocumentVersion, item.document_version_id)
+    flag = {DocumentSummary: "manual_summary", DocumentTag: "manual_tags"}.get(model)
+    if flag and version and (version.meta or {}).get(flag):
+        return
+    manual = session.scalar(select(model.id).where(
+        model.document_version_id == item.document_version_id, model.source == "user",
+    ).limit(1))
+    if manual is None:
+        session.add(item)
 
 
 def _persist_understanding_result(
@@ -2014,7 +2031,8 @@ def _persist_understanding_result(
         )
         return
 
-    session.add(
+    _clear_generated_organization(session, version.id)
+    _add_understanding_unless_user_owned(session,
         DocumentCategory(
             document_id=document.id,
             document_version_id=version.id,
@@ -2026,7 +2044,11 @@ def _persist_understanding_result(
         )
     )
 
-    for tag_slug in result.tags:
+    manual_tags = bool((version.meta or {}).get("manual_tags")) or session.scalar(
+        select(DocumentTag.id).where(DocumentTag.document_version_id == version.id,
+                                     DocumentTag.source == "user").limit(1)
+    ) is not None
+    for tag_slug in ([] if manual_tags else result.tags):
         cleaned = tag_slug.strip()
         if not cleaned:
             continue
@@ -2036,7 +2058,7 @@ def _persist_understanding_result(
             tag = Tag(slug=normalized, name=cleaned[:255])
             session.add(tag)
             session.flush()
-        session.add(
+        _add_understanding_unless_user_owned(session,
             DocumentTag(
                 document_id=document.id,
                 document_version_id=version.id,
@@ -2046,7 +2068,7 @@ def _persist_understanding_result(
             )
         )
 
-    session.add(
+    _add_understanding_unless_user_owned(session,
         DocumentSummary(
             document_id=document.id,
             document_version_id=version.id,
@@ -2069,20 +2091,24 @@ def _clear_understanding_results(
     session: Session,
     version_id: int,
 ) -> None:
-    """Remove derived semantics before an explicit same-version reprocess."""
+    """Schedule new semantics, retaining existing results until generation succeeds."""
+    _reset_understanding_job(session, version_id)
+    _reset_chunking_job(session, version_id)
+
+
+def _clear_generated_organization(session: Session, version_id: int) -> None:
     session.execute(
-        delete(DocumentTag).where(DocumentTag.document_version_id == version_id)
+        delete(DocumentTag).where(DocumentTag.document_version_id == version_id, DocumentTag.source != "user")
     )
     session.execute(
         delete(DocumentCategory).where(
-            DocumentCategory.document_version_id == version_id
+            DocumentCategory.document_version_id == version_id,
+            DocumentCategory.source != "user",
         )
     )
     session.execute(
-        delete(DocumentSummary).where(DocumentSummary.document_version_id == version_id)
+        delete(DocumentSummary).where(DocumentSummary.document_version_id == version_id, DocumentSummary.source != "user")
     )
-    _reset_understanding_job(session, version_id)
-    _reset_chunking_job(session, version_id)
 
 
 def _reset_understanding_job(session: Session, version_id: int) -> None:
@@ -2695,6 +2721,15 @@ def _process_parsing(
             )
 
         structured_content = result.structured_content
+        extraction = structured_content.metadata.get("pdf_extraction", {})
+        low_quality = extraction.get("low_quality_pages", [])
+        if low_quality:
+            return _mark_terminal_failure(
+                session, job, version,
+                "OCR 质量不足，未替换正文和索引；请检查页面方向、清晰度和外部 OCR。待核验页："
+                + ", ".join(str(page) for page in low_quality[:30]),
+                details={"reason": "ocr_quality_review", "pdf_extraction": extraction},
+            )
         sanitization_report = _sanitize_structured_content(structured_content)
         _log_pdf_ocr_summary(document, version, structured_content)
         if (
@@ -2732,6 +2767,7 @@ def _process_parsing(
             version,
             structured_content,
             sanitization_report=sanitization_report,
+            preserve_presentation=job.config_version == "2",
         )
         _ensure_word_pdf_preview(
             session, version, content_bytes, content_type, filename
@@ -2745,6 +2781,7 @@ def _process_parsing(
         session.add(job)
         if job.config_version == "2":
             _clear_understanding_results(session, version.id)
+            version.meta = {**(version.meta or {}), "reprocess_understanding": True}
         has_useful_text = bool(
             (version.raw_content or "").strip()
             and len((version.raw_content or "").strip()) >= MIN_USEFUL_URL_TEXT_LENGTH
@@ -2764,7 +2801,8 @@ def _process_parsing(
             try:
                 with session.begin_nested():
                     from apps.api.services.knowledge_enhancement import start_run
-                    start_run(session, document.id, automatic=True)
+                    if job.config_version != "2":
+                        start_run(session, document.id, automatic=True)
             except Exception:
                 logger.warning("optional_enhancement_not_enqueued", document_id=document.id)
         else:
@@ -2928,6 +2966,7 @@ def _apply_parse_result(
     structured: StructuredContent,
     *,
     sanitization_report: UnicodeSanitizationReport | None = None,
+    preserve_presentation: bool = False,
 ) -> None:
     if sanitization_report is None:
         report = _sanitize_structured_content(structured)
@@ -2958,9 +2997,9 @@ def _apply_parse_result(
     metadata = payload.get("metadata") if isinstance(payload, dict) else None
     if isinstance(metadata, dict):
         title = metadata.get("title")
-        if isinstance(title, str) and title.strip():
+        if isinstance(title, str) and title.strip() and not preserve_presentation:
             document.title = title.strip()[:1024]
-        if "description" in metadata and isinstance(metadata.get("description"), str):
+        if "description" in metadata and isinstance(metadata.get("description"), str) and not preserve_presentation:
             document.description = (metadata.get("description") or "")[:2000]
         if "author" in metadata and isinstance(metadata.get("author"), str):
             doc_meta = dict(document.meta or {})

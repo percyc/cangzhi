@@ -1,6 +1,6 @@
 import asyncio
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from apps.api.core.db import get_db
 from apps.api.main import app
@@ -28,6 +28,7 @@ def test_reprocess_failed_document_is_idempotent(client):
             document = await session.get(Document, document_id)
             version = await session.get(DocumentVersion, document.current_version_id)
             version.processing_status = "failed"
+            await session.execute(update(ProcessingJob).where(ProcessingJob.document_version_id == version.id).values(status="failed"))
             await session.commit()
         finally:
             await dependency.aclose()
@@ -64,6 +65,14 @@ def test_reprocess_nonexistent_document(client):
     assert response.json()["detail"] == "资料不存在"
 
 
+def test_reprocess_refuses_inflight_original_stage(client):
+    test_client, _ = client
+    created = test_client.post("/api/notes", json={"title":"busy", "content":"new content"}).json()
+    response = test_client.post(f"/api/documents/{created['id']}/reprocess")
+    assert response.status_code == 409
+    assert "处理任务" in response.json()["detail"]
+
+
 def test_reprocess_url_discards_old_snapshot(client):
     test_client, _ = client
     created = test_client.post(
@@ -82,6 +91,7 @@ def test_reprocess_url_discards_old_snapshot(client):
             version.blob_id = None
             version.content_hash = "old-block-page"
             version.processing_status = "ready"
+            await session.execute(update(ProcessingJob).where(ProcessingJob.document_version_id == version.id).values(status="completed"))
             await session.commit()
         finally:
             await dependency.aclose()

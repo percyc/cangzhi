@@ -106,6 +106,8 @@ type PipelineStage = {
     ocr_completed_pages: number;
     ocr_failed_pages: number[];
     ocr_skipped_pages: number[];
+    rotation_corrected_pages?: number[];
+    low_quality_pages?: number[];
     external_provider?: { provider: string; model: string; version?: string } | null;
     external_attempted_pages?: number;
     external_completed_pages?: number;
@@ -453,8 +455,8 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   const handleRetry = async (full = false) => {
     if (retrying) return;
     if (full && !window.confirm(document?.source_type === 'url'
-      ? '将重新抓取网页并重新解析、整理和构建索引。仅恢复失败任务请用“重试失败阶段”。确定完整重新处理吗？'
-      : '将重新解析原文件，并重新整理和构建索引。仅恢复失败任务请用“重试失败阶段”。确定完整重新处理吗？')) return;
+      ? '将重新抓取网页、解析、AI 整理和重建索引，保留人工编辑。可能产生模型费用，重建期间检索可能暂时不完整；不自动重跑可选知识增强。继续吗？'
+      : '将从原文件重新解析（必要时自动 OCR）、AI 整理和重建索引，保留人工编辑。可能产生模型费用，重建期间检索可能暂时不完整；不自动重跑可选知识增强。继续吗？')) return;
     setRetrying(true);
     try {
       const response = await fetch(`/api/documents/${params.id}/${full ? 'reprocess' : 'retry-failed'}`, {
@@ -559,7 +561,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
 
   const version = document.current_version;
   const status = version?.processing_status || 'created';
-  const canRetry = ['failed', 'unsupported'].includes(status);
+  const canRetry = Boolean(version);
   const hasRetryableFailure = pipeline && [pipeline.stages.parsing, pipeline.stages.chunking, pipeline.stages.understanding].some((stage) => stage.status === 'failed');
   const metadata = version?.structured_content?.metadata;
   const spreadsheetProcessing = version?.meta?.spreadsheet_processing;
@@ -719,8 +721,8 @@ function DocumentDetail({ documentId }: { documentId: string }) {
           </button>
         )}
         {canRetry && (
-          <button type="button" onClick={() => void handleRetry(true)} disabled={retrying} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-            {retrying ? '正在提交…' : '完整重新处理'}
+          <button type="button" onClick={() => void handleRetry(true)} disabled={retrying || status === 'processing' || status === 'created' || pipeline?.overall_status === 'processing'} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+            {retrying ? '正在提交…' : '重新处理文档'}
           </button>
         )}
         <button type="button" onClick={handleDelete} disabled={deleting} className="ml-auto rounded px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50">
@@ -1407,6 +1409,7 @@ function PdfExtractionSummary({
     failed: 'OCR 全部失败',
     skipped: '已跳过 OCR',
     not_needed: '无需 OCR',
+    needs_review: 'OCR 需核验',
   };
   const statusText = extraction.ocr_status
     ? statusLabel[extraction.ocr_status] ?? extraction.ocr_status
@@ -1452,6 +1455,12 @@ function PdfExtractionSummary({
           OCR 失败 {failedPages} 页 · 跳过 {skippedPages} 页。这些页的图片文字尚未入库，
           但不影响其他页面继续处理。
         </p>
+      )}
+      {Boolean(extraction.rotation_corrected_pages?.length) && (
+        <p className="mt-3 text-xs text-slate-600">已自动纠正 {extraction.rotation_corrected_pages!.length} 页文字方向；原文件未修改，引用坐标仍对应原页面。</p>
+      )}
+      {Boolean(extraction.low_quality_pages?.length) && (
+        <p className="mt-3 text-xs text-amber-800">识别质量不足，请核验第 {extraction.low_quality_pages!.join('、')} 页。请勿将处理完成视为全文识别准确。</p>
       )}
       {externalProvider?.provider && externalAttempted > 0 && (
         <div className="mt-3 rounded border border-emerald-100 bg-emerald-50/40 p-3 text-xs text-emerald-900">

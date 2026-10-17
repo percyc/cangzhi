@@ -102,6 +102,19 @@ def _external_lines(external: _RecordingExternalProvider):
 # --- the actual tests --------------------------------------------------
 
 
+def test_low_confidence_fallback_is_review_not_success():
+    parser = PdfParser(
+        options=PdfOcrOptions(enabled=True),
+        renderer_factory=_renderer_factory,
+        tesseract_runner=lambda *_: CompletedProcess([], 0, _tsv("gibberish words", 15), b""),
+        tesseract_lookup=lambda: "tesseract",
+    )
+    result = parser.parse(_make_pdf_with_image())
+    extraction = result.structured_content.metadata["pdf_extraction"]
+    assert extraction["low_quality_pages"] == [1]
+    assert extraction["ocr_status"] == "needs_review"
+
+
 def test_empty_local_and_failed_or_capped_external_never_count_as_completed():
     writer = PdfWriter()
     for _ in range(2):
