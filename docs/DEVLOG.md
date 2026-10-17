@@ -1903,3 +1903,23 @@
 - 最终候选镜像标签均ocr-orientation-20261017：API dd6b86712e2c、Worker a99c4177c52f、
   Web85985dc9b768。未替换latest或重启运行容器；原API/Web/Worker健康和启动时间核对
   不变。临时构建Dockerfile删除；保留镜像供维护者发布。公开日志不记录真实文档内容。
+
+### 2026-10-18 OCR与重处理修复授权发布
+
+- 维护者明确要求线上部署、验证通过后推送仓库。本次授权覆盖API/Web/Worker切换，
+  不自动重新解析历史文档。发布应用代码dd23c42；包含此前尚未推送的上传限额、Word OCR
+  和实际OCR测试提交。三个远端fetch后均无新增分叉，工作区干净，diff检查通过。
+- 复用上一轮已验收的三镜像，核对Worker解析器、方向纠正与处理器文件SHA256一致，
+  API镜像导入成功；沿用356项后端、114项Web及镜像专项验收，不重复声称全套新跑。
+- 先让旧Worker完成当前处理轮并SIGTERM正常退出exit0，确认无processing遗留；
+  联合数据库/storage备份生成并通过校验，旧API/Web/Worker保留
+  rollback-20261018-orientation镜像标签。备份文件名使用UTC，公开日期使用维护者时区。
+- 使用原Compose项目cangzhi及--no-deps --no-build --pull never仅替换API/Web/Worker。
+  API dd6b86712e2c、Web85985dc9b768、Worker a99c4177c52f；API同镜像供migrate使用。
+  真实库已为0038，不再运行迁移；PostgreSQL镜像和启动时间保持不变。
+- 正式API readiness、Web health和登录页200，OCR测试/重新处理无凭据请求401，
+  Worker健康命令通过，四服务healthy。Worker接续完成6个既有embedding任务，
+  completed730→736、旧失败2条不变；未重置历史队列、未触发真实OCR测试或历史重处理。
+- 验收后快进合并main，按授权同步Gitea/Gitee/GitHub的main；不新增或移动标签，
+  不推送其他任务分支。最终以远端refs核验为准。横向表格跨列混排、启发式质量门槛及
+  全链路索引原子切换局限保持，不把部署健康视为真实文档识别质量验收。
