@@ -1835,3 +1835,25 @@
 - 临时测试Web/API/PostgreSQL容器及无外网测试网络已删除，仅移除本轮合成数据；
   联合备份与回滚镜像保留。未合并、推送或打标签。回退应用可用旧镜像，新增配置表
   可保留，不需要删除数据卷或回退事实源。前端安全待办、分片上传与解析资源上限仍独立。
+
+### 2026-10-17 Worker OCR 补部署与本地主线合并
+
+- 维护者明确要求部署、验证后合并；fetch确认Gitea main与本地主线没有分叉，
+  工作区干净，快进合并上传设置及Word OCR相关提交至本地main `55cc552`。
+  不推送远端、不打标签、不重写历史。功能分别为`b2d9462`与`93d8e5d`。
+- Worker依赖文件相对已验证offline-20261012版本未变，复用该依赖层，断网复制
+  当前apps/migrations/packages构建发布镜像`04de1ac14ed5`，标签word-ocr-20261017。
+  pip check通过；镜像内Worker全量252通过、1项可选集成跳过，另外开启该集成的
+  Word/PDF/状态专项70通过（含真实LibreOffice和Tesseract）。上传API11项、
+  Web流式代理2项及挂载新增测试后的表单3项通过。非全量API或真实模型质量验收。
+- 更新前存在正在解析的新PDF，向旧Worker发送SIGTERM并等待当前处理轮正常结束，
+  exit0；没有强杀、重置processing或并行启动新旧消费者。该PDF原有外部OCR共记录
+  20次失败，之后继续本地识别并完成解析/切片/整理；不能将完成状态等同于完整识别。
+  外部渠道失败原因与真实OCR质量仍需另行诊断，未在本轮修改渠道或扩大预算。
+- 联合备份已重新生成并校验，旧Worker镜像保留rollback-20261017-word-ocr。
+  使用原Compose项目、--no-deps --no-build --pull never只替换worker；
+  API/Web/PostgreSQL镜像与启动时间未变，schema保持0038，没有再次迁移。
+  Worker健康命令通过，API readiness/Web health均200，新Worker接续正常索引任务。
+- 未批量重跑历史资料；此前两份Word已有正文，另有历史零正文Word仍保持旧状态，
+  部署不会自动修复它。原文件与历史版本未删除。临时构建Dockerfile已移除；
+  新旧镜像和备份保留。本轮不声称外部OCR可用或历史文件全部恢复。
