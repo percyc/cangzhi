@@ -80,6 +80,10 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
+- `CZ-Q04` OCR实际识别测试：Codex，`codex/CZ-Q04-ocr-live-test`。
+  使用合成图片复用正式OCR Provider，模型列表仅辅助发现；补费用提示、分类错误和测试，
+  按维护者本轮明确授权验收后部署API/Web，不重处理历史资料。
+
 - `CZ-Q04` 上传代理限额修复已合并推送，并按维护者2026-10-14本轮明确授权仅部署Web；
   发布记录分支`codex/CZ-Q04-upload-deploy`，负责人Codex，无剩余本轮实施项。
 

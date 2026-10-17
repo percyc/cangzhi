@@ -1370,12 +1370,18 @@ export default function SettingsPage() {
                 }
                 className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40 sm:flex-none"
               >
-                {ocrTesting ? '正在测试…' : '测试外部 OCR 连接'}
+                {ocrTesting ? '正在识别测试图…' : '测试实际 OCR 识别'}
               </button>
             )}
             </div>
           </div>
           <div className="mt-2">
+            {activePanel === 'ocr' && (
+              <p className="mb-2 text-xs text-slate-600">
+                测试会发送一张系统合成图片，可能产生少量模型费用，不发送你的文档。
+                使用已保存的配置直接识别，不要求模型出现在列表中；不会重跑已有资料。
+              </p>
+            )}
             {saveMessage && (
               <p
                 className={`text-sm ${
@@ -1405,7 +1411,7 @@ export default function SettingsPage() {
             )}
             {activePanel === 'ocr' && ocrTestResult && (
               <p className={`text-sm ${ocrTestResult.ok ? 'text-emerald-700' : 'text-red-700'}`}>
-                {ocrTestResult.ok ? '外部 OCR 连接正常' : `外部 OCR 连接失败：${ocrTestResult.message}`}
+                {ocrTestResult.ok ? ocrTestResult.message : `外部 OCR 测试失败：${ocrTestResult.message}`}
               </p>
             )}
           </div>

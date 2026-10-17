@@ -19,6 +19,7 @@ contract.
 from __future__ import annotations
 
 import logging
+import asyncio
 import re
 from typing import Any
 
@@ -33,6 +34,7 @@ from ..core.db import get_db
 from ..models.auth import Admin, AIRuntimeConfig
 from ..models.documents import Document
 from ..models.processing import ProcessingJob
+from ..services.ocr_probe import probe_ocr
 from ..models.taxonomy import DocumentCategory, DocumentSummary, DocumentTag
 from ..security.secrets import (
     SecretDecryptError,
@@ -1591,11 +1593,8 @@ async def test_ocr_settings(
 ) -> dict[str, Any]:
     """Probe the active OCR provider without leaking secrets.
 
-    The probe is read-only: it loads the encrypted configuration,
-    decrypts the key on the fly, and calls ``/models`` on the
-    configured base URL. Any upstream error is sanitised through
-    :func:`_safe_failure` so an API key embedded in a verbose
-    response never reaches the front-end.
+    Sends one synthetic image through the production OCR provider.
+    This may incur model usage; no private document is sent.
     """
 
     row = await _get_or_create_config(db)
@@ -1615,62 +1614,13 @@ async def test_ocr_settings(
     if not api_key:
         return {"ok": False, "message": "尚未保存外部 OCR 密钥"}
     timeout = float(row.ocr_timeout_seconds or 30)
-    return await _probe_ocr_openai(
+    return await asyncio.to_thread(
+        probe_ocr,
         base_url=row.ocr_base_url,
         model=row.ocr_model,
         api_key=api_key,
         timeout=timeout,
     )
-
-
-async def _probe_ocr_openai(
-    *,
-    base_url: str,
-    model: str,
-    api_key: str,
-    timeout: float,
-) -> dict[str, Any]:
-    url = f"{base_url.rstrip('/')}/models"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        return _safe_failure("无法连接外部 OCR 服务", exc)
-
-    if response.status_code >= 400:
-        return {
-            "ok": False,
-            "message": f"服务返回 HTTP {response.status_code}，请检查地址、密钥和模型权限",
-        }
-    try:
-        data = response.json()
-    except ValueError:
-        return {
-            "ok": False,
-            "message": "服务返回的不是模型列表，请检查 API 地址是否包含正确的版本路径",
-        }
-    try:
-        model_ids = _extract_model_ids(data, list_key="data")
-    except ValueError:
-        return {"ok": False, "message": "服务返回的模型列表格式不正确"}
-    if not model_ids:
-        return {"ok": False, "message": "服务没有返回任何可用模型"}
-    if model.strip() not in model_ids:
-        matching = [m for m in model_ids if model.strip().lower() in m.lower()]
-        if matching:
-            suggestions = ", ".join(m[:30] for m in matching[:3])
-            msg = f"配置的模型 '{model[:30]}...' 不在模型列表中，找到相似模型：{suggestions}"
-        else:
-            available = ", ".join(m[:20] for m in model_ids[:5])
-            if len(model_ids) > 5:
-                available += "..."
-            msg = f"配置的模型不在列表中，可用模型：{available}"
-        return {"ok": False, "message": msg}
-    return {"ok": True, "message": "连接正常，外部 OCR 模型已验证"}
 
 
 @router.get("/ocr/models", response_model=dict[str, Any])

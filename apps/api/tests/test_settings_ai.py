@@ -1756,7 +1756,7 @@ def test_ocr_test_reports_disabled_when_no_provider(client):
     assert body == {"ok": False, "message": "当前未启用任何外部 OCR 模型"}
 
 
-def test_ocr_test_succeeds_when_model_is_listed(client, monkeypatch):
+def test_ocr_test_calls_vision_without_model_list(client, monkeypatch):
     test_client, _ = client
     _setup_admin(test_client)
     test_client.patch(
@@ -1770,19 +1770,22 @@ def test_ocr_test_succeeds_when_model_is_listed(client, monkeypatch):
         },
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(url, **kwargs):
+        assert url == "https://ocr.example.com/v1/chat/completions"
+        assert kwargs["json"]["model"] == "vision-listed"
+        assert "data:image/png;base64," in json.dumps(kwargs["json"])
+        assert "CANGZHI 5827" not in json.dumps(kwargs["json"])
         return httpx.Response(
             200,
-            json={"data": [{"id": "vision-listed"}, {"id": "vision-other"}]},
+            json={"choices": [{"message": {"content": json.dumps({"lines": [{"text": "CANGZHI 5827", "bbox": [0, 0, 1000, 1000]}]})}}]},
         )
 
-    transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
-        "apps.api.api.settings_ai.httpx.AsyncClient",
-        lambda *args, **kwargs: _MockAsyncClient(transport),
+        "apps.api.ocr.openai_compatible.httpx.post", handler,
     )
     body = test_client.post("/api/settings/ai/ocr/test").json()
-    assert body == {"ok": True, "message": "连接正常，外部 OCR 模型已验证"}
+    assert body["ok"] is True
+    assert "合成图片识别通过" in body["message"]
 
 
 def test_ocr_test_failure_message_does_not_leak_key(client, monkeypatch):
@@ -1800,16 +1803,14 @@ def test_ocr_test_failure_message_does_not_leak_key(client, monkeypatch):
         },
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(url, **kwargs):
         return httpx.Response(
             500,
             text=json.dumps({"error": f"upstream failed because {secret}"}),
         )
 
-    transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
-        "apps.api.api.settings_ai.httpx.AsyncClient",
-        lambda *args, **kwargs: _MockAsyncClient(transport),
+        "apps.api.ocr.openai_compatible.httpx.post", handler,
     )
     body = test_client.post("/api/settings/ai/ocr/test").json()
     assert body["ok"] is False

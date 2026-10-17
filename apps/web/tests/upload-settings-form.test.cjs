@@ -22,10 +22,10 @@ function form(value, fetch) {
   const code = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../app/settings/uploads/page.tsx'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
   }).outputText;
-  const module = { exports: {} };
+  const testModule = { exports: {} };
   vm.runInThisContext(`(function(require,module,exports,fetch){${code}\n})`)(
-    id => mocks[id] || require(id), module, module.exports, fetch);
-  const tree = module.exports.default();
+    id => mocks[id] || require(id), testModule, testModule.exports, fetch);
+  const tree = testModule.exports.default();
   const element = tree.props.children.find(child => child && child.type === 'form');
   return { state, submit: () => element.props.onSubmit({ preventDefault() {} }) };
 }
