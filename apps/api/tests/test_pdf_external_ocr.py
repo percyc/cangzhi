@@ -12,6 +12,7 @@ from __future__ import annotations
 from io import BytesIO
 from subprocess import CompletedProcess
 from typing import Any
+import pytest
 
 from pypdf import PdfReader, PdfWriter
 
@@ -23,6 +24,7 @@ from apps.api.parsers.pdf import (
     PdfOcrOptions,
     PdfParser,
     _PageRender,
+    _pick_better_result,
 )
 from test_parsers import _make_pdf_with_image, _make_pdf_with_text
 
@@ -113,6 +115,60 @@ def test_low_confidence_fallback_is_review_not_success():
     extraction = result.structured_content.metadata["pdf_extraction"]
     assert extraction["low_quality_pages"] == [1]
     assert extraction["ocr_status"] == "needs_review"
+    assert extraction["quarantined_pages"] == [1]
+    assert extraction["ocr_completed_pages"] == []
+    assert not result.structured_content.full_text().strip()
+
+
+@pytest.mark.parametrize("local_conf,external_conf,expected", [
+    (0.2, 0.9, "external"), (0.2, None, "external"),
+    (0.9, 0.2, "local"), (None, 0.2, "local"),
+    (0.6, 0.9, "external"), (0.9, 0.6, "local"),
+])
+def test_result_selection_uses_quality_before_length(local_conf, external_conf, expected):
+    local = [{"text": "long local noise " * 20, "confidence": local_conf}]
+    external = [{"text": "clear caption", "confidence": external_conf}]
+    result = _pick_better_result(local_lines=local, external_lines=external)
+    assert result is (external if expected == "external" else local)
+
+
+def test_partial_pdf_quarantines_bad_page_and_keeps_physical_page_identity():
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_page(PdfReader(BytesIO(_make_pdf_with_image())).pages[0])
+    stream = BytesIO()
+    writer.write(stream)
+    calls = []
+    def runner(*args):
+        calls.append(1)
+        return CompletedProcess([], 0,
+            _tsv("UNTRUSTED_NOISE", 10) if len(calls) == 1 else _tsv("accepted source text", 95), b"")
+    parser = PdfParser(options=PdfOcrOptions(enabled=True), renderer_factory=_renderer_factory,
+        tesseract_runner=runner, tesseract_lookup=lambda: "tesseract")
+    result = parser.parse(stream.getvalue())
+    structured = result.structured_content
+    extraction = structured.metadata["pdf_extraction"]
+    assert extraction["ocr_status"] == "partial"
+    assert extraction["quarantined_pages"] == [1]
+    assert extraction["ocr_completed_pages"] == [2]
+    assert extraction["page_count"] == 2
+    assert "accepted source text" in structured.full_text()
+    assert "UNTRUSTED_NOISE" not in str(structured.to_dict())
+    assert {block.page for block in structured.blocks} == {2}
+
+
+def test_short_confident_external_caption_replaces_long_noisy_local_text():
+    external = _RecordingExternalProvider(result=ExternalOcrResult(
+        lines=[ExternalOcrLine(text="clear caption", confidence=950, bbox=[0, 0, 1000, 1000])]))
+    parser = PdfParser(options=PdfOcrOptions(enabled=True, external_provider=external),
+        renderer_factory=_renderer_factory, tesseract_lookup=lambda: "tesseract",
+        tesseract_runner=lambda *_: CompletedProcess([],0,_tsv("LONG_NOISE " * 30, 20),b""),
+        external_ocr_runner=_external_lines(external))
+    structured = parser.parse(_make_pdf_with_image()).structured_content
+    assert structured.full_text() == "clear caption"
+    extraction = structured.metadata["pdf_extraction"]
+    assert extraction["quarantined_pages"] == []
+    assert extraction["external_selected_pages"] == [1]
 
 
 def test_empty_local_and_failed_or_capped_external_never_count_as_completed():
@@ -290,7 +346,7 @@ def test_external_failure_falls_back_to_local_result():
         return CompletedProcess(
             args=[],
             returncode=0,
-            stdout=_tsv("a b c", confidence=30),
+            stdout=_tsv("a b c", confidence=70),
             stderr=b"",
         )
 
@@ -393,7 +449,7 @@ def test_external_provider_with_zero_max_pages_is_disabled():
         return CompletedProcess(
             args=[],
             returncode=0,
-            stdout=_tsv("a b c", confidence=30),
+            stdout=_tsv("a b c", confidence=70),
             stderr=b"",
         )
 

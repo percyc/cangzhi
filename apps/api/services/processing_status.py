@@ -131,6 +131,10 @@ def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
         summary["rotation_corrected_pages"] = _as_list(extraction["rotation_corrected_pages"])
     if "low_quality_pages" in extraction:
         summary["low_quality_pages"] = _as_list(extraction["low_quality_pages"])
+    if "quarantined_pages" in extraction:
+        summary["quarantined_pages"] = _as_list(extraction["quarantined_pages"])
+    if "external_selected_pages" in extraction:
+        summary["external_selected_pages"] = len(_as_list(extraction["external_selected_pages"]))
 
     # External OCR stage 2 fields. The keys are only attached
     # when the document was parsed after the new code shipped,
@@ -384,6 +388,8 @@ async def load_pipeline_statuses(
         pdf_extraction = _pdf_extraction_summary(version)
         if pdf_extraction is not None:
             parsing = {**parsing, "extraction": pdf_extraction}
+            if parsing["status"] == "completed" and pdf_extraction.get("ocr_status") == "partial":
+                parsing["message"] = "文字提取部分完成，请核验未识别或已隔离的页面"
 
         chunking = _stage_payload(jobs.get("chunking"))
         if governance_only and getattr(jobs.get("chunking"), "status", None) == "completed":

@@ -108,9 +108,11 @@ type PipelineStage = {
     ocr_skipped_pages: number[];
     rotation_corrected_pages?: number[];
     low_quality_pages?: number[];
+    quarantined_pages?: number[];
     external_provider?: { provider: string; model: string; version?: string } | null;
     external_attempted_pages?: number;
     external_completed_pages?: number;
+    external_selected_pages?: number;
     external_failed_pages?: number[];
     external_skipped_pages?: number[];
     external_trigger_reasons?: Record<string, number[]>;
@@ -594,6 +596,9 @@ function DocumentDetail({ documentId }: { documentId: string }) {
     originalContentType.includes('wordprocessingml') ||
     originalContentType === 'application/msword';
   const hasConvertedPreview = Boolean(version?.preview_blob);
+  const extraction = pipeline?.stages.parsing.extraction;
+  const quarantinedPages = extraction?.quarantined_pages ?? [];
+  const hasPartialExtraction = extraction?.ocr_status === 'partial' || quarantinedPages.length > 0;
   const hasPaginatedPreview = isPdf || hasConvertedPreview;
   const previewUrl = isPdf
     ? withApiBasePath(`/api/documents/${document.id}/original?inline=true`)
@@ -601,7 +606,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   const knowledgeStatus = spreadsheetOnlyNeedsGovernance
     ? '等待数据治理'
     : pipeline?.overall_status === 'completed'
-      ? '知识库已就绪'
+      ? hasPartialExtraction ? '部分入库，需核验' : '知识库已就绪'
       : pipeline?.overall_status === 'failed'
         ? '知识库部分失败'
         : '知识库处理中';
@@ -647,7 +652,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
         {pipeline && (
           <span
             className={`rounded-full px-2.5 py-1 ${
-              spreadsheetOnlyNeedsGovernance
+              spreadsheetOnlyNeedsGovernance || (hasPartialExtraction && pipeline.overall_status === 'completed')
                 ? 'bg-amber-100 text-amber-800'
                 : pipeline.overall_status === 'completed'
                 ? 'bg-emerald-100 text-emerald-800'
@@ -664,6 +669,22 @@ function DocumentDetail({ documentId }: { documentId: string }) {
           {new Date(document.created_at).toLocaleDateString('zh-CN')}
         </span>
       </div>
+
+      {hasPartialExtraction && (
+        <section role="status" className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+          <p className="font-medium">文字提取部分完成，部分页面需要核验</p>
+          <p className="mt-1">可用内容继续按正常流程整理和建立索引，请结合原文件或 PDF 预览核对未完整识别的页面。</p>
+          {quarantinedPages.length > 0 && (
+            <p className="mt-1">PDF 物理页 {quarantinedPages.slice(0, 30).join('、')}{quarantinedPages.length > 30 ? '等' : ''} 的低质量 OCR 文字已隔离，不进入摘要、切片或检索。</p>
+          )}
+          {Boolean(extraction?.ocr_failed_pages.length) && (
+            <p className="mt-1">识别失败的 PDF 物理页：{extraction!.ocr_failed_pages.slice(0, 30).join('、')}{extraction!.ocr_failed_pages.length > 30 ? '等' : ''}。</p>
+          )}
+          {Boolean(extraction?.ocr_skipped_pages.length) && (
+            <p className="mt-1">跳过识别的 PDF 物理页：{extraction!.ocr_skipped_pages.slice(0, 30).join('、')}{extraction!.ocr_skipped_pages.length > 30 ? '等' : ''}。</p>
+          )}
+        </section>
+      )}
 
       {spreadsheetNeedsGovernance && (
         <section className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-5 text-amber-950">
@@ -1462,7 +1483,7 @@ function PdfExtractionSummary({
         <p className="mt-3 text-xs text-slate-600">已自动纠正 {extraction.rotation_corrected_pages!.length} 页文字方向；原文件未修改，引用坐标仍对应原页面。</p>
       )}
       {Boolean(extraction.low_quality_pages?.length) && (
-        <p className="mt-3 text-xs text-amber-800">识别质量不足，请核验第 {extraction.low_quality_pages!.join('、')} 页。请勿将处理完成视为全文识别准确。</p>
+        <p className="mt-3 text-xs text-amber-800">识别质量不足，请核验 PDF 物理页 {extraction.low_quality_pages!.slice(0, 30).join('、')}{extraction.low_quality_pages!.length > 30 ? '等' : ''}。{extraction.quarantined_pages?.length ? '这些页的低质量 OCR 文字已隔离，不进入摘要或检索。' : '请勿将处理完成视为全文识别准确。'}</p>
       )}
       {externalProvider?.provider && externalAttempted > 0 && (
         <div className="mt-3 rounded border border-emerald-100 bg-emerald-50/40 p-3 text-xs text-emerald-900">
@@ -1472,7 +1493,8 @@ function PdfExtractionSummary({
               {externalProvider.model ? ` · ${externalProvider.model}` : ''}
             </p>
             <span className="text-emerald-700">
-              触发 {externalAttempted} 页 · 完成 {externalCompleted} 页
+              触发 {externalAttempted} 页 · 成功返回 {externalCompleted} 页
+              {extraction.external_selected_pages !== undefined ? ` · 实际采用 ${extraction.external_selected_pages} 页` : ''}
             </span>
           </div>
           {triggerEntries.length > 0 && (

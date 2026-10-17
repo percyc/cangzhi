@@ -247,6 +247,24 @@ test('reprocessing follows real active tasks instead of aggregate artifact statu
   }
 });
 
+test('partial OCR clearly distinguishes indexed content from quarantined and failed pages', async () => {
+  const state = pipeline('completed');
+  state.has_active_jobs = false;
+  state.stages.parsing.extraction = {
+    ocr_status:'partial', page_count:82, native_text_pages:0,
+    ocr_completed_pages:75, ocr_candidate_pages:82,
+    ocr_failed_pages:[81], ocr_skipped_pages:[], low_quality_pages:[61,76,77,78,79,80],
+    quarantined_pages:[61,76,77,78,79,80],
+  };
+  const page = await mountDocument(documentApi(() => documentFixture(), [], state));
+  assert.match(text(page.tree), /部分入库，需核验/);
+  assert.match(text(page.tree), /61、76、77、78、79、80/);
+  assert.match(text(page.tree), /低质量 OCR 文字已隔离，不进入摘要、切片或检索/);
+  assert.match(text(page.tree), /识别失败的 PDF 物理页：81/);
+  assert.equal(find(page.tree, 'button', '重新处理文档').props.disabled, false);
+  page.unmount();
+});
+
 test('failed next-page load hides old rows and offers same-page retry', async () => {
   let fail = true;
   const page = harness('DatasetRows', { datasetId: 1, identity: '1:10:1:duckdb' }, async (url) => url.includes('offset=50') && fail ? response({}, false) : response(rowPage(1, url.includes('offset=50') ? 50 : 0, url.includes('offset=50') ? '第二页' : '第一页')));

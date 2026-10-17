@@ -2723,11 +2723,15 @@ def _process_parsing(
         structured_content = result.structured_content
         extraction = structured_content.metadata.get("pdf_extraction", {})
         low_quality = extraction.get("low_quality_pages", [])
-        if low_quality:
+        page_isolated = extraction.get("quality_policy") == "page-quarantine-v1"
+        no_usable_text = not structured_content.full_text().strip()
+        if (low_quality and (not page_isolated or no_usable_text)) or (
+            extraction.get("ocr_failed_pages") and no_usable_text
+        ):
             return _mark_terminal_failure(
                 session, job, version,
-                "OCR 质量不足，未替换正文和索引；请检查页面方向、清晰度和外部 OCR。待核验页："
-                + ", ".join(str(page) for page in low_quality[:30]),
+                "OCR 未取得可安全入库的正文，未替换原结果；请检查清晰度、页面方向和外部 OCR。待核验页："
+                + ", ".join(str(page) for page in (low_quality or extraction.get("ocr_failed_pages", []))[:30]),
                 details={"reason": "ocr_quality_review", "pdf_extraction": extraction},
             )
         sanitization_report = _sanitize_structured_content(structured_content)

@@ -16,7 +16,7 @@ from .ocr_orientation import correct_orientation, restore_boxes
 
 logger = logging.getLogger(__name__)
 
-PDF_OCR_VERSION = "pdf-hybrid-v3-orientation"
+PDF_OCR_VERSION = "pdf-hybrid-v4-page-quarantine"
 PDF_OCR_ENGINE = "tesseract"
 PDF_OCR_EXTERNAL_ENGINE = "external-vision"
 
@@ -410,9 +410,19 @@ class PdfParser(BaseParser):
             confidences = [b.extra["confidence"] for b in page_blocks if b.extra.get("confidence") is not None]
             if confidences and sum(confidences) / len(confidences) < 0.5:
                 low_quality_pages.append(page_number)
+        corrected_pages = sorted({b.page for b in blocks if b.extra.get("rotation_correction")})
+        quarantined = set(low_quality_pages)
+        # Discard only untrusted OCR derivatives. Native text, original page
+        # numbers and the source PDF remain intact for review and citations.
+        blocks = [b for b in blocks if not (b.page in quarantined and b.extra.get("source") == "ocr")]
+        ocr_completed_pages = [page for page in ocr_completed_pages if page not in quarantined]
         pdf_extraction: dict[str, Any] = {
+            "quality_policy": "page-quarantine-v1",
             "low_quality_pages": low_quality_pages,
-            "rotation_corrected_pages": sorted({b.page for b in blocks if b.extra.get("rotation_correction")}),
+            "quarantined_pages": low_quality_pages,
+            "selection_policy": "confidence-first-v1",
+            "external_selected_pages": sorted({b.page for b in blocks if b.extra.get("ocr_source") == "external"}),
+            "rotation_corrected_pages": corrected_pages,
             "version": PDF_OCR_VERSION,
             "engine": PDF_OCR_ENGINE,
             "page_count": page_count,
@@ -445,7 +455,7 @@ class PdfParser(BaseParser):
         elif ocr_completed_pages:
             pdf_extraction["ocr_status"] = "completed"
         if low_quality_pages:
-            pdf_extraction["ocr_status"] = "needs_review"
+            pdf_extraction["ocr_status"] = "partial" if any(b.text.strip() for b in blocks) else "needs_review"
 
         metadata: dict[str, Any] = {
             "page_count": page_count,
@@ -1130,11 +1140,9 @@ def _pick_better_result(
 ) -> list[dict[str, Any]]:
     """Choose the best of the two per-page OCR results.
 
-    The heuristic prefers the result with more non-whitespace
-    characters; when the two are close (within 10%) the local
-    result wins because it is deterministic and free. The choice
-    is mirrored onto ``Block.extra.source`` so the front-end can
-    tell which engine produced the text.
+    Reject known low confidence before comparing length. Confidence values are
+    heuristic, not calibrated accuracy; an unknown value is not proof of quality.
+    A valid external response may replace known-bad local noise even if shorter.
     """
 
     local_chars = _sum_line_chars(local_lines)
@@ -1143,6 +1151,14 @@ def _pick_better_result(
         return local_lines
     if local_chars <= 0:
         return external_lines
+    local_conf = _average_confidence(local_lines)
+    external_conf = _average_confidence(external_lines)
+    local_bad = local_conf is not None and local_conf < 0.5
+    external_bad = external_conf is not None and external_conf < 0.5
+    if local_bad != external_bad:
+        return external_lines if local_bad else local_lines
+    if local_conf is not None and external_conf is not None and abs(local_conf - external_conf) >= 0.15:
+        return external_lines if external_conf > local_conf else local_lines
     if external_chars > int(local_chars * 1.1):
         return external_lines
     return local_lines

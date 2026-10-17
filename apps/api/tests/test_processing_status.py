@@ -707,7 +707,10 @@ def test_pdf_extraction_summary_is_propagated_to_pipeline(client, document_type)
         "native_text_pages": [1, 2, 3],
         "image_pages": [4, 5, 6, 7, 8, 9, 10, 11, 12],
         "ocr_candidate_pages": [4, 5, 6, 7, 8, 9, 10, 11, 12],
-        "ocr_completed_pages": [4, 5, 6, 7, 8, 9],
+        "ocr_completed_pages": [4, 5, 6, 7, 8],
+        "quarantined_pages": [9],
+        "low_quality_pages": [9],
+        "external_selected_pages": [4, 5],
         "ocr_failed_pages": [10],
         "ocr_skipped_pages": [11, 12],
         "ocr_status": "partial",
@@ -751,7 +754,11 @@ def test_pdf_extraction_summary_is_propagated_to_pipeline(client, document_type)
     assert extraction["page_count"] == 12
     assert extraction["native_text_pages"] == 3
     assert extraction["ocr_candidate_pages"] == 9
-    assert extraction["ocr_completed_pages"] == 6
+    assert extraction["ocr_completed_pages"] == 5
+    assert extraction["quarantined_pages"] == [9]
+    assert extraction["low_quality_pages"] == [9]
+    assert extraction["external_selected_pages"] == 2
+    assert "部分完成" in body["stages"]["parsing"]["message"]
     assert extraction["ocr_failed_pages"] == [10]
     assert extraction["ocr_skipped_pages"] == [11, 12]
     assert extraction["ocr_status"] == "partial"

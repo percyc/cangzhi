@@ -113,7 +113,8 @@ def test_preview_reuse_and_failure_boundaries(monkeypatch, kind, outcome):
     options = PdfOcrOptions(external_max_pages=2, max_pages=3)
     calls = []
     extraction = {"ocr_status": "partial", "page_count": 4,
-                  "ocr_completed_pages": [1], "ocr_skipped_pages": [2, 3, 4]}
+                  "quality_policy": "page-quarantine-v1", "low_quality_pages": [2],
+                  "quarantined_pages": [2], "ocr_completed_pages": [1], "ocr_skipped_pages": [3, 4]}
 
     def ensure(*args):
         assert args[2] == source

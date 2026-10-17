@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+import pytest
 
 from apps.api.models.documents import Document, DocumentVersion, DocumentSourceType
 from apps.api.models.processing import ProcessingJob
+from apps.api.models.chunks import DocumentChunk
 from apps.api.models.taxonomy import Category, DocumentCategory, DocumentSummary, DocumentTag, Tag
 from apps.api.ai.schema import UnderstandingResult
 from apps.api.parsers.base import ParserResult, StructuredContent, Block
@@ -38,6 +40,46 @@ def test_low_quality_parse_preserves_previous_text(session, monkeypatch):
     assert job.status=="failed" and job.next_retry_at is None
     assert job.error_details["reason"]=="ocr_quality_review"
     assert session.query(ProcessingJob).count()==1
+
+
+@pytest.mark.parametrize("low,failed", [([2], []), ([], [2])])
+def test_no_accepted_ocr_preserves_previous_results(session, monkeypatch, low, failed):
+    doc, version = seed(session)
+    job = ProcessingJob(document_id=doc.id, document_version_id=version.id, stage="parsing",
+        config_version="2", idempotency_key="empty-accepted")
+    session.add(job)
+    session.commit()
+    monkeypatch.setattr(proc,"_load_content_for_parsing",lambda *args:(b"pdf","application/pdf","test.pdf"))
+    result = ParserResult(True, StructuredContent("pdf", [], metadata={"pdf_extraction":{
+        "quality_policy":"page-quarantine-v1", "low_quality_pages":low,
+        "quarantined_pages":low, "ocr_failed_pages":failed}}))
+    monkeypatch.setattr(proc,"get_parser_for_content",lambda *args,**kwargs:SimpleNamespace(parse=lambda *args:result))
+    assert not proc.process_single_job(session, job.id)
+    session.refresh(version)
+    session.refresh(job)
+    assert version.raw_content == "previous good content"
+    assert job.status == "failed" and job.next_retry_at is None
+    assert session.query(ProcessingJob).count() == 1
+
+
+def test_partial_ocr_continues_to_chunks_without_quarantined_text(session, monkeypatch):
+    doc, version = seed(session)
+    job = ProcessingJob(document_id=doc.id, document_version_id=version.id, stage="parsing",
+        config_version="2", idempotency_key="partial-accepted")
+    session.add(job)
+    session.commit()
+    monkeypatch.setattr(proc,"_load_content_for_parsing",lambda *args:(b"pdf","application/pdf","test.pdf"))
+    result = ParserResult(True, StructuredContent("pdf", [Block("paragraph", "Safe recognized source text for indexing.", [], page=1)],
+        metadata={"pdf_extraction":{"quality_policy":"page-quarantine-v1", "low_quality_pages":[2],
+            "quarantined_pages":[2], "ocr_status":"partial", "page_count":2}}))
+    monkeypatch.setattr(proc,"get_parser_for_content",lambda *args,**kwargs:SimpleNamespace(parse=lambda *args:result))
+    assert proc.process_single_job(session, job.id)
+    chunk_job = session.query(ProcessingJob).filter_by(document_version_id=version.id, stage="chunking").one()
+    assert proc.process_single_job(session, chunk_job.id)
+    chunks = session.query(DocumentChunk).filter_by(document_version_id=version.id).all()
+    assert chunks and all(chunk.page != 2 for chunk in chunks)
+    assert all("UNTRUSTED_NOISE" not in chunk.content for chunk in chunks)
+    assert version.structured_content["metadata"]["pdf_extraction"]["quarantined_pages"] == [2]
 
 
 def test_reprocess_keeps_user_organization_and_refreshes_model_fields(session):
