@@ -17,12 +17,13 @@ const head = Buffer.from('--synthetic\r\nContent-Disposition: form-data; name="f
 const tail = Buffer.from('\r\n--synthetic--\r\n');
 let next;
 let logs = '';
+let uploadLimitMb = 50;
 const upstream = http.createServer(async (req, res) => {
   const hash = createHash('sha256');
   let bytes = 0;
   for await (const chunk of req) { bytes += chunk.length; hash.update(chunk); }
   const status = req.headers.authorization !== 'Bearer synthetic-test'
-    ? 401 : bytes - head.length - tail.length > 50 * MiB ? 413 : 201;
+    ? 401 : bytes - head.length - tail.length > uploadLimitMb * MiB ? 413 : 201;
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ bytes, hash: hash.digest('hex'), route: req.url }));
 });
@@ -50,7 +51,7 @@ async function main() {
   await once(probe, 'listening');
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
-  next = spawn(process.execPath, [cli, 'start', '-H', '127.0.0.1', '-p', String(port)], { cwd: scratch, env });
+  next = spawn(process.execPath, [path.join(scratch, 'server.cjs'), '-H', '127.0.0.1', '-p', String(port)], { cwd: scratch, env });
   for (const stream of [next.stdout, next.stderr]) stream.on('data', chunk => { logs += chunk.toString(); });
   const origin = `http://127.0.0.1:${port}`;
   let ready = false;
@@ -61,13 +62,17 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   assert.ok(ready, 'isolated Web ready');
-  for (const [route, size, authorized, status] of [
+  for (const [route, size, authorized, status, limit = 50] of [
     ['/api/files/upload', 11 * MiB, true, 201],
     [`${prefix}/api/files/upload`, 50 * MiB, true, 201],
     [`${prefix}/api/files/upload`, 50 * MiB + 1, true, 413],
     ['/api/files/upload', 11 * MiB, false, 401],
     [`${prefix}/api/upload`, 11 * MiB, true, 201],
+    [`${prefix}/api/v1/documents`, 80 * MiB, true, 201, 100],
+    ['/api/files/upload', 80 * MiB, true, 201, 100],
+    [`${prefix}/api/files/upload`, 80 * MiB, true, 413, 50],
   ]) {
+    uploadLimitMb = limit;
     const body = Buffer.concat([head, Buffer.alloc(size, 120), tail]);
     const hash = createHash('sha256').update(body).digest('hex');
     const response = await fetch(`${origin}${route}`, { method: 'POST', body,

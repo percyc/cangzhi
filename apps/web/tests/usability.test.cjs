@@ -31,10 +31,10 @@ test('all app page routes have guidance, except authentication and root redirect
     else assert.ok(ux.pageHelp(route), `Missing guide: ${route}`);
   }
 });
-test('settings grouping has nine unique valid routes and guides', () => {
+test('settings grouping has ten unique valid routes and guides', () => {
   const items = ux.SETTINGS_GROUPS.flatMap(group => group.items);
-  assert.equal(items.length, 9);
-  assert.equal(new Set(items.map(item => item.id)).size, 9);
+  assert.equal(items.length, 10);
+  assert.equal(new Set(items.map(item => item.id)).size, 10);
   for (const item of items) {
     const url = new URL(item.href, 'https://example.test');
     const help = ux.pageHelp(url.pathname, url.searchParams.get('section'));

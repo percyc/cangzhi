@@ -211,7 +211,7 @@ MCP/Skill 调用藏知。
 | `API_BIND_ADDRESS` | `0.0.0.0` | REST/CLI/MCP 直连 API 的监听地址 |
 | `API_PORT` | `8000` | API 端口 |
 | `STORAGE_HOST_PATH` | `./storage` | 原文、预览、Parquet 和本地主密钥的宿主机目录 |
-| `MAX_UPLOAD_SIZE_MB` | `50` | 单文件上传上限（MiB）；同时用于Web构建和API运行配置，修改后须重建Web镜像并更新API容器 |
+| `MAX_UPLOAD_SIZE_MB` | `50` | 未保存网页设置时的单文件上传默认上限（MiB）；保存后由设置 → 文件上传的全局值覆盖。来源下载等既有边界独立保留 |
 | `URL_FETCH_MAX_BYTES` | `5242880` | 网页抓取最大响应字节数 |
 | `DATASET_QUERY_MEMORY_LIMIT` | `512MB` | 单次 DuckDB 查询内存边界 |
 | `DATASET_QUERY_THREADS` | `2` | 单次 DuckDB 查询线程数 |
@@ -424,20 +424,18 @@ docker compose logs --tail=200 migrate api web
 
 ### 文件不到50MB却上传失败
 
-若Web日志出现 `Request body exceeded 10MB` 或上传转发 `ECONNRESET`，可能是旧版
-Next.js代理默认只缓冲10MiB，截断了本来符合API上限的文件。修复版使用同一个
-`MAX_UPLOAD_SIZE_MB`，Web请求体额度为文件上限加1MiB表单余量（默认51MiB）；
-API仍按文件本身严格限制50MiB，不放宽文件上限，也不改变鉴权。
-见 [Next.js代理配置说明](https://nextjs.org/docs/app/api-reference/config/next-config-js/proxyClientMaxBodySize)。
+管理员进入 **设置 → 文件上传** 调整全局单文件上限，默认50 MiB；保存后新请求立即
+生效，网页与REST v1共用。首次升级此功能需要API/Web镜像和0038迁移（migrate使用
+新版API镜像）；之后调整数值不需要重新构建或重启。旧环境变量仅作为尚未保存时的默认值。
 
-本次只改代理配置、默认额度不变时，维护者只需重新构建和更新Web，不需要数据库迁移、
-重建API/Worker或重处理资料。离线交付也只需新版Web镜像。**Web额度固化在构建产物中**，
-仅修改运行环境变量或重启旧镜像不能更新它。自定义上限需在构建机提供相同的
-`MAX_UPLOAD_SIZE_MB`，并同步API运行配置；子路径部署继续使用原构建参数。
+Web使用 `npm run start`（`node server.cjs`）启动，文件上传在进入Next之前流式透传，
+不受旧的10/51MiB克隆缓冲限制；开发使用 `npm run dev`。不要直接用 `next start/dev`
+绕过此入口。子路径与根路径别名均保留，其他页面/API仍由Next处理。
 
-若前面还有Nginx/OpenResty，其 `client_max_body_size` 也要覆盖文件及表单开销。
-不要无限提高代理额度：Next会在内存缓冲请求体，并发大文件会增加内存使用。
-超过代理总额度的畸形/超大请求仍可能被框架截断；这不是大文件分片上传功能。
+Nginx/OpenResty的 `client_max_body_size` 仍由部署者配置，应覆盖文件及表单开销。
+413可能来自API或外部代理；上传页会提示检查两处。大文件消耗临时磁盘、存储与处理时间，
+并受网络/代理超时限制；这不是分片或断点续传功能。调高上传大小不会放宽OCR页数、
+WebDAV来源下载、解压/表格单元格等独立处理限制。
 
 开发验证：`cd apps/web && node tests/browser/upload-proxy.cjs` 在临时目录构建生产Web，
 通过本机合成HTTP上游检查超过10MiB、50MiB边界、413/401透传和网关路径，不读写真实资料。

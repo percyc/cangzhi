@@ -1,9 +1,10 @@
 'use client'
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useUnsavedChanges } from '@/lib/navigation-guard';
+import { withApiBasePath } from '@/lib/paths';
 
 type FileStatus = 'pending' | 'uploading' | 'done' | 'error';
 
@@ -54,6 +55,16 @@ export default function FileUploadPage() {
   const [uploadPosition, setUploadPosition] = useState({ current: 0, total: 0 });
   const [globalError, setGlobalError] = useState('');
   const [finished, setFinished] = useState(false);
+  const [limitMb, setLimitMb] = useState<number | null>(null);
+
+  async function refreshLimit() {
+    const response = await fetch(withApiBasePath('/api/system/upload-settings'), { cache: 'no-store' });
+    if (!response.ok) throw new Error('无法读取上传上限，请检查登录状态后重试。');
+    const data = await response.json();
+    setLimitMb(data.max_upload_size_mb);
+    return data.max_upload_size_mb as number;
+  }
+  useEffect(() => { void refreshLimit().catch(err => setGlobalError(err.message)); }, []);
 
   const singleFileMode = items.length === 1;
   const pendingOrFailedCount = items.filter(
@@ -103,7 +114,8 @@ export default function FileUploadPage() {
       return {
         key: String(keyCounter.current),
         file,
-        status: 'pending',
+        status: limitMb !== null && file.size > limitMb * 1024 * 1024 ? 'error' : 'pending',
+        error: limitMb !== null && file.size > limitMb * 1024 * 1024 ? `文件超过当前 ${limitMb} MiB 上限，可调整设置后重试。` : undefined,
         progress: 0,
       };
     });
@@ -164,7 +176,9 @@ export default function FileUploadPage() {
             reject(new Error('上传响应解析失败'));
           }
         } else {
-          let message = '上传失败，请重试';
+          let message = xhr.status === 413
+            ? '文件或请求超过允许大小。请检查上传设置；使用 Nginx 等代理时，还需检查 client_max_body_size。'
+            : '上传失败，请重试';
           try {
             const data = JSON.parse(xhr.responseText);
             if (data && typeof data.detail === 'string') {
@@ -178,7 +192,7 @@ export default function FileUploadPage() {
       };
       xhr.onerror = () => reject(new Error('网络错误，请重试'));
       xhr.ontimeout = () => reject(new Error('上传超时，请重试'));
-      xhr.open('POST', '/api/files/upload', true);
+      xhr.open('POST', withApiBasePath('/api/files/upload'), true);
       xhr.timeout = UPLOAD_TIMEOUT_MS;
       xhr.send(formData);
     });
@@ -201,6 +215,13 @@ export default function FileUploadPage() {
     setFinished(false);
 
     let allSucceeded = true;
+    let currentLimit: number;
+    try { currentLimit = await refreshLimit(); }
+    catch (err) {
+      setGlobalError(err instanceof Error ? err.message : '无法读取上传上限');
+      setUploading(false);
+      return;
+    }
     let singleDocumentId: number | null = null;
 
     const isSingleFileRun = items.length === 1;
@@ -215,6 +236,9 @@ export default function FileUploadPage() {
         ),
       );
       try {
+        if (target.file.size > currentLimit * 1024 * 1024) {
+          throw new Error(`文件大小 ${formatSize(target.file.size)}，超过当前 ${currentLimit} MiB 上限。可在设置 → 文件上传中调整后重试。`);
+        }
         const documentId = await uploadOne(target.key, target.file, titleForFile);
         if (isSingleFileRun) {
           singleDocumentId = documentId;
@@ -264,6 +288,10 @@ export default function FileUploadPage() {
 
   return (
     <main className="mx-auto max-w-4xl px-4 sm:px-6">
+      <p className="my-4 text-sm text-slate-600">
+        {limitMb === null ? '正在读取上传限额…' : `单个文件上限 ${limitMb} MiB`}
+        {' · '}<Link href="/settings/uploads" className="text-blue-700 underline">调整上传上限</Link>
+      </p>
       <Link href="/documents" className="text-sm font-medium text-slate-500 hover:text-slate-900">← 返回知识库</Link>
       <div className="mt-5">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">文件导入</p>

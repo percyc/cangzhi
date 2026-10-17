@@ -12,6 +12,7 @@ export const SETTINGS_GROUPS = [
     { id: 'access', href: '/settings/access', title: '外部接入', hint: '连接 AI、CLI、Skill 与 MCP' },
   ] },
   { title: '系统与安全', items: [
+    { id: 'uploads', href: '/settings/uploads', title: '文件上传', hint: '单文件大小上限 · 全局生效' },
     { id: 'data', href: '/settings/data', title: '数据与备份', hint: '导出资料与系统恢复边界' },
     { id: 'account', href: '/settings/account', title: '账户与安全', hint: '用户名、密码与登录设备' },
   ] },
@@ -21,6 +22,7 @@ export type SettingsSection = typeof SETTINGS_GROUPS[number]['items'][number]['i
 export type PageHelp = { title: string; steps: readonly string[]; note: string; action: { href: string; label: string } };
 
 const HELP: Record<string, PageHelp> = {
+  uploads: { title: '按实际需要调整上传大小', steps: ['查看当前单文件上限，默认 50 MiB。', '输入所需大小并保存，对新上传立即生效。', '使用外部代理时同步检查其请求体限制。'], note: '本设置不放宽 OCR、表格解析或来源下载的资源限制。', action: { href: '/files/upload', label: '去上传文件' } },
   documents: { title: '保存、整理和查看资料', steps: ['添加文件、随手记或公开网页，先保存原文。', '用分类浏览资料，打开详情检查正文和切片。', '需要排查处理问题时，前往收件箱。'], note: '关键词检索不要求配置向量模型；删除资料先进入可恢复的回收站。', action: { href: '/files/upload', label: '上传资料' } },
   inbox: { title: '知道哪些资料需要关注', steps: ['先看“需要关注”，再按失败、待整理或向量状态筛选。', '打开一条资料查看具体阶段和原因。', '确认原因后再重试；批量按钮仅作用于当前页。'], note: '待整理不等于没有入库，也不等于不能检索；待治理表格需先整理结构。', action: { href: '/documents', label: '回到知识库' } },
   search: { title: '找原文，用搜索；要归纳，用问答', steps: ['输入关键词即可搜索，也可以先选择分类、标签或来源。', '不同筛选组同时生效，过多条件可能导致没有结果。', '展开命中片段核对原文，或把当前关键词带到问知识。'], note: '向量不可用时仍可关键词检索；搜索命中不代表资料的全部内容。', action: { href: '/ask', label: '前往问知识' } },

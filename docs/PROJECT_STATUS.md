@@ -72,6 +72,9 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
+- `CZ-Q04` 运行时上传限额，负责人Codex，分支`codex/CZ-Q04-runtime-upload-limit`。
+  页面配置默认50 MiB，上传统一校验、Web流式透传、外部代理提醒；按本轮明确授权验证后部署。
+
 - `CZ-Q04` 上传代理限额修复已合并推送，并按维护者2026-10-14本轮明确授权仅部署Web；
   发布记录分支`codex/CZ-Q04-upload-deploy`，负责人Codex，无剩余本轮实施项。
 

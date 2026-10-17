@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,9 +16,25 @@ from ..core.db import get_db
 from ..models.documents import Document, DocumentVersion
 from ..models.processing import ProcessingJob
 from ..models.workspaces import Workspace
+from ..services.upload_settings import get_upload_limit_mb, save_upload_limit_mb
 
 router = APIRouter()
 _STARTED_AT = time.monotonic()
+
+
+class UploadSettings(BaseModel):
+    max_upload_size_mb: int = Field(strict=True, ge=1, le=2_147_483_647)
+
+
+@router.get("/system/upload-settings", response_model=UploadSettings)
+async def get_upload_settings(db: AsyncSession = Depends(get_db)):
+    return UploadSettings(max_upload_size_mb=await get_upload_limit_mb(db))
+
+
+@router.put("/system/upload-settings", response_model=UploadSettings)
+async def update_upload_settings(payload: UploadSettings, db: AsyncSession = Depends(get_db)):
+    await save_upload_limit_mb(db, payload.max_upload_size_mb)
+    return payload
 
 # Processing job statuses that mean the queue is doing something.
 _RUNNING_JOB_STATUSES = ("processing", "created", "retry")

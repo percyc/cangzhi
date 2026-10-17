@@ -11,6 +11,7 @@ from .enhancement import EnhancementRun, EnhancementWindow, EnhancementNode
 from .exploration_grants import ExplorationGrant
 from .knowledge_scopes import KnowledgeScope
 from .processing import ProcessingJob
+from .system_config import SystemConfig
 from .table_rows import StructuredTableRow
 from .taxonomy import (
     DEFAULT_CATEGORY_SLUGS,
@@ -57,6 +58,7 @@ __all__ = [
     "KnowledgeScope",
     "PersonalAccessToken",
     "ProcessingJob",
+    "SystemConfig",
     "StructuredTableRow",
     "Tag",
     "TagMergeRecord",

@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node server.cjs --dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node server.cjs",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test:ux": "node --test tests/*.test.cjs",

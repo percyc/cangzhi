@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..services.upload_settings import get_upload_limit_mb
+
 import asyncio
 import contextlib
 import json
@@ -27,7 +29,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..ai import build_provider_from_db
-from ..core.config import settings
 from ..core.db import get_db
 from ..models.blobs import Blob
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
@@ -363,11 +364,12 @@ async def upload_document_v1(
     content_type = validate_file_type(filename, file.content_type)
     keys = _parse_form_scope_keys(scope_keys)
     cleaned_external_id = (external_id or "").strip() or None
-    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    limit_mb = await get_upload_limit_mb(db)
+    max_bytes = limit_mb * 1024 * 1024
     try:
         stored = storage.save(file.file, max_bytes=max_bytes)
     except BlobTooLargeError:
-        raise HTTPException(status_code=413, detail=f"文件不能超过 {settings.max_upload_size_mb} MB") from None
+        raise HTTPException(status_code=413, detail=f"文件不能超过 {limit_mb} MiB") from None
     finally:
         await file.close()
     if stored.size == 0:

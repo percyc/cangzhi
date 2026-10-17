@@ -11,8 +11,8 @@ const basePath = configuredBasePath && configuredBasePath !== '/'
   ? `/${configuredBasePath.replace(/^\/+|\/+$/g, '')}`
   : ''
 
-// Match the API file limit, with 1 MiB reserved for multipart fields/boundaries.
-// This is a build-time setting for production; API still enforces file bytes.
+// Legacy allowance for ordinary Next rewrites. File uploads bypass this buffer
+// in server.cjs; their effective limit is read by the API at runtime.
 const uploadLimitMb = Number(process.env.MAX_UPLOAD_SIZE_MB || '50')
 const proxyBodyLimit = (uploadLimitMb + 1) * 1024 * 1024
 if (!Number.isSafeInteger(uploadLimitMb) || uploadLimitMb <= 0 ||
