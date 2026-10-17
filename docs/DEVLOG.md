@@ -1965,3 +1965,11 @@
   隔离文字不在正文/切片中、有效页保持原物理页码以及页面显著显示覆盖缺口。
   原有外部失败回退测试改为使用置信度足够的本地结果，低质量隔离有独立回归，
   不再把非空低质量文字计为成功。只使用合成资料/替身，无真实模型调用。
+- 按维护者同意方案并沿用本轮发布授权部署：旧Worker在空队列SIGTERM正常退出，
+  新联合备份生成并校验通过，三个旧镜像保留rollback-20261018-partial-ocr。
+  API3ad5717864ad、Workercf33f4085343、Web542cfcd092b7通过原Compose项目及
+  --no-deps --no-build --pull never更新；无迁移，PostgreSQL未重启，schema0038。
+  功能提交d5ad7a5，运行Worker确认pdf-hybrid-v4-page-quarantine。
+- API readiness/Web health200、重处理无凭据401、Worker健康命令通过；历史失败任务
+  保持原状态，未自动重跑文件/调用真实OCR。原文和资料数量未减少，不把上线健康
+  等同于这份真实文档已重新识别成功。记录纳入main并同步三个仓库，远端refs另行核验。
