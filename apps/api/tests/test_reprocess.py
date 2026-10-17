@@ -139,6 +139,9 @@ def test_processing_status_reports_completed_vector_pipeline(client):
         dependency = db_dependency()
         session = await anext(dependency)
         try:
+            await session.execute(update(ProcessingJob).where(
+                ProcessingJob.document_version_id == version_id,
+            ).values(status="completed"))
             for stage in ("parsing", "chunking", "understanding"):
                 session.add(
                     ProcessingJob(

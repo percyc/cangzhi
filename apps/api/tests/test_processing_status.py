@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from sqlalchemy import select
+from sqlalchemy import select, delete, update
 
 from apps.api.core.db import get_db
 from apps.api.main import app
@@ -24,6 +24,11 @@ def _session(dependency):
 
 
 async def _seed_base(session, document_id, version_id):
+    # The note endpoint creates real queued work; a completed fixture must
+    # complete those original jobs as well as adding historical stage records.
+    await session.execute(update(ProcessingJob).where(
+        ProcessingJob.document_version_id == version_id,
+    ).values(status="completed"))
     for stage in ("parsing", "chunking", "understanding"):
         session.add(
             ProcessingJob(
@@ -73,6 +78,38 @@ async def _seed_base(session, document_id, version_id):
     )
     await session.commit()
     return chunk, profile
+
+
+@pytest.mark.parametrize("active_stage", [None, "preview", "embedding"])
+def test_empty_completed_document_uses_actual_queue_not_missing_artifacts(client, active_stage):
+    test_client, _ = client
+    created = test_client.post("/api/notes", json={"title":"empty scan", "content":"synthetic"}).json()
+    document_id, version_id = created["id"], created["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def run():
+        dependency = db_dependency()
+        session = await anext(dependency)
+        try:
+            await _seed_base(session, document_id, version_id)
+            await session.execute(delete(DocumentChunk).where(DocumentChunk.document_version_id == version_id))
+            await session.execute(update(ProcessingJob).where(ProcessingJob.document_version_id == version_id).values(status="completed"))
+            version = await session.get(DocumentVersion, version_id)
+            version.raw_content = ""
+            version.processing_status = "ready"
+            if active_stage:
+                session.add(ProcessingJob(document_id=document_id, document_version_id=version_id,
+                    stage=active_stage, status="created", config_version="test", idempotency_key="actual-active"))
+            await session.commit()
+            return await compute_processing_status(session, document_id)
+        finally:
+            await dependency.aclose()
+
+    body = asyncio.run(run())
+    assert body["has_active_jobs"] is bool(active_stage)
+    assert body["overall_status"] == ("processing" if active_stage else "completed")
+    assert body["stages"]["embedding"]["status"] == "skipped"
+    assert not body["keyword_searchable"] and not body["vector_searchable"]
 
 
 def test_compute_processing_status_reports_completed_vector_pipeline(client):

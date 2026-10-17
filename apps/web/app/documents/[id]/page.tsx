@@ -119,6 +119,7 @@ type PipelineStage = {
 
 type ProcessingPipeline = {
   overall_status: 'processing' | 'completed' | 'failed';
+  has_active_jobs?: boolean;
   keyword_searchable: boolean;
   vector_searchable: boolean;
   stages: {
@@ -562,6 +563,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   const version = document.current_version;
   const status = version?.processing_status || 'created';
   const canRetry = Boolean(version);
+  const reprocessBusy = pipeline?.has_active_jobs ?? ['processing', 'created'].includes(status);
   const hasRetryableFailure = pipeline && [pipeline.stages.parsing, pipeline.stages.chunking, pipeline.stages.understanding].some((stage) => stage.status === 'failed');
   const metadata = version?.structured_content?.metadata;
   const spreadsheetProcessing = version?.meta?.spreadsheet_processing;
@@ -721,7 +723,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
           </button>
         )}
         {canRetry && (
-          <button type="button" onClick={() => void handleRetry(true)} disabled={retrying || status === 'processing' || status === 'created' || pipeline?.overall_status === 'processing'} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+          <button type="button" onClick={() => void handleRetry(true)} disabled={retrying || reprocessBusy} title={reprocessBusy ? '当前版本仍有任务排队或执行中，完成后可重新处理' : undefined} className="rounded border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
             {retrying ? '正在提交…' : '重新处理文档'}
           </button>
         )}

@@ -231,6 +231,22 @@ test('completed document exposes reprocessing with explicit cost and preservatio
   page.unmount();
 });
 
+test('reprocessing follows real active tasks instead of aggregate artifact status', async () => {
+  for (const active of [false, true]) {
+    const doc = documentFixture();
+    doc.current_version.raw_content = '';
+    const state = pipeline('processing');
+    state.has_active_jobs = active;
+    state.stages.chunking.child_chunks = 0;
+    state.stages.embedding = { status:'pending', total:0, completed:0, failed:0 };
+    const page = await mountDocument(documentApi(() => doc, [], state));
+    const button = find(page.tree, 'button', '重新处理文档');
+    assert.equal(button.props.disabled, active);
+    if (active) assert.match(button.props.title, /任务排队或执行中/);
+    page.unmount();
+  }
+});
+
 test('failed next-page load hides old rows and offers same-page retry', async () => {
   let fail = true;
   const page = harness('DatasetRows', { datasetId: 1, identity: '1:10:1:duckdb' }, async (url) => url.includes('offset=50') && fail ? response({}, false) : response(rowPage(1, url.includes('offset=50') ? 50 : 0, url.includes('offset=50') ? '第二页' : '第一页')));

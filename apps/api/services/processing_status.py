@@ -349,6 +349,14 @@ async def load_pipeline_statuses(
     ) = await _load_pipeline_inputs(
         db, version_ids, include_extraction=include_extraction
     )
+    # Artifact completeness is not a queue lease: missing vectors can be pending
+    # forever without any task. Match the full-reprocess guard across all stages.
+    active_version_ids = set((await db.scalars(
+        select(ProcessingJob.document_version_id).where(
+            ProcessingJob.document_version_id.in_(list(versions)),
+            ProcessingJob.status.in_(RUNNING_JOB_STATUSES),
+        ).distinct()
+    )).all()) if versions else set()
 
     output: dict[int, dict] = {}
     for version_id, version in versions.items():
@@ -451,6 +459,17 @@ async def load_pipeline_statuses(
                 "missing": total,
                 "failed": 0,
             }
+        elif not total and chunking["status"] == "completed":
+            embedding_stage = {
+                "status": "skipped",
+                "message": "未生成可构建向量的切片，请核验解析内容或重新处理文档",
+                "profile_id": profile.id,
+                "model": profile.model,
+                "completed": 0,
+                "total": 0,
+                "missing": 0,
+                "failed": 0,
+            }
         elif failed:
             embedding_stage = {
                 "status": "failed",
@@ -502,7 +521,7 @@ async def load_pipeline_statuses(
         # can happen when a worker crashes after marking the version failed).
         if version.processing_status == "failed" or "failed" in statuses:
             overall = "failed"
-        elif any(
+        elif version_id in active_version_ids or any(
             status in RUNNING_JOB_STATUSES or status == "pending" for status in statuses
         ):
             overall = "processing"
@@ -513,6 +532,7 @@ async def load_pipeline_statuses(
             "document_id": version.document_id,
             "document_version_id": version_id,
             "overall_status": overall,
+            "has_active_jobs": version_id in active_version_ids,
             "keyword_searchable": bool(all_chunks) and not governance_only,
             "vector_searchable": (
                 total > 0
