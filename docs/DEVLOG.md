@@ -1939,3 +1939,10 @@
 - Web115项、lint/typecheck及25页生产构建通过，新增实际页面回归确认：总体状态仍为
   processing但无活动队列时按钮可用；存在活动任务时禁用并给出原因。准备仅更新API/Web，
   无迁移，不操作用户文档或OCR渠道。原实例与备份仍保留。
+- 功能提交5643ded；沿用维护者本轮部署与推送授权，作为上一轮发布问题的补丁更新
+  API/Web，镜像7d3438cc8a3d/55e93519df96；旧镜像保留rollback-20261018-empty-reprocess。
+  无迁移，Worker/PostgreSQL镜像和启动时间不变；沿用本轮已校验联合备份。
+- 正式实例只读调用状态服务确认受影响文档overall_status=completed、has_active_jobs=false、
+  向量skipped且提示核验解析内容；未新增任务、修改文档或调用OCR。API/Web健康200，
+  鉴权与服务端重处理守卫不变。文档仍需由用户明确点击发起；不将解锁按钮视为OCR完成。
+- 发布记录纳入main，并按本轮授权同步三个渠道main，远端refs另行核验；无新标签。
