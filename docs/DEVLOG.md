@@ -1991,3 +1991,8 @@
   不宣称覆盖浏览器PDF插件全部缩放、页面和内存回收行为。
 - 保留范围仅当前详情页，离页或刷新后重新加载；完成页面不增加永久轮询，外部变化
   在下次状态读取时生效。准备按维护者本轮明确授权仅更新API/Web，无迁移/历史任务重跑。
+- 功能提交12f04eb；已校验本轮既有联合备份，旧API/Web镜像保留
+  rollback-20261018-retained-views。仅通过原Compose项目以--no-deps --no-build
+  --pull never替换API/Web；候选镜像分别6a3151f7c3fd/a991818a3b09。
+  API readiness/Web health200，状态接口无凭据401；Worker/PostgreSQL镜像和启动时间
+  不变。未重处理文档、未运行迁移、未调用真实OCR/对话模型，本轮不合并推送或打标签。
