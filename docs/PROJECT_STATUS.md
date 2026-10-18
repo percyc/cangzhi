@@ -9,7 +9,7 @@
 最新本机补丁：文档版式、解析、在线切片及候选对比切换保留，功能提交`12f04eb`，
 分支`codex/CZ-U08-retained-document-views`。API59项、Web118项和生产构建通过，
 独立Chromium验证懒加载/请求数/分页与候选保留/修订失效。已按本轮明确授权仅更新
-API/Web，无迁移、历史资料重处理或真实模型调用；主线和远端未在本轮修改。
+API/Web，无迁移、历史资料重处理或真实模型调用；维护者随后授权合并main并同步三仓库。
 同轮页签自适应补丁`87ff9c7`已仅更新Web；320–1440px七种宽度浏览器验证通过，
 118项Web回归及生产构建通过，API/Worker/PostgreSQL保持不变。
 
@@ -165,7 +165,7 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 - 2026-10-18 文档四视图切换保留：Codex，`codex/CZ-U08-retained-document-views`，
   `12f04eb`。按需挂载，切换保留预览实例、切片分页和候选结果；版本/文件/正文/切片
   修订时对应失效。API59项、Web118项、lint/typecheck/构建及独立Chromium验收通过。
-  仅部署API/Web，Worker/PostgreSQL未重启；未合并推送或新增标签。
+  仅部署API/Web，Worker/PostgreSQL未重启；随后按维护者授权合并main同步三仓库，不新增标签。
   仅当前详情页保留状态；PDF插件自身行为与跨页持久保存不在本轮保证范围。
 
 - 2026-10-18 OCR部分入库：Codex，`codex/CZ-Q04-partial-ocr`，`d5ad7a5`。

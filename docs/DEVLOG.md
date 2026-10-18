@@ -2012,3 +2012,12 @@
   rollback-20261018-responsive-tabs，原Compose项目使用--no-deps --no-build --pull never。
   Web health/API readiness均200，API/Worker/PostgreSQL镜像和启动时间不变。
   无迁移、重处理、真实模型调用、合并推送或新标签。
+
+### 2026-10-18 文档视图与自适应补丁主线同步
+
+- 维护者明确要求推送，发布范围为已部署的四视图状态保留12f04eb、自适应87ff9c7及
+  对应验收记录。拉取核对Gitea/Gitee/GitHub的main均为20d3cd0，没有额外待合并远端提交。
+- 工作区干净，采用快进合并main并正常推送三个渠道，不重写历史、不推送其他任务分支、
+  不新增或移动标签。本次仅同步代码与文档，不再次部署、不调用模型或处理用户资料。
+- 已完成验收沿用本批API59项、Web118项、生产构建及320–1440px七种宽度Chromium；
+  远端最终提交以推送后的refs核验为准。
