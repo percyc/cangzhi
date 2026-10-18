@@ -3,8 +3,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_db
+from ..core.build_info import build_info
+from .auth import require_admin
 
 router = APIRouter()
+
+
+@router.get("/system/version", dependencies=[Depends(require_admin)])
+async def runtime_version():
+    """Authenticated image metadata only; never inspect git or environment keys."""
+    return build_info()
 
 
 @router.get("/liveness")

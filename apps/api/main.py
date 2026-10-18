@@ -43,6 +43,7 @@ from .api import (
 )
 from .api.auth import require_admin
 from .core.config import settings
+from .core.build_info import build_info
 from .services.workspaces import require_workspace_context
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="藏知 Cangzhi API",
     description="藏有所知，问有所据。个人可控的 AI 知识中枢。",
-    version="0.1.0",
+    version=build_info()["version"],
 )
 
 # CORS: the API is consumed by the Next.js front end in the same
@@ -128,4 +129,4 @@ app.include_router(system.router, prefix="/api", dependencies=_admin_dep)
 
 @app.get("/")
 async def root():
-    return {"service": "cangzhi-api", "status": "ok", "version": "0.1.0"}
+    return {"service": "cangzhi-api", "status": "ok", "version": build_info()["version"]}

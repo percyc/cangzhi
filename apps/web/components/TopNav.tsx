@@ -14,6 +14,7 @@ import { fetchAuthStatus, type AuthStatus } from '@/lib/api';
 import { activeNavigation } from '@/lib/usability';
 import { confirmNavigation, runWithoutNavigationGuard } from '@/lib/navigation-guard';
 import { safeLoginReturn } from '@/lib/login-return';
+import { WEB_BUILD, buildLabel } from '@/lib/build-info';
 
 const NAV_ITEMS = [
   { href: '/documents', label: '知识库', icon: 'library' },
@@ -211,6 +212,10 @@ export function TopNav() {
                     className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-100"
                   >
                     账户与安全
+                  </Link>
+                  <Link href="/settings#system-version" role="menuitem" onClick={close}
+                    className="block break-words rounded-xl px-3 py-2 text-xs text-slate-500 hover:bg-slate-100">
+                    版本信息 · {buildLabel(WEB_BUILD)}
                   </Link>
                   <button
                     type="button"

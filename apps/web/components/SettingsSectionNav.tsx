@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { SETTINGS_GROUPS, type SettingsSection } from '@/lib/usability';
+import VersionInfo from '@/components/VersionInfo';
 
 export type { SettingsSection } from '@/lib/usability';
 
@@ -86,6 +87,7 @@ export function SettingsSectionNav({
         );
       })}</div></div>)}
     </nav>
+    <VersionInfo />
     </aside>
   );
 }

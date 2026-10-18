@@ -8,6 +8,7 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 const counts = { preview: 0, chunks: 0, candidates: 0 };
 let revision = 100, blob = 50;
+let apiRevision = 'a'.repeat(40);
 const doc = () => ({ id: 21, title: '合成视图测试', source_type: 'file', content_kind: 'document',
   tags: [], categories: [], primary_category: null, summary: null, origin: null, created_at: '2026-10-18',
   current_version: { id: 31, version_number: 1, processing_status: 'ready', raw_content: '合成解析正文',
@@ -17,6 +18,8 @@ const fixture = http.createServer((req, res) => {
   const route = url.pathname;
   const json = (body, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
   if (route === '/api/auth/status') return json({ authenticated: true, setup_required: false, admin: { id: 1, username: 'demo' } });
+  if (route === '/api/system/upload-settings') return json({ max_upload_size_mb: 50 });
+  if (route === '/api/system/version') return json({ version: 'v1.3.2', revision: apiRevision, built_at: '2026-10-18T00:00:00Z', dirty: false });
   if (route === '/api/workspaces/current') return json({ slug: 'default', name: '合成空间', status: 'active', settings: {} });
   if (route === '/api/workspaces') return json([{ slug: 'default', name: '合成空间', status: 'active', settings: {} }]);
   if (['/api/categories', '/api/tags', '/api/datasets'].includes(route)) return json([]);
@@ -61,7 +64,8 @@ async function main() {
   const base = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, [require.resolve('next/dist/bin/next'), 'dev', '--hostname', '127.0.0.1', '--port', String(port)], {
     cwd: path.resolve(__dirname, '../..'),
-    env: { ...process.env, API_URL: `http://127.0.0.1:${apiPort}`, NEXT_TELEMETRY_DISABLED: '1', CANGZHI_WEB_BASE_PATH: '' },
+    env: { ...process.env, API_URL: `http://127.0.0.1:${apiPort}`, NEXT_TELEMETRY_DISABLED: '1', CANGZHI_WEB_BASE_PATH: '',
+      CANGZHI_VERSION: 'v1.3.2', CANGZHI_REVISION: 'a'.repeat(40), CANGZHI_BUILD_TIME: '2026-10-18T00:00:00Z', CANGZHI_BUILD_DIRTY: 'false' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '', browser;
@@ -129,6 +133,17 @@ async function main() {
     await until(() => counts.preview === 2, 'Updated preview was not loaded');
     assert.equal(await page.frameLocator('iframe[title="合成视图测试 原文预览"]').getByLabel('预览内部状态').inputValue(), 'initial');
     assert.deepEqual(errors, []);
+    await page.goto(`${base}/settings/uploads`);
+    const version = page.locator('#system-version');
+    await version.locator('summary').click();
+    await version.getByText('Web/API版本一致', { exact: true }).waitFor();
+    apiRevision = 'b'.repeat(40);
+    await version.getByRole('button', { name: '重新核对' }).click();
+    await version.getByText('Web/API版本不一致，请确认各服务已完成更新并刷新页面。', { exact: true }).waitFor();
+    await page.setViewportSize({ width: 320, height: 800 });
+    assert.equal(await version.evaluate(element => element.scrollWidth <= element.clientWidth + 1), true);
+    assert.deepEqual(errors, []);
+    process.stdout.write('PASS version display, Web/API match and mismatch, narrow-screen metadata wrapping\n');
     process.stdout.write('PASS responsive tabs 320–1440px, retained iframe, lazy panels, chunk pagination, candidate result, revision invalidation; no real model calls\n');
   } catch (error) { process.stderr.write(log); throw error; }
   finally { await browser?.close(); server.kill('SIGTERM'); await new Promise(resolve => fixture.close(resolve)); }

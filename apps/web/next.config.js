@@ -32,6 +32,10 @@ const nextConfig = {
   basePath,
   env: {
     NEXT_PUBLIC_CANGZHI_WEB_BASE_PATH: basePath,
+    NEXT_PUBLIC_CANGZHI_VERSION: process.env.CANGZHI_VERSION || 'unversioned',
+    NEXT_PUBLIC_CANGZHI_REVISION: process.env.CANGZHI_REVISION || 'unknown',
+    NEXT_PUBLIC_CANGZHI_BUILD_TIME: process.env.CANGZHI_BUILD_TIME || 'unknown',
+    NEXT_PUBLIC_CANGZHI_BUILD_DIRTY: process.env.CANGZHI_BUILD_DIRTY || 'true',
   },
   async redirects() {
     if (!basePath) return []

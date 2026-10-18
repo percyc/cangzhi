@@ -38,7 +38,8 @@ def main():
     engine = create_engine(settings.database_url)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-    logger.info("Worker starting", poll_interval=settings.poll_interval)
+    from apps.api.core.build_info import build_info
+    logger.info("Worker starting", poll_interval=settings.poll_interval, build=build_info())
 
     while running:
         try:

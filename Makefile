@@ -12,10 +12,10 @@ up: ## Start all services with Docker Compose (migrate runs automatically)
 	docker compose up -d
 
 upgrade: ## Build current code, run migrations, and recreate changed services
-	$(DOCKER_CLASSIC_BUILD_ENV) docker compose up -d --build --pull never
+	$(DOCKER_CLASSIC_BUILD_ENV) bash scripts/with-build-info.sh docker compose up -d --build --pull never
 
 build: ## Build all services
-	$(DOCKER_CLASSIC_BUILD_ENV) docker compose build --pull=false
+	$(DOCKER_CLASSIC_BUILD_ENV) bash scripts/with-build-info.sh docker compose build --pull=false
 
 down: ## Stop all services
 	docker compose down

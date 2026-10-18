@@ -159,6 +159,7 @@ test('responsive settings selector honors unsaved-change guard before navigation
   const component = load('components/SettingsSectionNav.tsx', {
     'next/navigation': { useRouter: () => ({ push: href => pushed.push(href) }) },
     'next/link': () => null, '@/lib/usability': ux,
+    '@/components/VersionInfo': () => null,
   });
   const blocked = component.SettingsSectionNav({ active: 'chat', beforeNavigate: () => false, onSelect: id => selected.push(id) });
   descendants(blocked).find(element => element.type === 'select').props.onChange({ target: { value: 'account' } });

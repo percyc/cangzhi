@@ -1,3 +1,9 @@
+x-build-metadata: &build-metadata
+  CANGZHI_VERSION: ${CANGZHI_VERSION:-unversioned}
+  CANGZHI_REVISION: ${CANGZHI_REVISION:-unknown}
+  CANGZHI_BUILD_TIME: ${CANGZHI_BUILD_TIME:-unknown}
+  CANGZHI_BUILD_DIRTY: ${CANGZHI_BUILD_DIRTY:-true}
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -21,6 +27,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      args: *build-metadata
     container_name: cangzhi-migrate
     command: ["alembic", "upgrade", "head"]
     environment:
@@ -34,6 +41,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      args: *build-metadata
     container_name: cangzhi-api
     command: ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
@@ -72,6 +80,7 @@ services:
     build:
       context: .
       dockerfile: apps/worker/Dockerfile
+      args: *build-metadata
     container_name: cangzhi-worker
     command: ["python", "-m", "apps.worker.main"]
     volumes:
@@ -116,6 +125,7 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
       args:
+        <<: *build-metadata
         API_URL: http://api:8000
         CANGZHI_WEB_BASE_PATH: ${CANGZHI_WEB_BASE_PATH:-}
         MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}

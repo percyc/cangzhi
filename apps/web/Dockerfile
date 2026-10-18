@@ -10,6 +10,19 @@ RUN cd ./apps/web && npm ci \
 
 COPY . .
 
+# Immutable image provenance; set by scripts/with-build-info.sh at build time.
+ARG CANGZHI_VERSION=unversioned
+ARG CANGZHI_REVISION=unknown
+ARG CANGZHI_BUILD_TIME=unknown
+ARG CANGZHI_BUILD_DIRTY=true
+ENV CANGZHI_VERSION=${CANGZHI_VERSION} \
+    CANGZHI_REVISION=${CANGZHI_REVISION} \
+    CANGZHI_BUILD_TIME=${CANGZHI_BUILD_TIME} \
+    CANGZHI_BUILD_DIRTY=${CANGZHI_BUILD_DIRTY}
+LABEL org.opencontainers.image.version=${CANGZHI_VERSION} \
+      org.opencontainers.image.revision=${CANGZHI_REVISION} \
+      org.opencontainers.image.created=${CANGZHI_BUILD_TIME}
+
 WORKDIR /app/apps/web
 
 # Next.js resolves rewrites while building the production bundle.
