@@ -197,8 +197,24 @@ details > summary::-webkit-details-marker {
   .settings-rail-inner {
     position: sticky;
     top: 84px;
-    max-height: calc(100dvh - 104px);
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100dvh - 128px);
+  }
+  .settings-rail-links {
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
+  }
+  .settings-rail-inner > #system-version {
+    flex: 0 0 auto;
+    max-height: max(80px, calc(100dvh - 240px));
+    overflow-y: auto;
+  }
+  .settings-rail-inner > #system-version > summary {
+    position: sticky;
+    top: 0;
+    background: white;
   }
 }
 

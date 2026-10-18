@@ -135,15 +135,42 @@ async function main() {
     assert.deepEqual(errors, []);
     await page.goto(`${base}/settings/uploads`);
     const version = page.locator('#system-version');
+    // Visibility alone does not detect an opaque sticky nav painted over a
+    // sibling. Check hit-testing and geometry in short desktop windows too.
+    for (const [width, height] of [[1024, 480], [1440, 600], [1440, 900]]) {
+      await page.setViewportSize({ width, height });
+      const summary = version.locator('summary');
+      await summary.scrollIntoViewIfNeeded();
+      const reachable = await summary.evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        const nav = document.querySelector('[aria-label="设置分类"]').getBoundingClientRect();
+        return { hit: element === hit || element.contains(hit), separated: nav.bottom <= rect.top,
+          inViewport: rect.top >= 64 && rect.bottom <= window.innerHeight };
+      });
+      assert.deepEqual(reachable, { hit: true, separated: true, inViewport: true }, `version summary obscured at ${width}x${height}`);
+    }
     await version.locator('summary').click();
     await version.getByText('Web/API版本一致', { exact: true }).waitFor();
     apiRevision = 'b'.repeat(40);
     await version.getByRole('button', { name: '重新核对' }).click();
     await version.getByText('Web/API版本不一致，请确认各服务已完成更新并刷新页面。', { exact: true }).waitFor();
+    for (const [width, height] of [[1024, 480], [1440, 600], [1440, 900]]) {
+      await page.setViewportSize({ width, height });
+      const retry = version.getByRole('button', { name: '重新核对' });
+      await retry.scrollIntoViewIfNeeded();
+      assert.equal(await retry.evaluate(element => {
+        const rect = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return element === hit || element.contains(hit);
+      }), true, `expanded version action obscured at ${width}x${height}`);
+      await retry.click();
+      await version.getByText('Web/API版本不一致，请确认各服务已完成更新并刷新页面。', { exact: true }).waitFor();
+    }
     await page.setViewportSize({ width: 320, height: 800 });
     assert.equal(await version.evaluate(element => element.scrollWidth <= element.clientWidth + 1), true);
     assert.deepEqual(errors, []);
-    process.stdout.write('PASS version display, Web/API match and mismatch, narrow-screen metadata wrapping\n');
+    process.stdout.write('PASS version display, desktop/short-window hit-testing and scrolling, Web/API match and mismatch, narrow-screen metadata wrapping\n');
     process.stdout.write('PASS responsive tabs 320–1440px, retained iframe, lazy panels, chunk pagination, candidate result, revision invalidation; no real model calls\n');
   } catch (error) { process.stderr.write(log); throw error; }
   finally { await browser?.close(); server.kill('SIGTERM'); await new Promise(resolve => fixture.close(resolve)); }

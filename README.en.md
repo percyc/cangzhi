@@ -59,7 +59,9 @@ boundaries.
 
 ## Version and development status
 
-- **The current release milestone is `v1.3.2`**, adding image build identification,
+- **The current release milestone is `v1.3.3`**, fixing the desktop settings sidebar
+  covering version information and actions in short windows.
+  `v1.3.2` added image build identification,
   Web/API version checks, retained document views and responsive tabs, along with
   the preceding OCR/upload fixes. See [versioning](docs/VERSIONING.md).
   `v1.3` added bilingual documentation and real
@@ -268,7 +270,7 @@ Most detailed project documentation is currently maintained in Chinese:
 Python and Node.js are not required on the host when using Compose.
 
 ```bash
-git clone --branch v1.3.2 https://github.com/percyc/cangzhi.git
+git clone --branch v1.3.3 https://github.com/percyc/cangzhi.git
 cd cangzhi
 cp .env.example .env
 # Set a secure POSTGRES_PASSWORD in .env before production use.

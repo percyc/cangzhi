@@ -26,6 +26,7 @@ export function SettingsSectionNav({
   const router = useRouter();
   return (
     <aside className="settings-rail mt-6" aria-label="设置导航">
+      <div className="settings-rail-inner">
       <div className="rounded-2xl border border-slate-200 bg-white p-3 lg:hidden">
         <label htmlFor="settings-section" className="mb-2 block text-xs font-medium text-slate-500">切换设置页面</label>
         <select id="settings-section" value={active} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm"
@@ -40,7 +41,7 @@ export function SettingsSectionNav({
       </div>
     <nav
       aria-label="设置分类"
-      className="settings-rail-inner hidden space-y-5 rounded-2xl border border-slate-200 bg-white p-3 lg:block"
+      className="settings-rail-links hidden space-y-5 rounded-2xl border border-slate-200 bg-white p-3 lg:block"
     >
       {SETTINGS_GROUPS.map((group) => <div key={group.title}>
         <p className="mb-2 px-3 text-[11px] font-semibold text-slate-400">{group.title}</p>
@@ -88,6 +89,7 @@ export function SettingsSectionNav({
       })}</div></div>)}
     </nav>
     <VersionInfo />
+      </div>
     </aside>
   );
 }
