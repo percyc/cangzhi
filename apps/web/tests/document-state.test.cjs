@@ -55,7 +55,7 @@ function harness(name, props, fetcher) {
     confirm: () => true,
   };
   const filename = path.join(__dirname, '../app/documents/[id]/page.tsx');
-  const source = fs.readFileSync(filename, 'utf8') + '\nexport { DocumentDetail, DatasetRows, DatasetWorkspace };';
+  const source = fs.readFileSync(filename, 'utf8') + '\nexport { DocumentDetail, DatasetRows, DatasetWorkspace, RetainedPanel };';
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText;
   const evaluatedModule = { exports: {} };
   const mocks = {
@@ -109,6 +109,55 @@ async function mountDocument(fetcher) {
   page.render(); page.timers(); await page.settle(); return page;
 }
 
+test('retained panels mount on first visit and hide without dropping children', async () => {
+  const child = { type: 'iframe', props: { src: '/synthetic.pdf' } };
+  const page = harness('RetainedPanel', { active: false, label: '版式预览', children: child });
+  assert.equal(page.tree, null);
+  page.setProps({ active: true, label: '版式预览', children: child });
+  await page.settle();
+  assert.equal(page.tree.props.hidden, false);
+  assert.equal(page.tree.props.children, child);
+  page.setProps({ active: false, label: '版式预览', children: child });
+  await page.settle();
+  assert.equal(page.tree.props.hidden, true);
+  assert.equal(page.tree.props.children, child);
+  page.unmount();
+});
+
+test('view identities follow actual preview, text and chunk revisions, not progress', async () => {
+  let doc = documentFixture();
+  doc.current_version.blob = { id: 50, original_filename: 'fixture.pdf', content_type: 'application/pdf' };
+  const state = pipeline(); state.chunk_revision = 100;
+  const page = await mountDocument(documentApi(() => doc, [], state));
+  const panels = () => nodes(page.tree).filter((element) => element.type?.name === 'RetainedPanel');
+  const key = (label) => panels().find((element) => element.props.label === label).key;
+  const original = key('版式预览');
+  const chunks = key('在线切片');
+  assert.match(find(page.tree, 'iframe').props.src, /version_id=10&revision=50$/);
+  for (const label of ['解析版', '在线切片', '候选对比', '原文版']) {
+    find(page.tree, 'button', label).props.onClick(); await page.settle();
+    assert.equal(key('版式预览'), original);
+    assert.equal(key('在线切片'), chunks);
+  }
+  state.stages.embedding.completed = 1;
+  page.poll(); await page.settle();
+  assert.equal(key('在线切片'), chunks);
+  state.chunk_revision = 200;
+  page.poll(); await page.settle();
+  assert.notEqual(key('在线切片'), chunks);
+  assert.equal(key('版式预览'), original);
+  const compare = key('候选对比');
+  doc = { ...doc, current_version: { ...doc.current_version, raw_content: '更新后的正文' } };
+  page.poll(); await page.settle();
+  assert.notEqual(key('候选对比'), compare);
+  assert.equal(key('版式预览'), original);
+  doc = { ...doc, current_version: { ...doc.current_version, blob: { ...doc.current_version.blob, id: 51 } } };
+  page.poll(); await page.settle();
+  assert.notEqual(key('版式预览'), original);
+  assert.match(find(page.tree, 'iframe').props.src, /revision=51$/);
+  page.unmount();
+});
+
 test('polling preserves title, summary, tags, unsaved category and selected preview', async () => {
   let doc = documentFixture();
   const page = await mountDocument(documentApi(() => doc));
@@ -142,7 +191,7 @@ test('a new content version warns editors but does not reset their active tab', 
   page.poll(); await page.settle();
   assert.match(text(page.tree), /文档版本或服务器整理信息已更新/);
   assert.equal(find(page.tree, 'button', '在线切片').props['aria-selected'], true);
-  assert.ok(nodes(page.tree).some((element) => element.key === 'current-1:11'));
+  assert.ok(nodes(page.tree).some((element) => element.key === 'current-1:11:0:0'));
   page.unmount();
 });
 

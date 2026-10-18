@@ -539,6 +539,9 @@ async def load_pipeline_statuses(
             "document_version_id": version_id,
             "overall_status": overall,
             "has_active_jobs": version_id in active_version_ids,
+            # Child IDs change even when a same-version rebuild has identical
+            # text/count. Reuse the loaded IDs; no content or extra query needed.
+            "chunk_revision": max((chunk.id for chunk in all_chunks), default=0),
             "keyword_searchable": bool(all_chunks) and not governance_only,
             "vector_searchable": (
                 total > 0
@@ -559,7 +562,7 @@ async def load_pipeline_statuses(
     return output
 
 
-async def compute_processing_status(db: AsyncSession, document_id: int) -> dict:
+async def compute_processing_status(db: AsyncSession, document_id: int, *, include_revision: bool = False) -> dict:
     document = await db.get(Document, document_id)
     if document is None or document.is_deleted:
         raise ProcessingStatusError("资料不存在")
@@ -567,7 +570,10 @@ async def compute_processing_status(db: AsyncSession, document_id: int) -> dict:
         raise ProcessingStatusError("资料没有当前版本")
     statuses = await load_pipeline_statuses(db, [document.current_version_id])
     try:
-        return statuses[document.current_version_id]
+        status = statuses[document.current_version_id]
+        if not include_revision:
+            status.pop("chunk_revision", None)
+        return status
     except KeyError as exc:
         raise ProcessingStatusError("当前版本不存在") from exc
 

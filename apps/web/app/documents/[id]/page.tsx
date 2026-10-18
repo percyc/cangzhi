@@ -4,7 +4,7 @@ import { useUnsavedChanges } from '@/lib/navigation-guard';
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
@@ -120,6 +120,7 @@ type PipelineStage = {
 };
 
 type ProcessingPipeline = {
+  chunk_revision?: number;
   overall_status: 'processing' | 'completed' | 'failed';
   has_active_jobs?: boolean;
   keyword_searchable: boolean;
@@ -291,6 +292,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   const [returnToAsk, setReturnToAsk] = useState(false);
   const [datasets, setDatasets] = useState<KnowledgeDataset[]>([]);
   const [previewMode, setPreviewMode] = useState<'original' | 'parsed' | 'chunks' | 'compare'>('parsed');
+  const [parsedRevision, setParsedRevision] = useState(0);
   const [citationTarget, setCitationTarget] = useState<{
     chunkId: number;
     page: number | null;
@@ -388,6 +390,9 @@ function DocumentDetail({ documentId }: { documentId: string }) {
       ]);
       if (controller.signal.aborted || sequence !== loadSequenceRef.current) return;
       const previous = documentSnapshotRef.current;
+      if (previous && previous.current_version?.raw_content !== documentBody.current_version?.raw_content) {
+        setParsedRevision((revision) => revision + 1);
+      }
       if (previous && (editingMetadataRef.current || categoryDirtyRef.current) && (
         previous.current_version?.id !== documentBody.current_version?.id ||
         previous.title !== documentBody.title ||
@@ -600,9 +605,15 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   const quarantinedPages = extraction?.quarantined_pages ?? [];
   const hasPartialExtraction = extraction?.ocr_status === 'partial' || quarantinedPages.length > 0;
   const hasPaginatedPreview = isPdf || hasConvertedPreview;
+  const previewBlobId = isPdf ? version?.blob?.id : version?.preview_blob?.id;
+  const previewIdentity = `${document.id}:${version?.id}:${previewBlobId}`;
+  const contentIdentity = `${document.id}:${version?.id}:${parsedRevision}:${pipeline?.chunk_revision ?? 0}`;
+  // Pin the version and blob revision; only a real preview replacement changes
+  // the iframe URL. Progress polling and tab switching must not reload it.
+  const previewQuery = `version_id=${version?.id}&revision=${previewBlobId}`;
   const previewUrl = isPdf
-    ? withApiBasePath(`/api/documents/${document.id}/original?inline=true`)
-    : withApiBasePath(`/api/documents/${document.id}/preview`);
+    ? withApiBasePath(`/api/documents/${document.id}/original?inline=true&${previewQuery}`)
+    : withApiBasePath(`/api/documents/${document.id}/preview?${previewQuery}`);
   const knowledgeStatus = spreadsheetOnlyNeedsGovernance
     ? '等待数据治理'
     : pipeline?.overall_status === 'completed'
@@ -932,7 +943,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
             <div>
               <h2 className="font-semibold text-slate-900">内容与切片</h2>
               <p className="mt-1 text-xs text-slate-500">
-                在同一区域核对原始版式、解析正文和检索实际使用的边界。
+                在同一区域核对原始版式、解析正文和检索实际使用的边界。切换保留已打开的视图；内容更新后自动刷新。
               </p>
             </div>
             <div className="flex max-w-full gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 text-sm" role="tablist" aria-label="内容预览方式">
@@ -944,19 +955,24 @@ function DocumentDetail({ documentId }: { documentId: string }) {
               {pipeline && !spreadsheetProcessing && <button type="button" role="tab" aria-selected={previewMode === 'compare'} onClick={() => setPreviewMode('compare')} className={`shrink-0 rounded-lg px-3 py-2 ${previewMode === 'compare' ? 'bg-white font-medium text-blue-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>候选对比</button>}
             </div>
           </div>
-          {previewMode === 'original' && (
+          {hasPaginatedPreview && (
+            <RetainedPanel key={previewIdentity} active={previewMode === 'original'} label="版式预览">
             <iframe
-              key={version?.id}
               title={`${document.title} 原文预览`}
               src={`${previewUrl}${citationTarget?.page ? `#page=${citationTarget.page}` : ''}`}
               className="h-[72vh] min-h-[560px] w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
             />
+            </RetainedPanel>
           )}
-          {previewMode === 'chunks' && pipeline && !spreadsheetProcessing && (
-            <CurrentChunkPreview key={`current-${params.id}:${version?.id}`} documentId={params.id} />
+          {pipeline && !spreadsheetProcessing && (
+            <RetainedPanel key={`current-${contentIdentity}`} active={previewMode === 'chunks'} label="在线切片">
+              <CurrentChunkPreview documentId={params.id} />
+            </RetainedPanel>
           )}
-          {previewMode === 'compare' && pipeline && !spreadsheetProcessing && (
-            <ChunkingPreview key={`compare-${params.id}:${version?.id}`} documentId={params.id} />
+          {pipeline && !spreadsheetProcessing && (
+            <RetainedPanel key={`compare-${contentIdentity}`} active={previewMode === 'compare'} label="候选对比">
+              <ChunkingPreview documentId={params.id} />
+            </RetainedPanel>
           )}
         </section>
 
@@ -968,7 +984,8 @@ function DocumentDetail({ documentId }: { documentId: string }) {
         </div>
       )}
 
-      {previewMode !== 'parsed' ? null : datasets.length > 0 ? (
+      <RetainedPanel key={`parsed-${document.id}:${version?.id}`} active={previewMode === 'parsed'} label="解析版">
+      {datasets.length > 0 ? (
         <DatasetWorkspace key={`${document.id}:${version?.id}`} datasets={datasets} />
       ) : document.content_kind === 'spreadsheet' ? (
         <SpreadsheetGovernanceSummary processing={spreadsheetProcessing} />
@@ -990,9 +1007,19 @@ function DocumentDetail({ documentId }: { documentId: string }) {
                 : '暂时没有可显示的正文。')}
         </div>
       )}
+      </RetainedPanel>
 
     </main>
   );
+}
+
+// Mount lazily, then retain the DOM and component state while hidden. A caller
+// key scoped to the actual content revision discards stale results on rebuild.
+function RetainedPanel({ active, label, children }: { active: boolean; label: string; children: ReactNode }) {
+  const [opened, setOpened] = useState(active);
+  if (active && !opened) setOpened(true);
+  if (!active && !opened) return null;
+  return <div role="tabpanel" aria-label={label} hidden={!active}>{children}</div>;
 }
 
 function spreadsheetRiskLabel(risk: string) {

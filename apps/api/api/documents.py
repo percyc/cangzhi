@@ -1266,7 +1266,7 @@ async def get_processing_status(
     """Return the full ingestion pipeline status for the current version."""
 
     try:
-        return await compute_processing_status(db, document_id)
+        return await compute_processing_status(db, document_id, include_revision=True)
     except ProcessingStatusError as exc:
         message = str(exc)
         status_code = 404 if "不存在" in message else 400

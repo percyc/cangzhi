@@ -347,6 +347,7 @@ def test_bound_token_uploads_and_manages_scope_keys(client):
     assert processing.status_code == 200
     assert processing.json()["document_id"] == document_id
     assert processing.json()["overall_status"] == "processing"
+    assert "chunk_revision" not in processing.json()
     replaced = test_client.put(
         f"/api/v1/documents/{document_id}/scope-keys",
         headers=headers,

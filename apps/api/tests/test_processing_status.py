@@ -112,6 +112,42 @@ def test_empty_completed_document_uses_actual_queue_not_missing_artifacts(client
     assert not body["keyword_searchable"] and not body["vector_searchable"]
 
 
+def test_internal_chunk_revision_changes_on_same_version_rebuild(client):
+    test_client, _ = client
+    created = test_client.post("/api/notes", json={"title": "revision", "content": "synthetic"}).json()
+    document_id, version_id = created["id"], created["current_version"]["id"]
+    db_dependency = app.dependency_overrides[get_db]
+
+    async def run():
+        dependency = db_dependency()
+        session = await anext(dependency)
+        try:
+            chunk, _ = await _seed_base(session, document_id, version_id)
+            before = await compute_processing_status(session, document_id, include_revision=True)
+            replacement = DocumentChunk(document_id=document_id, document_version_id=version_id,
+                external_id="replacement", role="child", chunk_type="paragraph", order_index=0,
+                content=chunk.content, search_text=chunk.search_text, content_hash=chunk.content_hash,
+                char_count=chunk.char_count, token_estimate=chunk.token_estimate, is_current=True)
+            session.add(replacement)
+            await session.flush()
+            await session.delete(chunk)
+            await session.commit()
+            after = await compute_processing_status(session, document_id, include_revision=True)
+            public = await compute_processing_status(session, document_id)
+            assert before["chunk_revision"] != after["chunk_revision"]
+            assert before["stages"]["chunking"]["child_chunks"] == after["stages"]["chunking"]["child_chunks"] == 1
+            assert "chunk_revision" not in public  # stable /api/v1 DTO unchanged
+            await session.delete(replacement)
+            await session.commit()
+            empty = await compute_processing_status(session, document_id, include_revision=True)
+            assert empty["chunk_revision"] == 0
+        finally:
+            await dependency.aclose()
+
+    asyncio.run(run())
+    assert test_client.get(f"/api/documents/{document_id}/processing-status").json()["chunk_revision"] == 0
+
+
 def test_compute_processing_status_reports_completed_vector_pipeline(client):
     test_client, _ = client
     created = test_client.post(
