@@ -2008,3 +2008,7 @@
 - 本补丁仅调整Web布局与浏览器回归，不改变API、Worker、数据库或解析/切片策略。
   准备沿用维护者本轮授权更新Web，保留上一版回滚镜像。
 - 候选Web镜像的118项回归、lint/typecheck及25页生产构建通过。
+- 功能提交87ff9c7，按本轮授权仅更新Web至1791d6e9e018；旧镜像保留
+  rollback-20261018-responsive-tabs，原Compose项目使用--no-deps --no-build --pull never。
+  Web health/API readiness均200，API/Worker/PostgreSQL镜像和启动时间不变。
+  无迁移、重处理、真实模型调用、合并推送或新标签。
