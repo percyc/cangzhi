@@ -2037,3 +2037,15 @@
   补齐新增组件的隔离mock前有1项失败，修正后全通过。独立Chromium验证真实设置页
   Web/API一致、不一致、320px长提交换行，并复跑四视图/七种宽度验收；均为合成资料。
   发布镜像构建及部署验证随后追加，不以这些开发验收代替线上验收。
+- 源码ec6531d干净构建v1.3.2：API镜像41项复跑通过；Web镜像lint/typecheck、122项
+  与25页生产构建通过；Worker全量260通过、1项可选集成跳过。独立启动正式Web镜像
+  验证health返回冻结的版本/提交/时间/dirty=false，非仅开发服务器验证。
+- 新联合备份校验通过，旧三服务镜像保留rollback-v1.3.2；无活动队列时Worker
+  SIGTERM正常退出0，原Compose项目以--no-deps --no-build --pull never更新三服务。
+  API89b1733b84a3、Webed15269ba651、Worker9e377716aa76；migrate镜像同API仅更新
+  本地标签，不执行迁移。PostgreSQL镜像和启动时间不变，schema0038。
+- 正式Web health/API readiness为200，版本接口无凭据401；运行API/Worker与正式Web
+  均为v1.3.2/ec6531d、dirty=false，Worker健康命令通过。未自动重跑文档、修改模型
+  配置或新增真实模型调用；真实管理员浏览器刷新后验收入口，隔离浏览器已覆盖交互。
+- 本轮将v1.3.2标签绑定实际源码ec6531d，后补部署记录不改变运行标识；main与该标签
+  按维护者授权同步Gitea/Gitee/GitHub，最终以远端refs核验为准，不推送其他任务分支。
