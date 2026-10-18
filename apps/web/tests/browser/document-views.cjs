@@ -78,6 +78,26 @@ async function main() {
     const tab = label => page.getByRole('tab', { name: label, exact: true });
     const panel = label => page.getByRole('tabpanel', { name: label, exact: true });
     await tab('原文版').waitFor();
+    // The tablet breakpoint used to force a narrow scrolling strip beside the
+    // description, hiding the last tab. Every tab must fit without scrolling.
+    for (const width of [320, 390, 400, 688, 768, 1024, 1440]) {
+      await page.setViewportSize({ width, height: 800 });
+      const layout = await page.getByRole('tablist', { name: '内容预览方式' }).evaluate(list => {
+        const bounds = list.getBoundingClientRect();
+        const title = list.previousElementSibling.getBoundingClientRect();
+        return { overflow: list.scrollWidth > list.clientWidth + 1,
+          overlap: bounds.left < title.right && bounds.right > title.left && bounds.top < title.bottom && bounds.bottom > title.top,
+          tabs: Array.from(list.querySelectorAll('[role="tab"]')).map(button => {
+            const rect = button.getBoundingClientRect();
+            return { inside: rect.left >= bounds.left && rect.right <= bounds.right + 1,
+              fits: button.scrollWidth <= button.clientWidth + 1, touch: rect.height >= 36 };
+          }) };
+      });
+      assert.equal(layout.overflow, false, `tab strip overflow at ${width}px`);
+      assert.equal(layout.overlap, false, `description overlaps tabs at ${width}px`);
+      assert.equal(layout.tabs.length, 4);
+      assert.ok(layout.tabs.every(button => button.inside && button.fits && button.touch), `clipped tab at ${width}px`);
+    }
     const iframe = page.locator('iframe[title="合成视图测试 原文预览"]');
     await page.frameLocator('iframe[title="合成视图测试 原文预览"]').getByLabel('预览内部状态').fill('retained');
     const node = await iframe.elementHandle();
@@ -109,7 +129,7 @@ async function main() {
     await until(() => counts.preview === 2, 'Updated preview was not loaded');
     assert.equal(await page.frameLocator('iframe[title="合成视图测试 原文预览"]').getByLabel('预览内部状态').inputValue(), 'initial');
     assert.deepEqual(errors, []);
-    process.stdout.write('PASS retained iframe, lazy panels, chunk pagination, candidate result, revision invalidation; no real model calls\n');
+    process.stdout.write('PASS responsive tabs 320–1440px, retained iframe, lazy panels, chunk pagination, candidate result, revision invalidation; no real model calls\n');
   } catch (error) { process.stderr.write(log); throw error; }
   finally { await browser?.close(); server.kill('SIGTERM'); await new Promise(resolve => fixture.close(resolve)); }
 }

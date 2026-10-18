@@ -939,14 +939,14 @@ function DocumentDetail({ documentId }: { documentId: string }) {
       )}
 
       <section className="mt-6">
-          <div className="mb-4 flex flex-col gap-3 border-b border-slate-200 pb-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
+          <div className="mb-4 flex min-w-0 flex-col gap-3 border-b border-slate-200 pb-3 lg:flex-row lg:items-end lg:justify-between">
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold text-slate-900">内容与切片</h2>
               <p className="mt-1 text-xs text-slate-500">
                 在同一区域核对原始版式、解析正文和检索实际使用的边界。切换保留已打开的视图；内容更新后自动刷新。
               </p>
             </div>
-            <div className="flex max-w-full gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 text-sm" role="tablist" aria-label="内容预览方式">
+            <div className="grid w-full min-w-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1 text-sm min-[400px]:grid-cols-4 lg:flex lg:w-auto lg:shrink-0" role="tablist" aria-label="内容预览方式">
               {hasPaginatedPreview && <button type="button" role="tab" aria-selected={previewMode === 'original'} onClick={() => setPreviewMode('original')} className={`shrink-0 rounded-lg px-3 py-2 ${previewMode === 'original' ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>
                 {hasConvertedPreview && !isPdf ? '版式预览' : '原文版'}
               </button>}
