@@ -69,7 +69,7 @@ type SourceForm = {
   remote_delete_policy: 'trash' | 'keep';
 };
 
-const DEFAULT_EXTENSIONS = '.pdf, .doc, .docx, .xlsx, .xls, .md, .markdown, .txt';
+const DEFAULT_EXTENSIONS = '.pdf, .doc, .docx, .wps, .xlsx, .xls, .md, .markdown, .txt';
 const DEFAULT_IGNORE_PATTERNS = String.raw`.*
 ~$*
 *.tmp
@@ -518,7 +518,7 @@ function SourceFields({
         label="纳入的文件类型"
         value={form.include_extensions}
         onChange={(include_extensions) => setForm({ ...form, include_extensions })}
-        placeholder=".pdf, .docx, .xlsx, .xls, .md, .txt"
+        placeholder=".pdf, .docx, .wps, .xlsx, .xls, .md, .txt"
       />
       <label className="text-sm text-slate-700 md:col-span-2">
         忽略规则（每行一条）

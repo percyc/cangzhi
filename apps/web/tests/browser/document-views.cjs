@@ -7,12 +7,16 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const counts = { preview: 0, chunks: 0, candidates: 0 };
+const wpsMode = process.env.CANGZHI_TEST_WPS_VIEW === '1';
+const originalTab = wpsMode ? '版式预览' : '原文版';
 let revision = 100, blob = 50;
 let apiRevision = 'a'.repeat(40);
 const doc = () => ({ id: 21, title: '合成视图测试', source_type: 'file', content_kind: 'document',
   tags: [], categories: [], primary_category: null, summary: null, origin: null, created_at: '2026-10-18',
   current_version: { id: 31, version_number: 1, processing_status: 'ready', raw_content: '合成解析正文',
-    structured_content: {}, meta: {}, blob: { id: blob, original_filename: 'fixture.pdf', content_type: 'application/pdf' }, preview_blob: null } });
+    structured_content: wpsMode ? { document_type: 'wps', blocks: [] } : {}, meta: {},
+    blob: { id: wpsMode ? 10 : blob, original_filename: wpsMode ? 'fixture.WPS' : 'fixture.pdf', content_type: wpsMode ? 'application/kswps' : 'application/pdf' },
+    preview_blob: wpsMode ? { id: blob, original_filename: 'fixture.pdf', content_type: 'application/pdf' } : null } });
 const fixture = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://fixture.test');
   const route = url.pathname;
@@ -29,7 +33,7 @@ const fixture = http.createServer((req, res) => {
     chunk_revision: revision, keyword_searchable: true, vector_searchable: false,
     stages: { parsing: { status: 'completed' }, understanding: { status: 'completed' },
       chunking: { status: 'completed', child_chunks: 10 }, embedding: { status: 'processing', total: 10, completed: 5, failed: 0 } } });
-  if (route.endsWith('/original')) {
+  if (route.endsWith(wpsMode ? '/preview' : '/original')) {
     counts.preview++;
     // HTML stands in for the embedded viewer: verifies retained DOM/network and
     // embedded state, not Chrome's implementation of PDF zoom/page restoration.
@@ -81,7 +85,7 @@ async function main() {
     await page.goto(`${base}/documents/21`);
     const tab = label => page.getByRole('tab', { name: label, exact: true });
     const panel = label => page.getByRole('tabpanel', { name: label, exact: true });
-    await tab('原文版').waitFor();
+    await tab(originalTab).waitFor();
     // The tablet breakpoint used to force a narrow scrolling strip beside the
     // description, hiding the last tab. Every tab must fit without scrolling.
     for (const width of [320, 390, 400, 688, 768, 1024, 1440]) {
@@ -107,7 +111,7 @@ async function main() {
     const node = await iframe.elementHandle();
     assert.equal(counts.chunks, 0); assert.equal(counts.candidates, 0);
     await tab('解析版').click(); await panel('解析版').getByText('合成解析正文', { exact: true }).waitFor();
-    await tab('原文版').click();
+    await tab(originalTab).click();
     assert.equal(await iframe.evaluate((current, previous) => current === previous, node), true);
     assert.equal(await page.frameLocator('iframe[title="合成视图测试 原文预览"]').getByLabel('预览内部状态').inputValue(), 'retained');
     assert.equal(counts.preview, 1);
@@ -129,7 +133,7 @@ async function main() {
     await until(async () => await iframe.count() === 0, 'New preview blob did not invalidate retained iframe');
     // Inactive invalidated panels are lazy, not downloading in the background.
     assert.equal(await iframe.count(), 0);
-    await tab('原文版').click();
+    await tab(originalTab).click();
     await until(() => counts.preview === 2, 'Updated preview was not loaded');
     assert.equal(await page.frameLocator('iframe[title="合成视图测试 原文预览"]').getByLabel('预览内部状态').inputValue(), 'initial');
     assert.deepEqual(errors, []);

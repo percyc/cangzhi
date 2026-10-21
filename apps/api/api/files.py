@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..services.upload_settings import get_upload_limit_mb
+from ..parsers.wps import WPS_MIMES
 from ..core.db import get_db
 from ..models.blobs import Blob
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
@@ -19,6 +20,10 @@ from .schemas import BlobResponse, DocumentResponse
 router = APIRouter(prefix="/files", tags=["files"])
 
 _MIME_BY_EXTENSION = {
+    ".wps": set(WPS_MIMES) | {
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
     ".pdf": {"application/pdf"},
     ".doc": {
         "application/msword",
@@ -56,7 +61,7 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
     if allowed_mimes is None:
         raise HTTPException(
             status_code=415,
-            detail="仅支持 PDF、Word、Excel、Markdown 和 TXT 文件",
+            detail="仅支持 PDF、Word、WPS 文字、Excel、Markdown 和 TXT 文件",
         )
     normalized_mime = (content_type or "application/octet-stream").lower()
     if (

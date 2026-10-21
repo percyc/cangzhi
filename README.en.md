@@ -164,8 +164,9 @@ draft, not an answer-quality evaluation.
 ### Ingestion and preservation
 
 - Create and edit Markdown notes while retaining meaningful version history.
-- Upload PDF, DOC, DOCX, XLSX, XLS, Markdown, and TXT files, and download the
+- Upload PDF, DOC, DOCX, compatible WPS Writer (`.wps`), XLSX, XLS, Markdown, and TXT files, and download the
   preserved originals.
+  See [WPS compatibility and limitations](docs/WPS_COMPATIBILITY.md); legacy proprietary WPS, `.et`, and `.dps` are not guaranteed.
 - Save public web pages as HTML snapshots with extracted title, author, date,
   and main content.
 - Connect read-only WebDAV directories through the same parsing,

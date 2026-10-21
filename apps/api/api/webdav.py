@@ -41,6 +41,7 @@ DEFAULT_EXTENSIONS = [
     ".pdf",
     ".doc",
     ".docx",
+    ".wps",
     ".xlsx",
     ".xls",
     ".md",

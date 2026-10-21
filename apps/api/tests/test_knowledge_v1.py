@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import pytest
 
 from apps.api.ai import AIProvider, AnswerResult
 from apps.api.api import mcp as mcp_module
@@ -313,7 +314,8 @@ def test_openapi_exposes_bearer_authorization_for_external_api_debugging(client)
     ]
 
 
-def test_bound_token_uploads_and_manages_scope_keys(client):
+@pytest.mark.parametrize("filename,mime", [("guide.txt", "text/plain"), ("guide.WPS", "application/kswps")])
+def test_bound_token_uploads_and_manages_scope_keys(client, filename, mime):
     test_client, _ = client
     _enable_real_login()
     _setup_owner(test_client)
@@ -334,7 +336,7 @@ def test_bound_token_uploads_and_manages_scope_keys(client):
     uploaded = test_client.post(
         "/api/v1/documents",
         headers=headers,
-        files={"file": ("guide.txt", b"scope key integration", "text/plain")},
+        files={"file": (filename, b"scope key integration", mime)},
         data={"external_id": "ext-guide", "scope_keys": '["id-a", "id-b"]'},
     )
     assert uploaded.status_code == 202
@@ -358,7 +360,7 @@ def test_bound_token_uploads_and_manages_scope_keys(client):
     unchanged = test_client.post(
         "/api/v1/documents",
         headers=headers,
-        files={"file": ("guide.txt", b"scope key integration", "text/plain")},
+        files={"file": (filename, b"scope key integration", mime)},
         data={"external_id": "ext-guide"},
     )
     assert unchanged.status_code == 202

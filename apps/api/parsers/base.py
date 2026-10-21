@@ -22,6 +22,7 @@ DocumentType = Literal[
     "pdf",
     "doc",
     "docx",
+    "wps",
     "xlsx",
     "xls",
     "html",
@@ -93,6 +94,7 @@ def get_parser_for_content(
 ) -> BaseParser:
     from .doc import DocParser
     from .docx import DocxParser
+    from .wps import WpsParser, WPS_MIMES
     from .html import HtmlParser
     from .markdown import MarkdownParser
     from .note import NoteParser
@@ -112,6 +114,8 @@ def get_parser_for_content(
     # Check specific extensions first
     if file_name:
         lower_name = file_name.lower()
+        if lower_name.endswith(".wps"):
+            return WpsParser()
         if lower_name.endswith((".md", ".markdown")):
             return MarkdownParser()
         if lower_name.endswith(".pdf"):
@@ -131,6 +135,8 @@ def get_parser_for_content(
 
     if content_type == "application/x-note":
         return NoteParser()
+    if content_type in WPS_MIMES:
+        return WpsParser()
     if "text/markdown" in content_type or "markdown" in content_type:
         return MarkdownParser()
     if "application/pdf" in content_type:

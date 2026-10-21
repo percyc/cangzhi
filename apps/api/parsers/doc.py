@@ -13,6 +13,10 @@ class DocParser(BaseParser):
     """Convert legacy Word binary documents to DOCX before parsing."""
 
     conversion_timeout_seconds = 60
+    source_format = "doc"
+
+    def conversion_arguments(self, content: bytes) -> list[str]:
+        return []
 
     def parse(self, content: bytes, content_type: str | None = None) -> ParserResult:
         executable = shutil.which("soffice") or shutil.which("libreoffice")
@@ -26,7 +30,7 @@ class DocParser(BaseParser):
         try:
             with tempfile.TemporaryDirectory(prefix="cangzhi-doc-") as directory:
                 workdir = Path(directory)
-                source_path = workdir / "source.doc"
+                source_path = workdir / f"source.{self.source_format}"
                 output_path = workdir / "source.docx"
                 profile_path = workdir / "libreoffice-profile"
                 source_path.write_bytes(content)
@@ -40,6 +44,7 @@ class DocParser(BaseParser):
                         "--nodefault",
                         "--nolockcheck",
                         "--norestore",
+                        *self.conversion_arguments(content),
                         "--convert-to",
                         "docx:Office Open XML Text",
                         "--outdir",
@@ -69,10 +74,10 @@ class DocParser(BaseParser):
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
                 if result.success and result.structured_content is not None:
-                    result.structured_content.document_type = "doc"
+                    result.structured_content.document_type = self.source_format
                     result.structured_content.metadata.update(
                         {
-                            "source_format": "doc",
+                            "source_format": self.source_format,
                             "converted_format": "docx",
                         }
                     )

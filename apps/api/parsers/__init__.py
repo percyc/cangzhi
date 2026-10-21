@@ -8,6 +8,7 @@ from .base import (
 )
 from .doc import DocParser
 from .docx import DocxParser
+from .wps import WpsParser
 from .html import HtmlParser
 from .markdown import MarkdownParser
 from .note import NoteParser
@@ -21,6 +22,7 @@ __all__ = [
     "DocParser",
     "DocumentType",
     "DocxParser",
+    "WpsParser",
     "HtmlParser",
     "MarkdownParser",
     "NoteParser",

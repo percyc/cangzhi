@@ -264,6 +264,10 @@ OpenAI 兼容的多模态模型，由模型返回归一化坐标中的行级文�
   并对坐标做 0..1000 夹紧；后续可加入 `OllamaVisionOcrProvider` 等
   同协议实现而无需修改 Worker 或 Parser。
 
+WPS 文字 `.wps` 作为文本资料接入既有 Word 链路，不进入 Excel 数据集路径。
+原件保持不变，兼容容器在 Worker 隔离转换为临时 DOCX，PDF 预览与必要 OCR
+复用原有服务。未知历史容器明确拒绝而非转为纯文本；详见 [ADR-031](ADR-031-wps-writer.md)。
+
 ### 5.2 数据集引擎
 
 XLS/XLSX 二维数据仍属于文档生命周期，但精确查询不依赖普通文本切片：

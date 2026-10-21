@@ -143,6 +143,8 @@ STAGE_CYCLE: tuple[str, ...] = (
 PARSING_CONFIG_VERSION = "url-html-v1"
 MIN_USEFUL_URL_TEXT_LENGTH = 20
 TERMINAL_PARSE_FAILURE_REASONS = frozenset({
+    "wps_unsupported_container", "wps_converter_unavailable", "wps_conversion_failed",
+    "wps_conversion_timeout", "wps_conversion_error",
     "spreadsheet_limit_exceeded", "word_empty_text", "word_ocr_disabled",
     "word_ocr_empty", "word_ocr_failed", "word_preview_unavailable",
 })
@@ -362,7 +364,7 @@ def _word_ocr_fallback(
     if (
         not result.success
         or structured is None
-        or structured.document_type not in {"doc", "docx"}
+        or structured.document_type not in {"doc", "docx", "wps"}
     ):
         return result
     if structured.full_text().strip():
@@ -400,6 +402,10 @@ def _word_ocr_fallback(
             pdf_extraction=pdf_structured.metadata.get("pdf_extraction", {}),
         )
     pdf_structured.document_type = structured.document_type
+    pdf_structured.metadata.update({
+        key: value for key, value in structured.metadata.items()
+        if key in {"source_format", "converted_format"}
+    })
     pdf_structured.metadata.update({
         "docx_extraction": {
             **structured.metadata.get("docx_extraction", {}),
@@ -507,9 +513,10 @@ def _read_blob_bytes(blob: Blob) -> bytes:
 
 
 def _is_word_document(content_type: str, filename: str | None) -> bool:
+    from apps.api.parsers.wps import WPS_MIMES
     lower_name = (filename or "").lower()
     lower_type = (content_type or "").lower()
-    return lower_name.endswith((".doc", ".docx")) or lower_type in {
+    return lower_name.endswith((".doc", ".docx", ".wps")) or lower_type in WPS_MIMES or lower_type in {
         "application/msword",
         "application/doc",
         "application/vnd.ms-word",
@@ -564,11 +571,18 @@ def _ensure_word_pdf_preview(
     try:
         with tempfile.TemporaryDirectory(prefix="cangzhi-preview-") as directory:
             workdir = Path(directory)
-            suffix = ".doc" if (filename or "").lower().endswith(".doc") else ".docx"
+            suffix = Path(filename or "").suffix.lower()
+            if suffix not in {".doc", ".docx", ".wps"}:
+                from apps.api.parsers.wps import WPS_MIMES
+                suffix = ".wps" if content_type.lower() in WPS_MIMES else ".docx"
             source_path = workdir / f"source{suffix}"
             output_path = workdir / "source.pdf"
             profile_path = workdir / "libreoffice-profile"
             source_path.write_bytes(content)
+            import_arguments = []
+            if suffix == ".wps":
+                from apps.api.parsers.wps import WpsParser
+                import_arguments = WpsParser().conversion_arguments(content)
             completed = subprocess.run(
                 [
                     executable,
@@ -578,6 +592,7 @@ def _ensure_word_pdf_preview(
                     "--nodefault",
                     "--nolockcheck",
                     "--norestore",
+                    *import_arguments,
                     "--convert-to",
                     "pdf:writer_pdf_Export",
                     "--outdir",

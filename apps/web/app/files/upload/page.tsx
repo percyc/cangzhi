@@ -24,6 +24,7 @@ const SUPPORTED_TYPES = [
   { ext: '.pdf', name: 'PDF' },
   { ext: '.doc', name: 'Word DOC' },
   { ext: '.docx', name: 'Word DOCX' },
+  { ext: '.wps', name: 'WPS 文字（兼容格式）' },
   { ext: '.xlsx', name: 'Excel XLSX' },
   { ext: '.xls', name: 'Excel XLS' },
   { ext: '.md', name: 'Markdown' },

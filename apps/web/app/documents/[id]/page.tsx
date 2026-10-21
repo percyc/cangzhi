@@ -597,7 +597,8 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   const originalContentType = version?.blob?.content_type?.toLowerCase() ?? '';
   const isPdf =
     originalFilename.endsWith('.pdf') || originalContentType === 'application/pdf';
-  const isWord = /\.docx?$/.test(originalFilename) ||
+  const isWord = /\.(docx?|wps)$/.test(originalFilename) ||
+    version?.structured_content?.document_type === 'wps' ||
     originalContentType.includes('wordprocessingml') ||
     originalContentType === 'application/msword';
   const hasConvertedPreview = Boolean(version?.preview_blob);
@@ -979,8 +980,10 @@ function DocumentDetail({ documentId }: { documentId: string }) {
       {isWord && !hasConvertedPreview && (
         <div className="mt-6 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
           {version?.meta?.preview?.reason === 'webdav_source_unavailable'
-            ? '远端 Word 原文件当前已无法获取，因此只能显示之前保存的解析文本。远端文件恢复后重新处理即可生成版式预览。'
-            : '当前显示的是 Word 解析版，PDF 版式预览正在等待生成；原文件不会被替换。'}
+            ? '远端 Word/WPS 原文件当前已无法获取，因此只能显示之前保存的解析文本。远端文件恢复后重新处理即可生成版式预览。'
+            : version?.meta?.preview?.status === 'failed' || version?.processing_status === 'failed'
+              ? '本次 Word/WPS 处理或版式预览生成失败，请查看上方处理状态。原文件和已有解析内容保留，不会被替换。'
+              : 'Word/WPS 的 PDF 版式预览尚未生成；可先查看已有解析内容，原文件不会被替换。'}
         </div>
       )}
 

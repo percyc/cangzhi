@@ -109,6 +109,25 @@ async function mountDocument(fetcher) {
   page.render(); page.timers(); await page.settle(); return page;
 }
 
+test('WPS detail offers Word preview instead of treating the source as unsupported', async () => {
+  const value = documentFixture();
+  value.current_version.blob = { id: 10, original_filename: '合成.WPS', content_type: 'application/kswps' };
+  value.current_version.preview_blob = { id: 11, content_type: 'application/pdf' };
+  value.current_version.structured_content = { document_type: 'wps', blocks: [] };
+  const page = await mountDocument(documentApi(() => value));
+  assert.ok(text(page.tree).includes('版式预览'));
+  assert.ok(nodes(page.tree).some((element) => element.type === 'iframe' && String(element.props.src).includes('/preview')));
+});
+
+test('failed WPS conversion does not misleadingly promise a pending preview', async () => {
+  const value = documentFixture();
+  value.current_version.blob = { id: 10, original_filename: '旧格式.wps', content_type: 'application/kswps' };
+  value.current_version.processing_status = 'failed';
+  const page = await mountDocument(documentApi(() => value));
+  assert.ok(text(page.tree).includes('本次 Word/WPS 处理或版式预览生成失败'));
+  assert.ok(!text(page.tree).includes('正在等待生成'));
+});
+
 test('retained panels mount on first visit and hide without dropping children', async () => {
   const child = { type: 'iframe', props: { src: '/synthetic.pdf' } };
   const page = harness('RetainedPanel', { active: false, label: '版式预览', children: child });

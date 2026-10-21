@@ -167,6 +167,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ### 3.3 文档上传与 Scope Key 管理
 
+文件类型增量支持 WPS 文字 `.wps`，与网页上传及 WebDAV 共用校验、大小限额和
+后台解析。兼容容器、失败行为及旧版格式局限见 [WPS 文字兼容](WPS_COMPATIBILITY.md)。
+上传成功表示原件已保存并排队，不代表解析已完成；读取处理状态确认实际结果。
+
 - `POST /api/v1/documents`（`documents:write`）：multipart 上传，支持 `title`、
   `external_id`、`scope_keys`，返回 `202`。
 - `GET /api/v1/documents/{id}/processing-status`（`documents:write`）：按上传响应的

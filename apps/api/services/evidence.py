@@ -505,7 +505,7 @@ def _classify(
         return "dataset"
     if source_type == DocumentSourceType.note or document_type in {"markdown", "note"}:
         return "markdown"
-    if document_type in {"pdf", "doc", "docx"}:
+    if document_type in {"pdf", "doc", "docx", "wps"}:
         return "pdf_word"
     return "document"
 

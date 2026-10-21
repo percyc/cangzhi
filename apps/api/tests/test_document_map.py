@@ -14,7 +14,7 @@ def source(kind="docx"):
     ]}
 
 
-@pytest.mark.parametrize("kind", ["pdf", "doc", "docx", "markdown", "html", "note", "xlsx"])
+@pytest.mark.parametrize("kind", ["pdf", "doc", "docx", "wps", "markdown", "html", "note", "xlsx"])
 def test_map_preserves_order_empty_blocks_and_source(kind):
     payload = source(kind)
     before = copy.deepcopy(payload)

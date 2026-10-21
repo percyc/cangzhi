@@ -47,7 +47,8 @@ def test_empty_word_thumbnail_is_not_a_body_image():
 
 @pytest.mark.skipif(os.environ.get("CANGZHI_TEST_WORD_OCR_INTEGRATION") != "1",
                     reason="requires isolated LibreOffice/Tesseract runtime")
-def test_real_word_preview_and_local_ocr(session, tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["docx", "wps"])
+def test_real_word_preview_and_local_ocr(session, tmp_path, monkeypatch, kind):
     from PIL import Image, ImageDraw, ImageFont
     from docx.shared import Inches
 
@@ -68,10 +69,14 @@ def test_real_word_preview_and_local_ocr(session, tmp_path, monkeypatch):
     session.add(version)
     session.flush()
     monkeypatch.setattr(proc.settings, "storage_path", str(tmp_path))
-    native = DocxParser().parse(source)
+    if kind == "wps":
+        from apps.api.parsers.wps import WpsParser
+        native = WpsParser().parse(source)  # OOXML-compatible WPS container
+    else:
+        native = DocxParser().parse(source)
     assert not native.structured_content.full_text()
     result = proc._word_ocr_fallback(session, version, native, source,
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "synthetic.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"synthetic.{kind}",
         PdfOcrOptions(language="eng", external_max_pages=0))
     assert result.success, result.error_message
     assert "CANGZHI OCR TEST 12345" in result.structured_content.full_text()
@@ -80,7 +85,58 @@ def test_real_word_preview_and_local_ocr(session, tmp_path, monkeypatch):
     assert extraction["page_count"] == 1
     assert extraction["ocr_completed_pages"] == [1]
     assert not extraction.get("external_attempted_pages")
+    assert result.structured_content.document_type == kind
+    if kind == "wps":
+        assert result.structured_content.metadata["source_format"] == "wps"
     assert buffer.getvalue() == source
+
+
+@pytest.mark.skipif(os.environ.get("CANGZHI_TEST_WORD_OCR_INTEGRATION") != "1",
+                    reason="requires isolated LibreOffice runtime")
+def test_real_word97_compatible_wps_parse_and_preview(session, tmp_path, monkeypatch):
+    import subprocess
+    from apps.api.parsers.wps import WpsParser
+    word = WordDocument()
+    word.add_heading("Compatibility test", 1)
+    word.add_paragraph("CANGZHI WPS FACT 12345")
+    table = word.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Field"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "TABLE FACT 67890"
+    table.cell(1, 1).text = "123"
+    # Keep an explicit trailing paragraph: Word97 fixture export itself can
+    # flatten a terminal table. This is not a claim of lossless Office export.
+    word.add_paragraph("End of compatibility fixture")
+    path = tmp_path / "synthetic.docx"
+    word.save(path)
+    subprocess.run(["soffice", f"-env:UserInstallation={(tmp_path / 'export-profile').as_uri()}",
+                    "--headless", "--convert-to", "wps:MS Word 97", "--outdir", str(tmp_path), str(path)],
+                   check=True, capture_output=True, timeout=60)
+    source = path.with_suffix(".wps").read_bytes()
+    assert source.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    parsed = WpsParser().parse(source)
+    assert parsed.success, parsed.error_message
+    assert "CANGZHI WPS FACT 12345" in parsed.structured_content.full_text()
+    assert "TABLE FACT 67890" in parsed.structured_content.full_text()
+    assert any(block.type == "table" for block in parsed.structured_content.blocks), [(block.type, block.text) for block in parsed.structured_content.blocks]
+    assert parsed.structured_content.document_type == "wps"
+    doc = Document(title="synthetic WPS", source_type=DocumentSourceType.file)
+    session.add(doc)
+    session.flush()
+    version = DocumentVersion(document_id=doc.id, version_number=1, content_hash="wps-synthetic")
+    session.add(version)
+    session.flush()
+    monkeypatch.setattr(proc.settings, "storage_path", str(tmp_path / "storage"))
+    assert proc._ensure_word_pdf_preview(session, version, source, "application/kswps", "synthetic.WPS")
+    blob = session.get(Blob, version.preview_blob_id)
+    assert proc._read_blob_bytes(blob).startswith(b"%PDF-")
+    assert path.with_suffix(".wps").read_bytes() == source
+
+
+@pytest.mark.parametrize("reason", ["wps_unsupported_container", "wps_converter_unavailable",
+    "wps_conversion_failed", "wps_conversion_timeout", "wps_conversion_error"])
+def test_wps_failures_do_not_automatically_repeat_conversion(reason):
+    assert proc._is_terminal_parse_failure({"reason": reason})
 
 
 @pytest.mark.parametrize("original", [word_result("正文"), word_result(kind="pdf"), ParserResult(False)])
@@ -103,7 +159,7 @@ def test_empty_and_disabled_fail_without_external_calls(monkeypatch, images, ena
     assert proc._is_terminal_parse_failure(result.error_details)
 
 
-@pytest.mark.parametrize("kind", ["doc", "docx"])
+@pytest.mark.parametrize("kind", ["doc", "docx", "wps"])
 @pytest.mark.parametrize("outcome", ["partial", "empty", "failed", "exception", "preview_failed"])
 def test_preview_reuse_and_failure_boundaries(monkeypatch, kind, outcome):
     source = b"original Word unchanged"
@@ -158,12 +214,13 @@ def test_preview_reuse_and_failure_boundaries(monkeypatch, kind, outcome):
 
 
 @pytest.mark.parametrize("recognized", [False, True])
-def test_pipeline_never_completes_empty_word(session, monkeypatch, recognized):
+@pytest.mark.parametrize("kind", ["doc", "wps"])
+def test_pipeline_never_completes_empty_word(session, monkeypatch, recognized, kind):
     doc = Document(title="synthetic image Word", source_type=DocumentSourceType.file)
     session.add(doc)
     session.flush()
     blob = Blob(sha256="source", storage_key="synthetic", content_type="application/msword",
-                original_filename="test.doc", file_size=10)
+                original_filename=f"test.{kind}", file_size=10)
     session.add(blob)
     session.flush()
     version = DocumentVersion(document_id=doc.id, version_number=1, content_hash="source",
@@ -176,7 +233,7 @@ def test_pipeline_never_completes_empty_word(session, monkeypatch, recognized):
                         stage="parsing", config_version="1", idempotency_key="word-ocr-test")
     session.add(job)
     session.commit()
-    monkeypatch.setattr(proc, "_load_content_for_parsing", lambda *args: (b"source", "application/msword", "test.doc"))
+    monkeypatch.setattr(proc, "_load_content_for_parsing", lambda *args: (b"source", "application/msword", f"test.{kind}"))
     monkeypatch.setattr(proc, "_build_pdf_ocr_options", lambda *args: PdfOcrOptions())
     def ensure(*args):
         version.preview_blob_id = blob.id  # synthetic stand-in, never a real source
@@ -184,7 +241,7 @@ def test_pipeline_never_completes_empty_word(session, monkeypatch, recognized):
     monkeypatch.setattr(proc, "_ensure_word_pdf_preview", ensure)
     monkeypatch.setattr(proc, "_read_blob_bytes", lambda *args: b"preview")
     def factory(mime, *args, **kwargs):
-        result = word_result(kind="doc") if mime != "application/pdf" else ParserResult(
+        result = word_result(kind=kind) if mime != "application/pdf" else ParserResult(
             True, StructuredContent("pdf", [Block("paragraph", "recognized text", [], page=1)] if recognized else [],
                                     metadata={"pdf_extraction": {"ocr_status": "completed" if recognized else "failed"}}))
         return SimpleNamespace(parse=lambda *args: result)
