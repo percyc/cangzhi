@@ -94,6 +94,50 @@ Workspaces isolate personal knowledge; they are not team memberships or a
 multi-user authorization system. Check the current workspace and knowledge
 scope before uploading or asking.
 
+## Architecture at a glance
+
+Three diagrams explain the system, ingestion, and exploration paths.
+[Download the six-page architecture introduction (Chinese PDF)](docs/presentations/cangzhi-architecture-20261021.zh-CN.pdf).
+The diagrams below are in Chinese and reflect the code snapshot reviewed on
+2026-10-21. See [Architecture](docs/ARCHITECTURE.md) and the
+[API / MCP / CLI reference](docs/API_REFERENCE.md) for implementation details.
+
+### 1. System: a shared knowledge and data foundation
+
+Web, REST, MCP, and CLI reuse business services and authorization boundaries.
+Originals and document versions remain the source of truth; document retrieval
+and exact dataset computation are complementary paths. Summaries, chunks,
+vectors, and Parquet files are rebuildable derivatives.
+
+![Cangzhi system architecture (Chinese)](docs/images/architecture-20261021/01-system-overview.png)
+
+### 2. Ingestion: documents and datasets take different paths
+
+Text documents pass through extraction, conditional OCR, quality checks, and
+parent/child chunking for full-text and vector retrieval. Validated tabular data
+produces field profiles and versioned Parquet, queried precisely with DuckDB.
+Complex Excel structures that cannot be validated retain their originals and
+diagnostics for cleanup rather than being forced into text vectors.
+
+![Document and dataset ingestion (Chinese)](docs/images/architecture-20261021/02-ingestion-pipelines.png)
+
+### 3. Exploration: discovery, computation, and verifiable evidence
+
+MCP currently exposes 19 tools, grouped here into six purposes: scope/catalog,
+document search/reading, dataset discovery/computation, versioned evidence,
+enhancement reading, and quick Q&A. These are not 19 search algorithms.
+External agents can orchestrate multiple steps through REST, MCP, or CLI;
+the Skill supplies orchestration guidance rather than another transport.
+
+![Knowledge and data exploration paths (Chinese)](docs/images/architecture-20261021/03-knowledge-exploration.png)
+
+**Analytics boundary:** Cangzhi provides controlled queries, field semantics,
+and traceable evidence as a foundation for external analytics and modeling.
+It does not execute arbitrary SQL/Python or train models. Dataset queries return
+at most 200 rows; large-scale modeling requires separately designed controlled
+data export and external compute. Database sources use local snapshots and
+refresh policies, not a live source-database query for every question.
+
 ## Interface preview
 
 These are real screenshots of the `v1.2` test instance, using an isolated
