@@ -33,7 +33,7 @@ npm run assets:brand
 ```
 
 后续换图应保留原图并递增资产文件名版本，更新 `lib/brand.ts` 和对应测试，
-避免浏览器继续使用旧 favicon。这里只交付资源和代码，实际部署状态以项目状态页为准。
+避免浏览器继续使用旧 favicon。实际部署状态以项目状态页为准。
 
 验证命令：在 `apps/web` 执行 `npm run test:ux`、`npm run lint`、
 `npm run typecheck`、`npm run build`，再执行 `npm run test:browser:brand`。
