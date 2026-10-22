@@ -212,64 +212,109 @@ async def download_file(
     password: str,
     trusted_private_network: bool,
     max_bytes: int,
-    timeout_seconds: float = 60,
+    timeout_seconds: float = 45,
 ) -> tuple[bytes, str]:
+    """Stream a remote file with a hard total deadline and incremental cap.
+
+    The decoded remote path is quoted exactly once (covering ``#``, ``?``,
+    ``%`` and Unicode) and the size limit is enforced up front via an early
+    ``Content-Length`` check and then incrementally as bytes arrive, instead
+    of only after the whole body has been buffered. WebDAV credentials are
+    never forwarded on a cross-origin redirect; those must be ordinary signed
+    public URLs.
+    """
     safe_base = validate_webdav_url(
         base_url, trusted_private_network=trusted_private_network
     )
     parts = urlsplit(safe_base)
-    request_url = f"{parts.scheme}://{parts.netloc}{remote_path}"
+    quoted_path = quote(remote_path or "/", safe="/")
+    if not quoted_path.startswith("/"):
+        quoted_path = "/" + quoted_path
+    request_url = f"{parts.scheme}://{parts.netloc}{quoted_path}"
     token = base64.b64encode(f"{username}:{password}".encode()).decode()
+
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout_seconds,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            response = None
-            send_authorization = True
-            for _redirect in range(4):
-                request_headers = (
-                    {"Authorization": f"Basic {token}"}
-                    if send_authorization
-                    else {}
-                )
-                response = await client.get(
-                    request_url,
-                    headers=request_headers,
-                )
-                if response.status_code not in {301, 302, 303, 307, 308}:
-                    break
-                location = response.headers.get("Location")
-                if not location:
-                    raise WebDAVError("WebDAV 下载跳转缺少目标地址")
-                target = urljoin(request_url, location)
-                target_parts = urlsplit(target)
-                same_origin = (
-                    target_parts.scheme == parts.scheme
-                    and target_parts.netloc == parts.netloc
-                )
-                if send_authorization and not same_origin:
-                    # Object-storage redirects use a signed public URL.
-                    # Validate it as an ordinary public URL and never
-                    # forward the WebDAV Basic credential.
-                    target = normalize_url(target)
-                    send_authorization = False
-                elif not send_authorization:
-                    target = normalize_url(target)
-                request_url = target
-            assert response is not None
+        async with asyncio.timeout(timeout_seconds):
+            async with httpx.AsyncClient(
+                timeout=timeout_seconds,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                data: bytearray | None = None
+                content_type = "application/octet-stream"
+                send_authorization = True
+                for _redirect in range(4):
+                    request_headers = (
+                        {"Authorization": f"Basic {token}"}
+                        if send_authorization
+                        else {}
+                    )
+                    async with client.stream(
+                        "GET", request_url, headers=request_headers
+                    ) as response:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("Location")
+                            if not location:
+                                raise WebDAVError(
+                                    "WebDAV 下载跳转缺少目标地址"
+                                )
+                            target = urljoin(request_url, location)
+                            target_parts = urlsplit(target)
+                            same_origin = (
+                                target_parts.scheme == parts.scheme
+                                and target_parts.netloc == parts.netloc
+                            )
+                            if send_authorization and not same_origin:
+                                # Object-storage redirects use a signed public
+                                # URL; validate it and never forward the
+                                # WebDAV Basic credential.
+                                target = normalize_url(target)
+                                send_authorization = False
+                            elif not send_authorization:
+                                target = normalize_url(target)
+                            request_url = target
+                            continue
+                        if response.status_code != 200:
+                            raise WebDAVError(
+                                f"下载 WebDAV 文件返回 HTTP {response.status_code}"
+                            )
+                        content_type = response.headers.get(
+                            "Content-Type", "application/octet-stream"
+                        )
+                        # Enforce the limit early from the declared length.
+                        declared = response.headers.get("Content-Length")
+                        if declared:
+                            try:
+                                declared_bytes = int(declared)
+                            except ValueError:
+                                declared_bytes = None
+                            if (
+                                declared_bytes is not None
+                                and declared_bytes > max_bytes
+                            ):
+                                raise WebDAVError(
+                                    f"WebDAV 文件超过 {max_bytes // 1024 // 1024} MB 限制"
+                                )
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes(
+                            chunk_size=64 * 1024
+                        ):
+                            body.extend(chunk)
+                            if len(body) > max_bytes:
+                                raise WebDAVError(
+                                    f"WebDAV 文件超过 {max_bytes // 1024 // 1024} MB 限制"
+                                )
+                        if not body:
+                            raise WebDAVError("WebDAV 文件内容为空")
+                        data = body
+                        break
+                if data is None:
+                    raise WebDAVError("下载 WebDAV 文件跳转过多")
+                return bytes(data), content_type
+    except TimeoutError as exc:
+        raise WebDAVError("下载 WebDAV 文件失败：连接超时") from exc
     except httpx.HTTPError as exc:
         raise WebDAVError(f"下载 WebDAV 文件失败：{type(exc).__name__}") from exc
-    if response.status_code != 200:
-        raise WebDAVError(f"下载 WebDAV 文件返回 HTTP {response.status_code}")
-    if len(response.content) > max_bytes:
-        raise WebDAVError(f"WebDAV 文件超过 {max_bytes // 1024 // 1024} MB 限制")
-    if not response.content:
-        raise WebDAVError("WebDAV 文件内容为空")
-    return response.content, response.headers.get(
-        "Content-Type", "application/octet-stream"
-    )
 
 
 def parse_multistatus(payload: bytes) -> list[RemoteEntry]:

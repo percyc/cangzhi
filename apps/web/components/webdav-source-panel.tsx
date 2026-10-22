@@ -1,7 +1,9 @@
 'use client';
 
-import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+
+import { WebDavFileBrowser } from '@/components/webdav-file-browser';
+import { registerUnsavedChanges } from '@/lib/navigation-guard';
 
 type Scan = {
   id: number;
@@ -59,19 +61,6 @@ type Source = {
   entry_counts: Counts;
   scan?: Scan | null;
 };
-type Entry = {
-  id: number;
-  remote_path: string;
-  file_size: number | null;
-  state: string;
-  document_id: number | null;
-  last_error: string | null;
-  ignore_reason: string | null;
-  resume_state: string | null;
-  missing_since: string | null;
-  missing_count: number;
-  keep_snapshot: boolean;
-};
 type DeleteImpact = {
   entry_count: number;
   active_document_count: number;
@@ -119,7 +108,10 @@ const EMPTY: SourceForm = {
 
 export function WebDavSourcePanel() {
   const [sources, setSources] = useState<Source[]>([]);
-  const [entries, setEntries] = useState<Record<number, Entry[]>>({});
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [importing, setImporting] = useState<Record<number, boolean>>({});
+  const [fullImportRequest, setFullImportRequest] = useState<Record<number, boolean>>({});
+  const importingAny = Object.values(importing).some(Boolean);
   const [form, setForm] = useState(EMPTY);
   const [editingSourceId, setEditingSourceId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<SourceForm>(EMPTY);
@@ -171,6 +163,16 @@ export function WebDavSourcePanel() {
     timer = setTimeout(() => void poll(), 2000);
     return () => { stopped = true; clearTimeout(timer); };
   }, [scanning, load]);
+
+  // A sequential import only lives in this page: warn before leaving or closing
+  // so the user stops it deliberately instead of losing the remaining files.
+  useEffect(() => (
+    importingAny
+      ? registerUnsavedChanges(
+          '正在逐个导入远端文件。离开本页会中断后续文件（已入库的文件不会回滚）。确定离开吗？',
+        )
+      : undefined
+  ), [importingAny]);
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
@@ -239,28 +241,20 @@ export function WebDavSourcePanel() {
     }
   };
 
-  const action = async (source: Source, kind: 'test' | 'scan' | 'sync' | 'resume' | 'cancel') => {
+  const action = async (source: Source, kind: 'test' | 'scan' | 'resume' | 'cancel') => {
     setBusy(`${source.id}:${kind}`);
     setError('');
     setMessage('');
     try {
-      const route = { scan: 'scan-jobs', resume: 'scan-jobs?resume=true', cancel: 'scan-jobs/cancel', test: 'test', sync: 'sync' }[kind];
+      const route = { scan: 'scan-jobs', resume: 'scan-jobs?resume=true', cancel: 'scan-jobs/cancel', test: 'test' }[kind];
       const response = await fetch(`/api/webdav/${source.id}/${route}`, {
         method: 'POST',
       });
       if (!response.ok) throw new Error(await readError(response, '操作失败'));
-      const result = (await response.json()) as Record<string, unknown>;
       if (kind === 'test') setMessage(`${source.name}：连接正常`);
       if (kind === 'scan' || kind === 'resume') setMessage(`${source.name}：已提交后台扫描，可以离开页面。`);
       if (kind === 'cancel') setMessage(`${source.name}：已取消扫描，保留断点，原有入库资料不变。`);
-      if (kind === 'sync')
-        setMessage(
-          `${source.name}：新增 ${String(result.imported ?? 0)}，更新 ${String(result.updated ?? 0)}，失败 ${String(result.failed ?? 0)}`,
-        );
       await load();
-      if (kind === 'sync') {
-        setEntries((current) => { const next = { ...current }; delete next[source.id]; return next; });
-      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '操作失败');
     } finally {
@@ -268,43 +262,31 @@ export function WebDavSourcePanel() {
     }
   };
 
-  const showEntries = async (sourceId: number) => {
-    if (entries[sourceId]) {
-      setEntries((current) => {
+  const toggleBrowser = (sourceId: number, open = !expanded[sourceId]) => {
+    // A collapsed panel has no browser, so the top button opens it; an already
+    // open browser re-asks for its own root-scope confirmation instead.
+    if (!open) {
+      setFullImportRequest((current) => ({ ...current, [sourceId]: false }));
+      setExpanded((current) => {
         const next = { ...current };
         delete next[sourceId];
         return next;
       });
       return;
     }
-    const response = await fetch(`/api/webdav/${sourceId}/entries`, {
-      cache: 'no-store',
-    });
-    if (!response.ok) throw new Error(await readError(response, '文件清单读取失败'));
-    const items = (await response.json()) as Entry[];
-    setEntries((current) => ({
-      ...current,
-      [sourceId]: items,
-    }));
+    setExpanded((current) => ({ ...current, [sourceId]: true }));
   };
 
-  const allowReimport = async (sourceId: number, entry: Entry) => {
-    setBusy(`${sourceId}:entry:${entry.id}`);
+  const allowReimport = async (sourceId: number, entryId: number) => {
+    setBusy(`${sourceId}:entry:${entryId}`);
     setError('');
     try {
       const response = await fetch(
-        `/api/webdav/${sourceId}/entries/${entry.id}/allow-reimport`,
+        `/api/webdav/${sourceId}/entries/${entryId}/allow-reimport`,
         { method: 'POST' },
       );
       if (!response.ok) throw new Error(await readError(response, '重新纳入失败'));
-      const entriesResponse = await fetch(`/api/webdav/${sourceId}/entries`, {
-        cache: 'no-store',
-      });
-      if (!entriesResponse.ok)
-        throw new Error(await readError(entriesResponse, '文件清单读取失败'));
-      const items = (await entriesResponse.json()) as Entry[];
-      setEntries((current) => ({ ...current, [sourceId]: items }));
-      setMessage('该远端文件已允许重新入库，请重新扫描并同步。');
+      setMessage('该远端文件已允许重新入库，可在文件目录中重新选择导入。');
       await load();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '重新纳入失败');
@@ -313,25 +295,15 @@ export function WebDavSourcePanel() {
     }
   };
 
-  const keepSnapshot = async (sourceId: number, entry: Entry) => {
-    setBusy(`${sourceId}:snapshot:${entry.id}`);
+  const keepSnapshot = async (sourceId: number, entryId: number) => {
+    setBusy(`${sourceId}:snapshot:${entryId}`);
     setError('');
     try {
       const response = await fetch(
-        `/api/webdav/${sourceId}/entries/${entry.id}/keep-snapshot`,
+        `/api/webdav/${sourceId}/entries/${entryId}/keep-snapshot`,
         { method: 'POST' },
       );
       if (!response.ok) throw new Error(await readError(response, '保留快照失败'));
-      const entriesResponse = await fetch(`/api/webdav/${sourceId}/entries`, {
-        cache: 'no-store',
-      });
-      if (!entriesResponse.ok)
-        throw new Error(await readError(entriesResponse, '文件清单读取失败'));
-      const items = (await entriesResponse.json()) as Entry[];
-      setEntries((current) => ({
-        ...current,
-        [sourceId]: items,
-      }));
       setMessage('已保留为本地知识快照；远端继续缺失也不会再次移入回收站。');
       await load();
     } catch (caught) {
@@ -376,7 +348,7 @@ export function WebDavSourcePanel() {
           : `连接器“${source.name}”已删除，已入库资料仍然保留；远端文件未改动。`,
       );
       setRemoveDialog(null);
-      setEntries((current) => {
+      setExpanded((current) => {
         const next = { ...current };
         delete next[source.id];
         return next;
@@ -424,9 +396,12 @@ export function WebDavSourcePanel() {
         </summary>
         <form onSubmit={create} className="border-t border-slate-100 px-5 pb-5">
           <SourceFields form={form} setForm={setForm} />
-          <button disabled={creating} className="mt-4 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50">
+          <button disabled={creating || importingAny} className="mt-4 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50">
             {creating ? '正在添加…' : '添加知识源'}
           </button>
+          {importingAny && (
+            <p className="mt-2 text-xs text-amber-700">正在导入远端文件，完成或停止后才能添加新的知识源。</p>
+          )}
         </form>
       </details>
 
@@ -435,7 +410,10 @@ export function WebDavSourcePanel() {
       {progressError && <p className="mt-4 rounded bg-amber-50 p-3 text-sm text-amber-800" role="status">{progressError}</p>}
 
       <div className="mt-6 space-y-4">
-        {sources.map((source) => (
+        {sources.map((source) => {
+          // Any in-flight import (or any other pending request) locks this card.
+          const locked = Boolean(busy) || importingAny;
+          return (
           <section key={source.id} className="rounded-2xl border bg-white p-5">
             {editingSourceId === source.id ? (
               <form onSubmit={(event) => void save(event, source)}>
@@ -486,33 +464,51 @@ export function WebDavSourcePanel() {
                   </span>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {(['test', 'scan', 'sync'] as const).map((kind) => (
-                    <button key={kind} type="button" disabled={Boolean(busy) || (scanActive(source) && kind !== 'test') || (!source.is_enabled && kind !== 'test')} onClick={() => void action(source, kind)} className={`rounded-xl px-3 py-2 text-sm font-medium disabled:opacity-40 ${kind === 'sync' ? 'bg-slate-950 text-white hover:bg-slate-800' : 'border border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
-                      {busy === `${source.id}:${kind}` ? '执行中…' : { test: '测试连接', scan: '扫描文件', sync: '同步入库' }[kind]}
+                  {(['test', 'scan'] as const).map((kind) => (
+                    <button key={kind} type="button" disabled={locked || scanActive(source) && kind !== 'test' || (!source.is_enabled && kind !== 'test')} onClick={() => void action(source, kind)} className="rounded-xl px-3 py-2 text-sm font-medium disabled:opacity-40 border border-slate-300 text-slate-700 hover:bg-slate-50">
+                      {busy === `${source.id}:${kind}` ? '执行中…' : { test: '测试连接', scan: '扫描文件' }[kind]}
                     </button>
                   ))}
-                  {scanActive(source) && <button type="button" disabled={Boolean(busy)} onClick={() => void action(source, 'cancel')} className="rounded-xl border px-3 py-2 text-sm">取消扫描</button>}
-                  {source.scan && ['failed', 'cancelled'].includes(source.scan.status) && <button type="button" disabled={Boolean(busy) || !source.is_enabled} onClick={() => void action(source, 'resume')} className="rounded-xl border px-3 py-2 text-sm">从断点继续</button>}
-                  <button type="button" disabled={Boolean(busy) || scanActive(source)} onClick={() => startEditing(source)} className="rounded px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-40">
+                  <button type="button" disabled={locked || scanActive(source) || !source.is_enabled} onClick={() => { toggleBrowser(source.id, true); setFullImportRequest((current) => ({ ...current, [source.id]: true })); }} className="rounded-xl bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40">
+                    同步入库
+                  </button>
+                  {scanActive(source) && <button type="button" disabled={locked} onClick={() => void action(source, 'cancel')} className="rounded-xl border px-3 py-2 text-sm">取消扫描</button>}
+                  {source.scan && ['failed', 'cancelled'].includes(source.scan.status) && <button type="button" disabled={locked || !source.is_enabled} onClick={() => void action(source, 'resume')} className="rounded-xl border px-3 py-2 text-sm">从断点继续</button>}
+                  <button type="button" disabled={locked || scanActive(source)} onClick={() => startEditing(source)} className="rounded px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-40">
                     编辑配置
                   </button>
-                  <button type="button" onClick={() => void showEntries(source.id).catch((caught) => setError(caught instanceof Error ? caught.message : '读取失败'))} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100">
-                    {entries[source.id] ? '收起清单' : '查看文件'}
+                  <button type="button" disabled={locked} onClick={() => toggleBrowser(source.id, !expanded[source.id])} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40">
+                    {expanded[source.id] ? '收起文件目录' : '查看文件'}
                   </button>
-                  <button type="button" disabled={Boolean(busy) || scanActive(source)} onClick={() => void toggleEnabled(source)} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40">
+                  <button type="button" disabled={locked || scanActive(source)} onClick={() => void toggleEnabled(source)} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40">
                     {busy === `${source.id}:enabled` ? '处理中…' : source.is_enabled ? '停用' : '启用'}
                   </button>
-                  <button type="button" disabled={Boolean(busy) || scanActive(source)} onClick={() => void prepareRemove(source)} className="rounded px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
+                  <button type="button" disabled={locked || scanActive(source)} onClick={() => void prepareRemove(source)} className="rounded px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
                     {busy === `${source.id}:impact` ? '正在核对影响…' : '删除连接器'}
                   </button>
                 </div>
                 {source.scan && <WebDavScanProgress scan={source.scan} />}
                 {source.last_error && !source.scan?.error && <p className="mt-3 text-sm text-red-700">{source.last_error}</p>}
-                {entries[source.id] && <EntryTable entries={entries[source.id]} sourceId={source.id} busy={busy} onAllowReimport={allowReimport} onKeepSnapshot={keepSnapshot} />}
+                {expanded[source.id] && (
+                  <WebDavFileBrowser
+                    key={source.id}
+                    sourceId={source.id}
+                    sourceName={source.name}
+                    disabled={scanActive(source) || !source.is_enabled}
+                    busy={Boolean(busy) || (importingAny && !importing[source.id])}
+                    fullImportRequest={fullImportRequest[source.id] === true}
+                    onFullImportHandled={() => setFullImportRequest((current) => ({ ...current, [source.id]: false }))}
+                    onRunningChange={(running) => setImporting((current) => ({ ...current, [source.id]: running }))}
+                    onImported={load}
+                    onAllowReimport={(entry) => allowReimport(source.id, entry.id)}
+                    onKeepSnapshot={(entry) => keepSnapshot(source.id, entry.id)}
+                  />
+                )}
               </>
             )}
           </section>
-        ))}
+          );
+        })}
         {!sources.length && <p className="rounded-xl border border-dashed p-8 text-center text-sm text-slate-500">还没有知识源。</p>}
       </div>
       {removeDialog && (
@@ -547,7 +543,7 @@ export function WebDavSourcePanel() {
           </div>
         </div>
       )}
-    </div>
+      </div>
   );
 }
 
@@ -636,20 +632,8 @@ function Field({ label, value, onChange, type = 'text', placeholder = '', requir
   return <label className="text-sm text-slate-700">{label}<input required={required} disabled={disabled} value={value} type={type} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 disabled:bg-slate-100" /></label>;
 }
 
-function EntryTable({ entries, sourceId, busy, onAllowReimport, onKeepSnapshot }: { entries: Entry[]; sourceId: number; busy: string; onAllowReimport: (sourceId: number, entry: Entry) => Promise<void>; onKeepSnapshot: (sourceId: number, entry: Entry) => Promise<void> }) {
-  return <div className="mt-4 overflow-x-auto border-t pt-3"><table className="min-w-full text-left text-xs"><thead className="text-slate-500"><tr><th className="py-2">远端文件</th><th>状态</th><th>大小</th><th>操作</th></tr></thead><tbody>{entries.map((entry) => <tr key={entry.id} className="border-t"><td className="max-w-xl break-all py-2 pr-4">{entry.remote_path}</td><td>{entry.state === 'ignored' && entry.ignore_reason === 'document_trashed' && entry.resume_state === 'missing' ? '远端已确认删除 · 已入回收站' : entryState(entry.state)}{entry.keep_snapshot ? ' · 已保留快照' : ''}</td><td>{formatSize(entry.file_size)}</td><td><div className="flex items-center gap-3">{entry.document_id && <Link className="text-blue-700 hover:underline" href={`/documents/${entry.document_id}`}>查看</Link>}{entry.document_id && !entry.keep_snapshot && (entry.state === 'missing' || (entry.state === 'ignored' && entry.ignore_reason === 'document_trashed')) && <button type="button" disabled={Boolean(busy)} onClick={() => void onKeepSnapshot(sourceId, entry)} className="text-blue-700 hover:underline disabled:opacity-40">{busy === `${sourceId}:snapshot:${entry.id}` ? '处理中…' : '保留知识快照'}</button>}{entry.ignore_reason === 'permanent_deleted' && <button type="button" disabled={Boolean(busy)} onClick={() => void onAllowReimport(sourceId, entry)} className="text-blue-700 hover:underline disabled:opacity-40">{busy === `${sourceId}:entry:${entry.id}` ? '处理中…' : '允许重新入库'}</button>}{!entry.document_id && entry.ignore_reason !== 'permanent_deleted' ? '—' : null}</div></td></tr>)}</tbody></table></div>;
-}
-
 function statusLabel(value: string) {
   return ({ idle: '空闲', scanning: '扫描中', syncing: '同步中', failed: '有失败' } as Record<string, string>)[value] ?? value;
-}
-function entryState(value: string) {
-  return ({ discovered: '待同步', changed: '有更新', synced: '已同步', failed: '失败', suspected_missing: '远端缺失，待确认', missing: '远端已确认删除', ignored: '已从知识库排除' } as Record<string, string>)[value] ?? value;
-}
-function formatSize(value: number | null) {
-  if (value == null) return '—';
-  if (value < 1024 * 1024) return `${Math.ceil(value / 1024)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 async function readError(response: Response, fallback: string) {
   try {

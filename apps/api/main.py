@@ -39,6 +39,7 @@ from .api import (
     system,
     v1,
     webdav,
+    webdav_browser,
     workspaces,
 )
 from .api.auth import require_admin
@@ -122,6 +123,7 @@ app.include_router(search.router, prefix="/api", dependencies=_admin_workspace_d
 app.include_router(ask.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(embeddings.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(webdav.router, prefix="/api", dependencies=_admin_workspace_dep)
+app.include_router(webdav_browser.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(exports.router, prefix="/api", dependencies=_admin_workspace_dep)
 app.include_router(workspaces.router, prefix="/api", dependencies=_admin_dep)
 app.include_router(system.router, prefix="/api", dependencies=_admin_dep)

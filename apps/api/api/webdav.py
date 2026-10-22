@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
@@ -12,9 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.db import get_db
-from ..models.blobs import Blob
-from ..models.documents import Document, DocumentSourceType, DocumentVersion
-from ..models.processing import ProcessingJob
+from ..models.documents import Document, DocumentVersion
 from ..models.webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource, WebDAVScan
 from ..security.secrets import decrypt_secret, encrypt_secret
 from ..security.url_safety import URLSecurityError
@@ -34,12 +31,16 @@ from ..services.webdav import (
     webdav_external_identity,
 )
 from ..storage import get_storage
+from ..services.webdav_import import (
+    import_single_entry,
+    run_sync_batch,
+    snapshot_source,
+)
 from ..services.webdav_reconciliation import reconcile_scan
 from ..services.webdav_scan_jobs import (
     ScanConflict, cancel_scan, current_scan, ensure_not_scanning, public_scan, start_scan,
 )
 from ..storage.base import BlobStorage
-from .files import normalized_filename, validate_file_type
 
 router = APIRouter(prefix="/webdav", tags=["webdav"])
 
@@ -643,22 +644,71 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
     )
 
 
+class SyncBatchRequest(BaseModel):
+    """Per-file, cursor-driven import batch. Union is not required."""
+    entry_ids: list[int] | None = Field(
+        default=None, max_length=1000, description="显式条目 ID（与 directory 互斥；空列表不选中任何条目）"
+    )
+    directory: str | None = Field(
+        default=None, max_length=2048, description="绝对解码路径，须在扫描根或其子目录段边界上"
+    )
+    failed_only: bool = False
+    after_id: int = Field(default=0, ge=0)
+    through_id: int | None = Field(default=None, ge=0)
+    limit: int = Field(default=1, ge=1, le=1)
+
+    @field_validator("entry_ids")
+    @classmethod
+    def _coerce_entry_ids(cls, value: list[int] | None) -> list[int] | None:
+        if value is None:
+            return None
+        if any(int(item) <= 0 for item in value):
+            raise ValueError("条目 ID 必须为正整数")
+        return [int(item) for item in value]
+
+
+async def _lock_source_nowait_or_409(
+    db: AsyncSession, source_id: int
+) -> WebDAVSource:
+    """Lock the source row without waiting; a competing writer means 409."""
+    try:
+        source = await db.scalar(
+            select(WebDAVSource)
+            .where(WebDAVSource.id == source_id)
+            .with_for_update(nowait=True)
+            .execution_options(populate_existing=True)
+        )
+    except Exception:  # noqa: BLE001 - lock-wait timeout / aborted txn
+        await db.rollback()
+        raise HTTPException(
+            status_code=409, detail="来源正被其他操作占用，请稍后重试"
+        ) from None
+    if source is None:
+        raise HTTPException(status_code=404, detail="WebDAV 知识源不存在")
+    return source
+
+
 @router.post("/{source_id}/sync", response_model=dict[str, Any])
 async def sync_source(
     source_id: int,
     db: AsyncSession = Depends(get_db),
     storage: BlobStorage = Depends(get_storage),
 ):
-    """Download new/changed files and enqueue the normal ingestion pipeline."""
+    """Download new/changed files and enqueue the normal ingestion pipeline.
+
+    Shared per-file persistence lives in ``webdav_import.import_single_entry``;
+    each file commits independently so a mid-list failure never strand the
+    source in ``syncing`` and expired ORM rows are never reused after rollback.
+    """
 
     source = await _source_or_404(db, source_id)
     await _scan_guard(db, source_id)
     if not source.is_enabled:
         raise HTTPException(status_code=409, detail="知识源已停用，请先启用")
-    entries = (
+    entry_ids = list(
         (
             await db.execute(
-                select(WebDAVEntry)
+                select(WebDAVEntry.id)
                 .where(
                     WebDAVEntry.source_id == source.id,
                     WebDAVEntry.state.in_(("discovered", "changed", "failed")),
@@ -672,204 +722,67 @@ async def sync_source(
     source.sync_status = "syncing"
     source.last_error = None
     await db.commit()
-    imported = updated = unchanged = failed = 0
+    source_snapshot = snapshot_source(await db.get(WebDAVSource, source_id))
     password = decrypt_secret(source.password_cipher)
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
-
-    for entry in entries:
-        try:
-            payload, upstream_type = await download_file(
-                base_url=source.base_url,
-                remote_path=entry.remote_path,
-                username=source.username,
+    imported = updated = unchanged = failed = 0
+    try:
+        for entry_id in entry_ids:
+            entry = await db.get(WebDAVEntry, entry_id)
+            if entry is None or entry.state not in (
+                "discovered",
+                "changed",
+                "failed",
+            ):
+                continue
+            outcome = await import_single_entry(
+                db,
+                source=source_snapshot,
+                entry=entry,
+                storage=storage,
+                download_file=download_file,
+                spreadsheet_schema_is_stale=_spreadsheet_schema_is_stale,
                 password=password,
-                trusted_private_network=source.trusted_private_network,
                 max_bytes=max_bytes,
             )
-            filename = normalized_filename(PurePosixPath(entry.remote_path).name)
-            content_type = validate_file_type(
-                filename, upstream_type.split(";", 1)[0].strip()
-            )
-            stored = storage.save(BytesIO(payload), max_bytes=max_bytes)
-            entry.content_hash = stored.sha256
-            existing_blob = await db.scalar(
-                select(Blob).where(Blob.sha256 == stored.sha256)
-            )
-            if existing_blob is not None:
-                storage.delete(stored.storage_key)
-                blob = existing_blob
-            else:
-                blob = Blob(
-                    sha256=stored.sha256,
-                    storage_key=stored.storage_key,
-                    content_type=content_type,
-                    file_size=stored.size,
-                    original_filename=filename,
-                )
-                db.add(blob)
-                await db.flush()
-
-            document = (
-                await db.get(Document, entry.document_id)
-                if entry.document_id is not None
-                else None
-            )
-            if document is None:
-                document = Document(
-                    title=(PurePosixPath(filename).stem or filename)[:1024],
-                    source_type=DocumentSourceType.file,
-                    meta={
-                        "external_source": "webdav",
-                        "webdav_source_id": source.id,
-                        "webdav_source_name": source.name,
-                        "webdav_path": entry.remote_path,
-                    },
-                    external_identity=entry.external_identity
-                    or webdav_external_identity(
-                        source.base_url, entry.remote_path
-                    ),
-                )
-                db.add(document)
-                await db.flush()
-                version_number = 1
+            if outcome.outcome == "imported":
                 imported += 1
-            else:
-                if document.is_deleted:
-                    entry.state = "ignored"
-                    entry.ignore_reason = "document_trashed"
-                    entry.ignored_at = datetime.now(timezone.utc)
-                    await db.commit()
-                    continue
-                document.external_identity = (
-                    entry.external_identity
-                    or document.external_identity
-                    or webdav_external_identity(
-                        source.base_url, entry.remote_path
-                    )
-                )
-                document_meta = dict(document.meta or {})
-                document_meta.update(
-                    {
-                        "external_source": "webdav",
-                        "webdav_source_id": source.id,
-                        "webdav_source_name": source.name,
-                        "webdav_path": entry.remote_path,
-                        "connector_removed": False,
-                    }
-                )
-                document.meta = document_meta
-                current = (
-                    await db.get(DocumentVersion, document.current_version_id)
-                    if document.current_version_id
-                    else None
-                )
-                if current is not None and current.content_hash == stored.sha256:
-                    if _spreadsheet_schema_is_stale(current, filename):
-                        current.blob_id = blob.id
-                        current.processing_status = "created"
-                        parse_job = await db.scalar(
-                            select(ProcessingJob)
-                            .where(
-                                ProcessingJob.document_version_id == current.id,
-                                ProcessingJob.stage.in_(("stored", "parsing")),
-                            )
-                            .order_by(ProcessingJob.id)
-                        )
-                        if parse_job is None:
-                            parse_job = ProcessingJob(
-                                document_id=document.id,
-                                document_version_id=current.id,
-                                stage="stored",
-                                status="created",
-                                idempotency_key=(
-                                    f"{current.id}:stored:webdav-spreadsheet-v2"
-                                ),
-                                config_version="2",
-                            )
-                        else:
-                            parse_job.stage = "stored"
-                            parse_job.status = "created"
-                            parse_job.retry_count = 0
-                            parse_job.next_retry_at = None
-                            parse_job.last_error = None
-                            parse_job.error_details = None
-                            parse_job.config_version = "2"
-                            parse_job.started_at = None
-                            parse_job.finished_at = None
-                        db.add(parse_job)
-                        entry.state = "synced"
-                        entry.synced_at = datetime.now(timezone.utc)
-                        entry.last_error = None
-                        updated += 1
-                        await db.commit()
-                        continue
-                    entry.state = "synced"
-                    entry.synced_at = datetime.now(timezone.utc)
-                    unchanged += 1
-                    await db.commit()
-                    continue
-                version_number = (
-                    int(
-                        (
-                            await db.execute(
-                                select(func.max(DocumentVersion.version_number)).where(
-                                    DocumentVersion.document_id == document.id
-                                )
-                            )
-                        ).scalar_one()
-                        or 0
-                    )
-                    + 1
-                )
+            elif outcome.outcome == "updated":
                 updated += 1
-            version = DocumentVersion(
-                document_id=document.id,
-                blob_id=blob.id,
-                version_number=version_number,
-                content_hash=stored.sha256,
-                processing_status="created",
-                meta={
-                    "external_source": "webdav",
-                    "webdav_source_id": source.id,
-                    "webdav_path": entry.remote_path,
-                },
-            )
-            db.add(version)
-            await db.flush()
-            document.current_version_id = version.id
-            entry.document_id = document.id
-            entry.state = "synced"
-            entry.ignore_reason = None
-            entry.ignored_at = None
-            entry.resume_state = None
-            entry.synced_at = datetime.now(timezone.utc)
-            entry.last_error = None
-            db.add(
-                ProcessingJob(
-                    document_id=document.id,
-                    document_version_id=version.id,
-                    stage="stored",
-                    status="created",
-                    idempotency_key=f"{version.id}:stored:webdav-v1",
-                    config_version="webdav-v1",
+            elif outcome.outcome == "unchanged":
+                unchanged += 1
+            elif outcome.outcome == "failed":
+                failed += 1
+    finally:
+        # Re-lock the source so no scan can change sync_status between our
+        # reload and the commit; reload with populate_existing to drop any
+        # row expired by the per-file commits.
+        source = await db.scalar(
+            select(WebDAVSource)
+            .where(WebDAVSource.id == source_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if source is not None:
+            now = datetime.now(timezone.utc)
+            failed_count = int(
+                (
+                    await db.scalar(
+                        select(func.count(WebDAVEntry.id)).where(
+                            WebDAVEntry.source_id == source_id,
+                            WebDAVEntry.state == "failed",
+                        )
+                    )
+                    or 0
                 )
             )
+            if source.sync_status != "scanning":
+                source.sync_status = "failed" if failed_count else "idle"
+                source.last_error = (
+                    f"{failed_count} 个文件同步失败" if failed_count else None
+                )
+            source.last_sync_at = now
             await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            await db.rollback()
-            entry = await db.get(WebDAVEntry, entry.id)
-            if entry is not None:
-                entry.state = "failed"
-                entry.last_error = str(exc)[:1000]
-                await db.commit()
-            failed += 1
-
-    source = await db.get(WebDAVSource, source_id)
-    assert source is not None
-    source.sync_status = "failed" if failed else "idle"
-    source.last_sync_at = datetime.now(timezone.utc)
-    source.last_error = f"{failed} 个文件同步失败" if failed else None
-    await db.commit()
     return {
         "ok": failed == 0,
         "imported": imported,
@@ -877,3 +790,85 @@ async def sync_source(
         "unchanged": unchanged,
         "failed": failed,
     }
+
+
+@router.post("/{source_id}/sync-batch", response_model=dict[str, Any])
+async def sync_batch(
+    source_id: int,
+    payload: SyncBatchRequest,
+    db: AsyncSession = Depends(get_db),
+    storage: BlobStorage = Depends(get_storage),
+):
+    """Import at most one eligible file in a short, cursor-driven request.
+
+    The source row lock is held ``nowait`` through the single-file network
+    download and commit so partial import failures stay recoverable and the
+    source is never left stuck in ``syncing``.
+    """
+    if payload.entry_ids is not None and payload.directory is not None:
+        raise HTTPException(
+            status_code=400, detail="entry_ids 与 directory 不能同时使用"
+        )
+    source = await _lock_source_nowait_or_409(db, source_id)
+    await _scan_guard(db, source_id)
+    if not source.is_enabled:
+        raise HTTPException(status_code=409, detail="知识源已停用，请先启用")
+    try:
+        password = decrypt_secret(source.password_cipher)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400, detail="来源凭据无法解密，请重新保存连接配置"
+        ) from None
+    source_snapshot = snapshot_source(source)
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    try:
+        result = await run_sync_batch(
+            db,
+            source=source_snapshot,
+            storage=storage,
+            extensions=set(source.include_extensions or DEFAULT_EXTENSIONS),
+            download_file=download_file,
+            spreadsheet_schema_is_stale=_spreadsheet_schema_is_stale,
+            password=password,
+            max_bytes=max_bytes,
+            after_id=payload.after_id,
+            through_id=payload.through_id,
+            entry_ids=payload.entry_ids,
+            directory=payload.directory,
+            failed_only=payload.failed_only,
+            limit=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    # Derive status from the actual failed-entry count on the source, not the
+    # last single file, and never clobber a scan that started while the per-file
+    # commit had released the source lock. Re-lock the source so the scan status
+    # cannot change between our reload and the final commit; reload with
+    # populate_existing to drop the row expired by the per-file commit.
+    source = await db.scalar(
+        select(WebDAVSource)
+        .where(WebDAVSource.id == source_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if source is not None:
+        if result["processed"]:
+            source.last_sync_at = datetime.now(timezone.utc)
+        failed_count = int(
+            (
+                await db.scalar(
+                    select(func.count(WebDAVEntry.id)).where(
+                        WebDAVEntry.source_id == source_id,
+                        WebDAVEntry.state == "failed",
+                    )
+                )
+                or 0
+            )
+        )
+        if source.sync_status != "scanning":
+            source.sync_status = "failed" if failed_count else "idle"
+            source.last_error = (
+                f"{failed_count} 个文件导入失败" if failed_count else None
+            )
+        await db.commit()
+    return result
