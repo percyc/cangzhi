@@ -59,3 +59,27 @@ class ProcessingJob(BaseModel):
         nullable=True,
         index=True,
     )
+    # --- ADR-035: task ownership / lease / recovery (migration 0043).
+    # Every claim that participates in recovery stamps a unique
+    # ``attempt_id`` and a finite ``lease_until`` + ``hard_deadline`` so a
+    # supervised executor can be held to a bounded lifetime and a stale
+    # attempt can never commit after the lease has been handed to a
+    # successor. ``worker_id`` is the stable per-process executor identity;
+    # ``attempt_count`` is the bounded recovery counter (distinct from the
+    # application ``retry_count`` so a crash-recovery attempt is not silently
+    # charged to a model/parse retry budget). Rows written before migration
+    # 0043 keep all of these NULL: a ``processing`` row without a lease is a
+    # historical orphan and is intentionally never taken over.
+    worker_id = Column(String(64), nullable=True, index=True)
+    attempt_id = Column(String(64), nullable=True, index=True)
+    lease_until = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    hard_deadline = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # A persisted flag so an attempt whose child exit could not be confirmed is
+    # excluded from the recovery/claim pool until an operator clears it. A plain
+    # expired lease is *not* an exit proof; without this, the unconfirmed job
+    # would be reclaimed while its old process may still run (double execution).
+    quarantined_at = Column(DateTime(timezone=True), nullable=True, index=True)

@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from ..core.config import settings
+from ..services import model_admission as admission
 from .prompts import get_allowed_version
 from .schema import AnswerResult, UnderstandingResult, validate_against_evidence
 
@@ -248,6 +249,73 @@ def _coerce_payload(payload: Any) -> dict:
     return payload
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _post_chat_async(
+    url: str,
+    body: dict,
+    headers: dict | None,
+    *,
+    timeout: float,
+    trust_env: bool,
+) -> httpx.Response:
+    """Acquire a chat slot, run the single POST under the channel's absolute
+    hard deadline and handle an upstream 429 by setting a typed cooldown.
+    Runs inside the provider's sync facade via :func:`admission.run_sync`."""
+    async def worker():
+        async with httpx.AsyncClient(timeout=timeout, trust_env=trust_env) as client:
+            return await client.post(url, json=body, headers=headers)
+
+    async def adm():
+        async with admission.async_channel(
+            admission.CHAT, hard_lifetime_seconds=timeout
+        ) as channel:
+            response = await channel.run(worker())
+            if response.status_code == 429:
+                ra = _retry_after_seconds(response)
+                admission.apply_cooldown(
+                    admission.channel_pool_id(admission.CHAT),
+                    (ra or 60.0),
+                    retry_after=ra,
+                )
+            return response
+
+    return await adm()
+
+
+def _post_chat(
+    url: str,
+    body: dict,
+    headers: dict | None,
+    *,
+    timeout: float,
+    trust_env: bool = True,
+) -> httpx.Response:
+    """Synchronous facade for :func:`_post_chat_async`.
+
+    Runs the whole async transport (admission acquisition + HTTP + release)
+    to completion in a fresh event loop, so a slot is only released after the
+    real request exits even if an outer ``asyncio.to_thread`` was cancelled.
+    """
+    try:
+        return admission.run_sync(
+            lambda: _post_chat_async(url, body, headers, timeout=timeout, trust_env=trust_env)
+        )
+    except admission.AdmissionError:
+        raise
+    except httpx.HTTPError as exc:
+        raise AIProviderError(f"调用模型失败：{type(exc).__name__}") from None
+
+
 class OpenAICompatibleProvider(AIProvider):
     name = "openai"
 
@@ -271,26 +339,25 @@ class OpenAICompatibleProvider(AIProvider):
     def generate_json(self, *, system: str, prompt: str) -> dict:
         if not self.is_configured():
             raise AIProviderError("未配置 OpenAI-compatible API Key")
-        try:
-            response = httpx.post(
-                f"{self._base_url}/chat/completions",
-                json={
-                    "model": self._model,
-                    "temperature": 0.1,
-                    "response_format": {"type": "json_object"},
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise AIProviderError(f"调用模型失败：{type(exc).__name__}") from None
+        body = {
+            "model": self._model,
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        response = _post_chat(
+            f"{self._base_url}/chat/completions",
+            body,
+            headers,
+            timeout=self._timeout,
+        )
         if response.status_code >= 400:
             raise AIProviderError(f"模型服务返回 HTTP {response.status_code}")
         try:
@@ -333,15 +400,7 @@ class OpenAICompatibleProvider(AIProvider):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        try:
-            response = httpx.post(
-                url,
-                json=body,
-                headers=headers,
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise AIProviderError(f"调用模型失败：{exc}") from None
+        response = _post_chat(url, body, headers, timeout=self._timeout)
         if response.status_code >= 400:
             raise AIProviderError(
                 f"模型服务返回 {response.status_code}：{response.text[:200]}"
@@ -376,15 +435,7 @@ class OpenAICompatibleProvider(AIProvider):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        try:
-            response = httpx.post(
-                url,
-                json=body,
-                headers=headers,
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise AIProviderError(f"调用模型失败：{exc}") from None
+        response = _post_chat(url, body, headers, timeout=self._timeout)
         if response.status_code >= 400:
             raise AIProviderError(
                 f"模型服务返回 {response.status_code}：{response.text[:200]}"
@@ -422,22 +473,18 @@ class OllamaProvider(AIProvider):
     def generate_json(self, *, system: str, prompt: str) -> dict:
         if not self.is_configured():
             raise AIProviderError("未配置 Ollama 模型")
-        try:
-            response = httpx.post(
-                f"{self._base_url}/api/chat",
-                json={
-                    "model": self._model,
-                    "stream": False,
-                    "format": "json",
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise AIProviderError(f"调用 Ollama 失败：{type(exc).__name__}") from None
+        body = {
+            "model": self._model,
+            "stream": False,
+            "format": "json",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        response = _post_chat(
+            f"{self._base_url}/api/chat", body, None, timeout=self._timeout
+        )
         if response.status_code >= 400:
             raise AIProviderError(f"Ollama 返回 HTTP {response.status_code}")
         try:
@@ -478,10 +525,7 @@ class OllamaProvider(AIProvider):
                 {"role": "user", "content": prompt},
             ],
         }
-        try:
-            response = httpx.post(url, json=body, timeout=self._timeout)
-        except httpx.HTTPError as exc:
-            raise AIProviderError(f"调用 Ollama 失败：{exc}") from None
+        response = _post_chat(url, body, None, timeout=self._timeout)
         if response.status_code >= 400:
             raise AIProviderError(
                 f"Ollama 返回 {response.status_code}：{response.text[:200]}"
@@ -512,10 +556,7 @@ class OllamaProvider(AIProvider):
             "format": "json",
             "messages": messages,
         }
-        try:
-            response = httpx.post(url, json=body, timeout=self._timeout)
-        except httpx.HTTPError as exc:
-            raise AIProviderError(f"调用 Ollama 失败：{exc}") from None
+        response = _post_chat(url, body, None, timeout=self._timeout)
         if response.status_code >= 400:
             raise AIProviderError(
                 f"Ollama 返回 {response.status_code}：{response.text[:200]}"

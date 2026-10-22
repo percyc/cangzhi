@@ -16,6 +16,7 @@ from apps.api.models.documents import Document, DocumentVersion
 from apps.api.models.processing import ProcessingJob
 from apps.api.models.workspaces import Workspace
 from apps.api.services.workspaces import clear_workspace_context
+from apps.worker.services import lease
 from apps.worker.services.processor import (
     ASSISTED_CHUNKING_CONFIG, STRUCTURAL_CHUNKING_CONFIG, process_single_job, utc_now,
 )
@@ -120,6 +121,11 @@ def run_selected(session: Session, document_ids: list[int], *, max_jobs=100,
         job.started_at = now
         job.finished_at = None
         job_id = job.id
+        if lease.supervised_claims_active(session):
+            if not lease.claim_one_guarded(session, job):
+                session.rollback()
+                break
+            lease.stamp_lease(session, job, now)
         session.commit()
         attempted += 1
         if not process_single_job(session, job_id):

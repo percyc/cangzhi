@@ -1,5 +1,8 @@
 # 藏知关键技术决策
 
+- [ADR-034：模型调用准入（未验收草案）](ADR-034-model-admission.md)
+- [ADR-035：任务所有权（未验收草案）](ADR-035-task-ownership.md)
+
 - [ADR-033：指标级运行统计与真实采集时间](ADR-033-monitoring-metrics.md)
 
 - [ADR-032：后台 WebDAV 扫描](ADR-032-background-webdav-scan.md)

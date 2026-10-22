@@ -89,6 +89,7 @@ from apps.api.models.processing import ProcessingJob
 from apps.api.models.workspaces import Workspace
 from apps.api.services.workspaces import clear_workspace_context
 from apps.worker.core.config import settings
+from apps.worker.services import lease
 from apps.api.services.chunking_candidate import MAX_BLOCKS
 from apps.worker.services.processor import (
     ADAPTIVE_CHUNKING_CONFIG,
@@ -236,6 +237,27 @@ def _due_filter(now: datetime.datetime):
     )
 
 
+def _commit_claimed_guarded(
+    session: Session, job: ProcessingJob, now: datetime.datetime
+) -> bool:
+    """Serialize a maintenance claim with the ownership protocol.
+
+    On the supervised path it takes the shared per-document advisory lock (the
+    same one the ordinary Worker's two-step claim and the rechunk executor
+    take) and aborts if a different job row for the same document is already in
+    flight, then stamps a fresh lease/attempt. On the legacy path it is a no-op.
+    Returns True when the job was committed as ``processing``.
+    """
+    if lease.supervised_claims_active(session):
+        if not lease.claim_one_guarded(session, job):
+            session.rollback()
+            return False
+        lease.stamp_lease(session, job, now)
+    session.add(job)
+    session.commit()
+    return True
+
+
 def _claim_one_foreground_job(
     session: Session,
     cutoff: datetime.datetime,
@@ -303,8 +325,8 @@ def _claim_one_foreground_job(
     job.status = "processing"
     job.started_at = now
     job.finished_at = None
-    session.add(job)
-    session.commit()
+    if not _commit_claimed_guarded(session, job, now):
+        return None
     return job.id
 
 
@@ -355,8 +377,8 @@ def _claim_one_background_job(
     job.status = "processing"
     job.started_at = now
     job.finished_at = None
-    session.add(job)
-    session.commit()
+    if not _commit_claimed_guarded(session, job, now):
+        return None
     return job.id
 
 
@@ -437,8 +459,8 @@ def _claim_one_resume_job(
     job.status = "processing"
     job.started_at = now
     job.finished_at = None
-    session.add(job)
-    session.commit()
+    if not _commit_claimed_guarded(session, job, now):
+        return None
     return job.id
 
 

@@ -69,4 +69,5 @@ __all__ = [
     "Workspace",
     "WorkspaceError",
 ]
-from .monitoring import MonitoringHistory, MonitoringSnapshot
+from .monitoring import MonitoringHistory, MonitoringMetrics, MonitoringSnapshot
+from .model_admission import ModelAdmissionLease, ModelAdmissionPool

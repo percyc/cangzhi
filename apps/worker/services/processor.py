@@ -68,6 +68,7 @@ from apps.api.security import (
 )
 from apps.api.security.secrets import decrypt_secret
 from apps.api.services import build_chunk_specs
+from apps.api.services import model_admission as admission
 from apps.api.services.chunking_candidate import POLICY_VERSION as ASSISTED_CHUNKING_POLICY
 from apps.api.services.chunking_candidate import build_candidate
 from apps.api.services.chunking_baseline import (
@@ -91,6 +92,7 @@ from apps.api.services.webdav import WebDAVError, download_file
 from apps.api.services.workspaces import bind_workspace_context, clear_workspace_context
 from apps.api.storage.local import LocalBlobStorage
 from apps.worker.core.config import pdf_ocr_options_summary, settings
+from apps.worker.services import lease
 
 logger = structlog.get_logger()
 
@@ -122,6 +124,10 @@ STRUCTURAL_CHUNKING_CONFIG = "chunking:structural-v3"
 ADAPTIVE_CHUNKING_CONFIG = "chunking:adaptive-v2"
 ASSISTED_CHUNKING_MAX_CALLS = 2
 ASSISTED_CHUNKING_TIMEOUT_SECONDS = 10.0
+
+# When a model-admission slot is busy, defer the job this far in the future
+# without charging retry_count (no request was sent).
+ADMISSION_BUSY_DEFER_SECONDS = 30
 
 # Each stage gets a turn; stored/parsing share two FIFO slots.
 # Model backlogs cannot monopolize the queue, nor vice versa.
@@ -918,6 +924,11 @@ def _process_understanding(
             category_slugs=allowed_slugs,
             category_display=display,
         )
+    except admission.AdmissionError:
+        # Model admission Busy/Unavailable/Cooldown/Deadline = no content
+        # failure. Propagate so the scheduler defers the job instead of marking
+        # the document "inbox/failed" merely because the background queue is full.
+        raise
     except Exception as exc:  # Provider outages must never hide parsed content.
         logger.warning(
             "ai_understanding_failed",
@@ -1312,6 +1323,8 @@ def _process_chunking_assisted(
             child_min_chars=chunking_config.child_target_min_chars,
             child_overlap_chars=chunking_config.child_overlap_chars,
         )
+    except admission.AdmissionError:
+        raise
     except ValueError:
         logger.warning(
             "assisted_chunking_candidate_invalid",
@@ -2161,6 +2174,52 @@ def _reset_processing_job(job: ProcessingJob) -> None:
 
 
 def process_single_job(session: Session, job_id: int) -> bool:
+    """Dispatch one claimed job to the appropriate executor.
+
+    On the supervised path (PostgreSQL + ``task_execution_enabled``) the real
+    pipeline runs in a controlled child subprocess with a hard deadline and a
+    write fence (see :mod:`apps.worker.services.task_execution` and
+    :mod:`apps.worker.services.lease`). Everywhere else — including the
+    SQLite unit-test suite — the body runs in-process so existing tests and
+    the legacy serial behaviour are preserved. This is the explicit in-process
+    test hook: production never silently bypasses supervision, and the
+    supervised path is disabled by default until the isolated PostgreSQL
+    reliability integration tests pass.
+    """
+    if lease.supervised_claims_active(session):
+        from apps.worker.services.task_execution import run_task_with_supervisor
+        return run_task_with_supervisor(session, job_id)
+    return _process_single_job_inner(session, job_id)
+
+
+def _supervised_source_ok(session: Session, job: ProcessingJob) -> bool:
+    """Fail-closed source-change fence: refuse to publish stale work.
+
+    Called by the supervised child before running. For stages whose output is
+    bound to the current document version (parsing, chunking, preview,
+    dataset_catalog/artifact) it verifies the job's version is still the
+    document's *current* version. If a newer version superseded it, publishing
+    would mix old-version output into a newer fact source, so the attempt is
+    abandoned (returned ``False``). Optional stages (understanding and
+    enhancement) and immutable idempotency stages already guard their own
+    output; embedding delegates to its own profile checks.
+    """
+    if job is None:
+        return False
+    stage = _normalize_stage(job.stage)
+    if stage in ("understanding", "knowledge_enhancement"):
+        # These write to a versioned side table / read-only exploration and
+        # their own idempotency already guards concurrent replacement.
+        return True
+    if stage == "embedding":
+        return True
+    document = session.get(Document, job.document_id)
+    if document is None:
+        return False
+    return document.current_version_id == job.document_version_id
+
+
+def _process_single_job_inner(session: Session, job_id: int) -> bool:
     """Process a single claimed or pending job.
 
     ``stored`` and ``parsing`` jobs are treated identically. After parsing
@@ -2364,6 +2423,11 @@ def _process_dataset_artifacts(
         return True
     except Exception as exc:
         session.rollback()
+        if isinstance(exc, lease.StaleAttemptError):
+            # A stale attempt must never clean files it may share with a
+            # successor: re-raise so the supervisor records the lost lease
+            # without deleting any Parquet output.
+            raise
         storage_root = Path(settings.storage_path).resolve()
         for artifact_path in published_paths:
             if storage_root in artifact_path.parents and artifact_path.is_file():
@@ -2476,6 +2540,8 @@ def _process_dataset_semantics(
                         "status": result.status,
                     }
                 )
+            except admission.AdmissionError:
+                raise
             except Exception as exc:  # Optional metadata must never block facts.
                 logger.warning(
                     "dataset_field_semantics_failed",
@@ -3085,9 +3151,20 @@ def claim_pending_jobs(
     """
     if limit <= 0 or (stages is not None and not stages):
         return []
-    now = utc_now()
+    supervised = lease.supervised_claims_active(session)
+    now = lease.db_utc_now(session) if supervised else utc_now()
     conditions = [
-        ProcessingJob.status.in_(("created", "retry")),
+        (
+            ProcessingJob.status.in_(("created", "retry"))
+            | (
+                (ProcessingJob.status == "processing")
+                & (ProcessingJob.lease_until.isnot(None))
+                & (ProcessingJob.attempt_id.isnot(None))
+                & (ProcessingJob.lease_until < now)
+            )
+        )
+        if supervised
+        else ProcessingJob.status.in_(("created", "retry")),
         (
             ProcessingJob.next_retry_at.is_(None)
             | (ProcessingJob.next_retry_at <= now)
@@ -3106,22 +3183,91 @@ def claim_pending_jobs(
             stage_values.add("parsing")
         if stage_values:
             conditions.append(ProcessingJob.stage.in_(tuple(stage_values)))
-    jobs = list(
+    jobs = _claim_jobs(session, conditions, limit, supervised=supervised, now=now)
+    return [job.id for job in jobs]
+
+
+def _claim_jobs(
+    session: Session,
+    conditions: Sequence,
+    limit: int,
+    *,
+    supervised: bool,
+    now: datetime.datetime,
+) -> list[ProcessingJob]:
+    """Claim due (or recoverable) jobs, marking ``processing``.
+
+    On the supervised path this is a **two-step** claim so two different job
+    rows for the same document cannot both be claimed concurrently:
+
+    1. candidate discovery (``FOR UPDATE SKIP LOCKED``) picks due rows without
+       a busy filter — a plain ``NOT EXISTS`` is *not* atomic by itself;
+    2. before committing, the parent takes a per-document advisory lock
+       (:func:`apps.worker.services.lease.acquire_document_claim_lock`) and
+       re-checks that no in-flight job exists for each candidate's document.
+       With the advisory lock held, a second claimer of the same document waits
+       then, on its re-check, sees the first's committed ``processing`` row and
+       skips — so two distinct rows for the same document never run together
+       across ordinary, maintenance or rechunk executors.
+
+    ``conditions`` must NOT include a busy filter; it is applied in pass 2 only
+    under the document lock. Recoverable rows (expired lease, token present)
+    get a fresh lease/attempt via :func:`lease.stamp_lease`; historical orphans
+    (``lease_until`` NULL) are never claimed.
+    """
+    order = (ProcessingJob.created_at, ProcessingJob.id)
+    if not supervised:
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob)
+                .where(*conditions)
+                .order_by(*order)
+                .with_for_update(skip_locked=True)
+                .limit(limit)
+            ).all()
+        )
+        for job in jobs:
+            job.status = "processing"
+            job.started_at = now
+            job.finished_at = None
+            session.add(job)
+        session.commit()
+        return jobs
+
+    # Supervised: two-step with document advisory locks.
+    candidates = list(
         session.scalars(
             select(ProcessingJob)
             .where(*conditions)
-            .order_by(ProcessingJob.created_at, ProcessingJob.id)
+            .order_by(*order)
             .with_for_update(skip_locked=True)
             .limit(limit)
+        ).all()
+    )
+    if not candidates:
+        session.commit()
+        return []
+    lease.acquire_document_claim_lock(
+        session, [job.document_id for job in candidates]
+    )
+    ids = [job.id for job in candidates]
+    jobs = list(
+        session.scalars(
+            select(ProcessingJob)
+            .where(ProcessingJob.id.in_(ids), *conditions)
+            .where(lease.busy_document_filter(ProcessingJob.document_id))
+            .order_by(*order)
+            .with_for_update(skip_locked=True)
         ).all()
     )
     for job in jobs:
         job.status = "processing"
         job.started_at = now
         job.finished_at = None
+        lease.stamp_lease(session, job, now)
         session.add(job)
     session.commit()
-    return [job.id for job in jobs]
+    return jobs
 
 
 def _claim_one_unknown_stage_job(session: Session) -> int | None:
@@ -3132,31 +3278,30 @@ def _claim_one_unknown_stage_job(session: Session) -> int | None:
     added without updating the constant would otherwise sit
     in the queue forever. Falling back to one off-cycle job
     per cycle keeps them moving while still preserving the
-    fair-share budget of the known stages.
+    fair-share budget of the known stages. On the supervised
+    path this also stamps a lease and hands off an expired-lease
+    recovery candidate (never a pre-migration orphan).
     """
-    now = utc_now()
-    job = session.scalar(
-        select(ProcessingJob)
-        .where(
-            ProcessingJob.status.in_(("created", "retry")),
-            (
-                ProcessingJob.next_retry_at.is_(None)
-                | (ProcessingJob.next_retry_at <= now)
-            ),
-            ~ProcessingJob.stage.in_(tuple(STAGE_CYCLE)),
-        )
-        .order_by(ProcessingJob.created_at, ProcessingJob.id)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
-    if job is None:
-        return None
-    job.status = "processing"
-    job.started_at = now
-    job.finished_at = None
-    session.add(job)
-    session.commit()
-    return job.id
+    supervised = lease.supervised_claims_active(session)
+    now = lease.db_utc_now(session) if supervised else utc_now()
+    conditions = [
+        (
+            ProcessingJob.status.in_(("created", "retry"))
+            | (
+                (ProcessingJob.status == "processing")
+                & (ProcessingJob.lease_until.isnot(None))
+                & (ProcessingJob.attempt_id.isnot(None))
+                & (ProcessingJob.lease_until < now)
+            )
+        ),
+        (
+            ProcessingJob.next_retry_at.is_(None)
+            | (ProcessingJob.next_retry_at <= now)
+        ),
+        ~ProcessingJob.stage.in_(tuple(STAGE_CYCLE)),
+    ]
+    jobs = _claim_jobs(session, conditions, 1, supervised=supervised, now=now)
+    return jobs[0].id if jobs else None
 
 
 def _run_claimed_job(session: Session, job_id: int) -> int:
@@ -3171,8 +3316,26 @@ def _run_claimed_job(session: Session, job_id: int) -> int:
     through :func:`_mark_parse_failure` / :func:`_mark_terminal_failure`)
     is preserved unchanged.
     """
+    admission.set_process_role("worker")
     try:
         return int(process_single_job(session, job_id))
+    except admission.AdmissionError:
+        # Model admission Busy/Unavailable/Cooldown/Deadline means no request
+        # was actually sent. Defer the job WITHOUT charging retry_count or
+        # marking it failed/inbox: a full background queue is not a task failure.
+        session.rollback()
+        job = session.get(ProcessingJob, job_id)
+        if job is not None:
+            job.status = "retry"
+            job.next_retry_at = utc_now() + datetime.timedelta(
+                seconds=ADMISSION_BUSY_DEFER_SECONDS
+            )
+            job.last_error = "模型额度繁忙，任务已推迟重试"
+            job.error_details = {"deferred": True, "reason": "model_admission_busy"}
+            session.add(job)
+            session.commit()
+        logger.warning("model_admission_busy_deferred", job_id=job_id)
+        return 0
     except Exception as exc:
         session.rollback()
         job = session.get(ProcessingJob, job_id)

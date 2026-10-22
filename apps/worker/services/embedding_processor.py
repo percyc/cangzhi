@@ -47,6 +47,7 @@ The four non-negotiable rules the module enforces:
 from __future__ import annotations
 
 import datetime as _dt_module
+import asyncio
 import logging
 import math
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ from apps.api.models.auth import AIRuntimeConfig
 from apps.api.models.chunks import DocumentChunk
 from apps.api.models.embedding_profiles import ChunkEmbedding, EmbeddingProfile
 from apps.api.models.processing import ProcessingJob
+from apps.api.services import model_admission as admission
 from apps.api.security.secrets import (
     SecretDecryptError,
     SecretStoreError,
@@ -140,6 +142,47 @@ class EmbeddingJobOutcome:
 ClientFactory = Callable[..., httpx.Client]
 
 
+def _retry_after_seconds(headers) -> float | None:
+    raw = headers.get("Retry-After") if headers else None
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _request_embedding_async(
+    url: str,
+    headers: dict,
+    body: dict,
+    *,
+    timeout_seconds: float,
+    client_factory: ClientFactory | None = None,
+) -> httpx.Response:
+    """Acquire an embedding slot and run the POST with a **real cancellable**
+    ``httpx.AsyncClient`` under the channel's absolute hard deadline.  On
+    cancel/timeout the async POST is actually abandoned before the slot is
+    released, so concurrency can never exceed the limit; an upstream 429 is
+    recorded as a cooldown."""
+    async with admission.async_channel(
+        admission.EMBEDDING, hard_lifetime_seconds=timeout_seconds
+    ) as channel:
+        factory = client_factory or (lambda **kwargs: httpx.AsyncClient(**kwargs))
+        client = factory(timeout=timeout_seconds, trust_env=False)
+        async with client:
+            response = await channel.run(client.post(url, headers=headers, json=body))
+        if response.status_code == 429:
+            ra = _retry_after_seconds(response.headers)
+            admission.apply_cooldown(
+                admission.channel_pool_id(admission.EMBEDDING),
+                (ra or 60.0),
+                retry_after=ra,
+            )
+        return response
+
+
 def _request_embedding(
     *,
     provider: str,
@@ -154,11 +197,10 @@ def _request_embedding(
 
     The factory parameter is what the unit tests monkey-patch;
     production code passes ``None`` and gets a real
-    :class:`httpx.Client` with ``trust_env=False`` (proxy
+    :class:`httpx.AsyncClient` with ``trust_env=False`` (proxy
     variables must not leak into the embedding call).
     """
 
-    factory = client_factory or (lambda **kwargs: httpx.Client(**kwargs))
     headers = {"Accept": "application/json"}
     if provider == "openai":
         if not api_key:
@@ -175,8 +217,14 @@ def _request_embedding(
         raise ValueError(f"不支持的 embedding provider: {provider}")
 
     try:
-        with factory(timeout=timeout_seconds, trust_env=False) as client:
-            response = client.post(url, headers=headers, json=body)
+        response = admission.run_sync(
+            lambda: _request_embedding_async(
+                url, headers, body,
+                timeout_seconds=timeout_seconds, client_factory=client_factory,
+            )
+        )
+    except admission.AdmissionError:
+        raise
     except httpx.HTTPError as exc:
         raise ValueError(
             f"无法连接 Embedding 服务：{type(exc).__name__}"

@@ -34,6 +34,23 @@ class Settings(BaseSettings):
 
     cors_allowed_origins: str = ""
 
+    # --- Model admission quota pools (ADR-034). All non-secret.
+    # Conservative default: ONE shared pool (total 2, background 1) so
+    # chat + embedding + OCR talking to a shared upstream never multiply
+    # their limits; OCR additionally capped at ``model_admission_max_ocr``.
+    # Use ``model_admission_pool_map`` to split into independent pools ONLY
+    # for genuinely independent upstreams.
+    model_admission_capacity: int = 2
+    model_admission_background_capacity: int = 1
+    model_admission_max_ocr: int = 1
+    model_admission_lease_padding_seconds: float = 60.0
+    model_admission_acquire_timeout_seconds: float = 1.5
+    model_admission_acquire_poll_seconds: float = 0.05
+    model_admission_retry_min_seconds: float = 20.0
+    # Optional JSON map purpose -> pool_id; default is one shared pool so
+    # different model uses sharing an upstream do not each copy a channel cap.
+    model_admission_pool_map: str = ""
+
 
 settings = Settings()
 

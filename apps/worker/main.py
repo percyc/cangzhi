@@ -40,6 +40,8 @@ def main():
 
     from apps.api.core.build_info import build_info
     logger.info("Worker starting", poll_interval=settings.poll_interval, build=build_info())
+    from apps.api.services import model_admission as admission
+    admission.set_process_role("worker")
     from apps.worker.services.webdav_scanner import start_scanner
     scan_stop, scan_thread = start_scanner(settings.database_url)
     from apps.worker.services.monitoring import start_monitor

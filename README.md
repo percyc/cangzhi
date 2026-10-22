@@ -1,5 +1,8 @@
 # 藏知（Cangzhi）
 
+> 本分支为并发/任务恢复开发草案，未通过完整回归，禁止部署。正式版本使用main/v1.3.8。
+> 已知缺口与失败测试见docs/ADR-034-model-admission.md、docs/ADR-035-task-ownership.md。
+
 [简体中文](README.md) | [English](README.en.md)
 
 > 中文品牌：**藏知** · 英文标识：**Cangzhi**
