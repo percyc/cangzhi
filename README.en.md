@@ -1,5 +1,7 @@
 # Cangzhi (藏知)
 
+<img src="apps/web/public/brand/cangzhi-icon-v1-512.png" width="96" height="96" alt="Cangzhi icon: an enclosing curve around an open book" />
+
 [简体中文](README.md) | [English](README.en.md)
 
 > A user-controlled AI knowledge hub · **Keep what you know. Ground every answer.**
@@ -297,6 +299,7 @@ Cangzhi into a general document-management or multi-tenant platform.
 
 Most detailed project documentation is currently maintained in Chinese:
 
+- [Brand icon: design, source artwork, and offline export (Chinese)](docs/brand/README.md)
 - [Contributor guide and repository rules](AGENTS.md)
 - [Current project status](docs/PROJECT_STATUS.md)
 - [Global usability review and remaining work (Chinese)](docs/USABILITY_REVIEW.md)

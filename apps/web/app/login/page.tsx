@@ -4,6 +4,7 @@ import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { safeLoginReturn } from '@/lib/login-return';
+import { BrandMark } from '@/components/BrandMark';
 
 function LoginInner() {
   const router = useRouter();
@@ -64,7 +65,7 @@ function LoginInner() {
     <main className="grid min-h-screen place-items-center px-4 py-10">
       <div className="w-full max-w-md">
         <div className="mb-7 flex items-center justify-center gap-3">
-          <span className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-950 text-lg font-semibold text-white shadow-lg shadow-slate-950/15">藏</span>
+          <BrandMark size={44} />
           <span>
             <span className="block text-xl font-semibold tracking-tight text-slate-950">藏知</span>
             <span className="block text-[10px] font-medium uppercase tracking-[0.2em] text-slate-400">Cangzhi</span>

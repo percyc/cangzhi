@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test:ux": "node --test tests/*.test.cjs",
     "test:browser": "node tests/browser/workbench.cjs",
-    "test:browser:settings": "node tests/browser/guided-settings.cjs"
+    "test:browser:settings": "node tests/browser/guided-settings.cjs",
+    "test:browser:brand": "node tests/browser/brand.cjs",
+    "assets:brand": "node scripts/export-brand-icons.cjs"
   },
   "dependencies": {
     "next": "16.2.12",

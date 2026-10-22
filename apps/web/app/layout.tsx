@@ -5,6 +5,7 @@ import { TopNav } from '@/components/TopNav';
 import { PageGuide } from '@/components/PageGuide';
 import { WEB_BASE_PATH } from '@/lib/paths';
 import { NavigationGuard } from '@/lib/navigation-guard';
+import { BRAND_ICONS } from '@/lib/brand';
 
 import './globals.css';
 
@@ -22,6 +23,7 @@ export const metadata: Metadata = {
     template: '%s｜藏知 Cangzhi',
   },
   description: '藏有所知，问有所据。个人可控的 AI 知识中枢。',
+  icons: BRAND_ICONS,
 };
 
 export const viewport: Viewport = {

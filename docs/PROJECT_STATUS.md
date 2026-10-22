@@ -253,6 +253,10 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
+- `CZ-B01` 品牌图标：负责人 Codex，分支 `codex/CZ-B01-brand-icon`。
+  使用内置 imagegen 生成原创书页标识，统一导航、登录、初始化与浏览器图标，
+  验证小尺寸、移动端和子路径访问；本轮仅交付代码、资源、测试与记录，不部署。
+
 - 2026-10-22：维护者授权按处理可靠性计划实施、验证、合并、推送和部署。
   负责人Codex（OpenCode协作），分支`codex/CZ-S03-webdav-import-browser`。
   先交付WebDAV与指标级统计恢复，再交付共享模型准入和普通任务恢复；

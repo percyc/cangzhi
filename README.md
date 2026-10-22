@@ -1,5 +1,7 @@
 # 藏知（Cangzhi）
 
+<img src="apps/web/public/brand/cangzhi-icon-v1-512.png" width="96" height="96" alt="藏知图标：环抱的轮廓与展开的书页" />
+
 > 部署状态与验收记录见 [项目状态](docs/PROJECT_STATUS.md)。升级前请备份并等待在途任务正常结束。
 
 [简体中文](README.md) | [English](README.en.md)
@@ -252,6 +254,7 @@ OCR 深度增强和领域解析按[路线图](docs/ROADMAP.md)逐步推进。文
 
 ## 文档导航
 
+- [品牌图标：设计、源文件与离线导出](docs/brand/README.md)
 - [开发交接：项目目标、后续三批工作与交付提示词](docs/DEVELOPER_HANDOFF.md)
 - [Excel 测试资料：自动测试、合成样例与私有原件交接](docs/SPREADSHEET_TESTING.md)
 - [协作者约定：开工前必读与协作约束](AGENTS.md)

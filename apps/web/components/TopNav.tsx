@@ -15,6 +15,7 @@ import { activeNavigation } from '@/lib/usability';
 import { confirmNavigation, runWithoutNavigationGuard } from '@/lib/navigation-guard';
 import { safeLoginReturn } from '@/lib/login-return';
 import { WEB_BUILD, buildLabel } from '@/lib/build-info';
+import { BrandMark } from '@/components/BrandMark';
 
 const NAV_ITEMS = [
   { href: '/documents', label: '知识库', icon: 'library' },
@@ -149,9 +150,7 @@ export function TopNav() {
           aria-label="藏知 Cangzhi 首页"
           title="藏知 Cangzhi｜藏有所知，问有所据"
         >
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-slate-950 text-base font-semibold text-white shadow-sm transition-transform group-hover:-rotate-3">
-            藏
-          </span>
+          <BrandMark className="transition-transform motion-safe:group-hover:-rotate-3" />
           <span className="text-lg font-semibold tracking-tight text-slate-950">藏知</span>
         </Link>
 
