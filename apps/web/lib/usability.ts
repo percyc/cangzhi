@@ -1,5 +1,8 @@
 // Shared UI guidance only. Permissions, scopes and processing remain server-owned.
 export const SETTINGS_GROUPS = [
+  { title: '开始使用', items: [
+    { id: 'setup', href: '/settings/setup', title: '引导配置', hint: '按用途完成配置，可随时跳过' },
+  ] },
   { title: '模型与检索', items: [
     { id: 'chat', href: '/settings?section=chat', title: '对话模型', hint: '摘要、分类与问答 · 可选' },
     { id: 'embedding', href: '/settings?section=embedding', title: '向量与索引', hint: '语义检索与索引版本 · 可选' },
@@ -23,6 +26,7 @@ export type SettingsSection = typeof SETTINGS_GROUPS[number]['items'][number]['i
 export type PageHelp = { title: string; steps: readonly string[]; note: string; action: { href: string; label: string } };
 
 const HELP: Record<string, PageHelp> = {
+  setup: { title: '先满足用途，再按需配置', steps: ['先配置对话与整理；不使用 AI 也能保存资料。', '按需选择语义检索或外部 OCR，可复用已保存的连接。', '保存、测试与索引启用分别确认，完成后添加第一份资料。'], note: '模型配置全局共享；跳过可选步骤不会清空现有配置，连接复用不是持续绑定。', action: { href: '/files/upload', label: '先上传资料' } },
   overview: { title: '观察容量与处理负载', steps: ['先看可用空间和任务积压。', '查看统计时间，过期时检查 Worker。', '从异常入口进入处理中心或知识源。'], note: '仅读取后台统计快照，不扫描硬盘或调用模型。', action: { href: '/processing', label: '查看处理任务' } },
   uploads: { title: '按实际需要调整上传大小', steps: ['查看当前单文件上限，默认 50 MiB。', '输入所需大小并保存，对新上传立即生效。', '使用外部代理时同步检查其请求体限制。'], note: '本设置不放宽 OCR、表格解析或来源下载的资源限制。', action: { href: '/files/upload', label: '去上传文件' } },
   documents: { title: '保存、整理和查看资料', steps: ['添加文件、随手记或公开网页，先保存原文。', '用分类浏览资料，打开详情检查正文和切片。', '需要排查处理问题时，前往收件箱。'], note: '关键词检索不要求配置向量模型；删除资料先进入可恢复的回收站。', action: { href: '/files/upload', label: '上传资料' } },
@@ -37,7 +41,7 @@ const HELP: Record<string, PageHelp> = {
   categories: { title: '分类用于组织，标签用于补充线索', steps: ['为长期主题建立分类层级，避免为每条资料新建分类。', '分类下已有资料时，先调整资料再删除分类。', '在资料详情或批量管理中纠正主分类。'], note: '分类是当前工作空间的资料组织方式，不是访问权限。', action: { href: '/documents', label: '整理资料' } },
   tags: { title: '让同义标签保持一致', steps: ['搜索现有标签，再决定是否重命名或合并。', '选择要合并的来源与保留的目标标签。', 'AI 建议只供参考，核对后再应用。'], note: '标签合并会更新资料关联；应用前确认保留哪个名称。', action: { href: '/documents', label: '查看资料' } },
   chat: { title: '想要摘要和问答？先配置这里', steps: ['选择 OpenAI 兼容或 Ollama；不使用 AI 也能保存资料。', '填写连接地址和密钥，按需获取模型列表，也可手输名称。', '保存并测试；成功后再使用摘要、分类和问答。'], note: '模型配置全局共享；留空密钥会保留已保存值，获取列表是可选步骤。', action: { href: '/notes/new', label: '先保存一条笔记' } },
-  embedding: { title: '模型连接与生效索引分开管理', steps: ['填写向量模型连接，获取列表或手输名称。', '保存并测试，再构建新索引版本。', '构建完成后启用；原索引在切换前继续服务。'], note: '构建可能产生模型费用；失败先查原因，不必重传原文件。', action: { href: '/inbox', label: '查看向量状态' } },
+  embedding: { title: '模型连接与生效索引分开管理', steps: ['填写向量模型连接，获取列表或手输名称。', '保存后主动测试，按结果构建新索引版本。', '构建完成后启用；旧索引数据保留，不会自动删除。'], note: '更换连接或模型可能暂时降级为关键词检索；测试与构建可能计费，失败不必重传原文件。', action: { href: '/inbox', label: '查看向量状态' } },
   ocr: { title: '扫描 PDF 的可选外部识别', steps: ['普通 PDF 优先提取文字，扫描页先使用本地识别。', '只有需要额外识别时才配置外部视觉模型。', '设置外发页数上限，保存并测试。'], note: '外部 OCR 会发送候选图片页到模型服务并可能计费；不是所有 PDF 都需要。', action: { href: '/files/upload', label: '上传文件' } },
   enhancement: { title: '先用基础能力，再按需开启增强', steps: ['基础摘要、分类和切片不依赖此开关。', '按当前空间选择增强模块与调用预算。', '历史资料需显式发起，在文档详情查看进度和证据。'], note: '默认关闭；增强解释不是原文事实，也不自动替换检索索引。', action: { href: '/documents', label: '查看文档' } },
   sources: { title: '连接来源不等于已经导入', steps: ['选择 WebDAV 文件来源或数据库来源，填写只读连接。', '测试连接后扫描文件，或明确选择要导入的表。', '查看已导入资料与同步状态；数据库查询使用本地版本化快照。'], note: '刷新数据默认复用未变化的 AI 字段解释，只有需要时才选择全量重生成。', action: { href: '/documents', label: '查看已导入资料' } },

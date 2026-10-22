@@ -9,7 +9,8 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test:ux": "node --test tests/*.test.cjs",
-    "test:browser": "node tests/browser/workbench.cjs"
+    "test:browser": "node tests/browser/workbench.cjs",
+    "test:browser:settings": "node tests/browser/guided-settings.cjs"
   },
   "dependencies": {
     "next": "16.2.12",

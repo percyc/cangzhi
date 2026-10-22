@@ -4,6 +4,12 @@
 
 > A user-controlled AI knowledge hub · **Keep what you know. Ground every answer.**
 
+New users can follow **Settings → Guided setup** for chat, optional semantic search,
+and optional external OCR. Explicitly copy a saved OpenAI-compatible connection or
+configure each channel separately; model selection stays independent. Settings and
+feature search works locally without an AI connection. See the
+[guided setup notes (Chinese)](docs/GUIDED_SETTINGS.md).
+
 Cangzhi turns web pages, files, quick notes, external directories, and structured
 data into durable knowledge assets that both people and AI agents can search,
 verify, and reuse. It is more than a note-taking app or a RAG chat interface: it

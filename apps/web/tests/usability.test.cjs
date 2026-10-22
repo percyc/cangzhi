@@ -31,10 +31,10 @@ test('all app page routes have guidance, except authentication and root redirect
     else assert.ok(ux.pageHelp(route), `Missing guide: ${route}`);
   }
 });
-test('settings grouping has eleven unique valid routes and guides', () => {
+test('settings grouping has twelve unique valid routes and guides', () => {
   const items = ux.SETTINGS_GROUPS.flatMap(group => group.items);
-  assert.equal(items.length, 11);
-  assert.equal(new Set(items.map(item => item.id)).size, 11);
+  assert.equal(items.length, 12);
+  assert.equal(new Set(items.map(item => item.id)).size, 12);
   for (const item of items) {
     const url = new URL(item.href, 'https://example.test');
     const help = ux.pageHelp(url.pathname, url.searchParams.get('section'));
@@ -157,9 +157,12 @@ test('successful note returns to detail and retains untitled-note behavior', asy
 test('responsive settings selector honors unsaved-change guard before navigation', () => {
   const pushed = [], selected = [];
   const component = load('components/SettingsSectionNav.tsx', {
+    react: { useState: () => [false, () => {}], useId: () => 'synthetic-navigation' },
     'next/navigation': { useRouter: () => ({ push: href => pushed.push(href) }) },
     'next/link': () => null, '@/lib/usability': ux,
     '@/components/VersionInfo': () => null,
+    '@/components/SettingsSearch': () => null,
+    '@/lib/navigation-guard': { confirmNavigation: () => true },
   });
   const blocked = component.SettingsSectionNav({ active: 'chat', beforeNavigate: () => false, onSelect: id => selected.push(id) });
   descendants(blocked).find(element => element.type === 'select').props.onChange({ target: { value: 'account' } });
