@@ -428,3 +428,105 @@ def test_discovery_new_destination_accepts_explicit_key_without_persisting(clien
     assert calls[0]["headers"]["Authorization"] == f"Bearer {new_key}"
     assert new_key not in response.text
     assert _read_state() == before
+
+
+@pytest.mark.parametrize("saved_provider", ["disabled", "ollama"])
+def test_discovery_cannot_rebind_saved_key_via_non_openai_channel(client, saved_provider):
+    test_client, _ = client
+    _seed_config()
+    new_url = "https://different.example.test/v1"
+    edited = test_client.patch(
+        "/api/settings/ai/embedding",
+        json={"provider": saved_provider, "base_url": new_url},
+    )
+    assert edited.status_code == 200
+    before = _read_state()
+    response = test_client.post(
+        "/api/settings/ai/models/discover",
+        json={
+            "channel": "embedding", "provider": "openai",
+            "base_url": new_url, "use_saved_api_key": True,
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "saved_key_provider_mismatch"
+    assert _read_state() == before
+
+
+def test_ocr_copy_accepts_ui_payload_without_base_url_and_preserves_other_channels(client, monkeypatch):
+    test_client, _ = client
+    _seed_config()
+    before = _read_state()
+
+    async def forbidden_queue(*args, **kwargs):
+        raise AssertionError("Saving OCR must not reschedule understanding")
+
+    monkeypatch.setattr(settings_ai, "_enqueue_unclassified_documents", forbidden_queue)
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={
+            "provider": "openai", "model": "independent-vision-model", "reuse_chat": True,
+            "api_key_action": "keep", "timeout_seconds": 45,
+            "confidence_threshold": 600, "min_chars": 8, "max_external_pages": 20,
+        },
+    )
+    assert response.status_code == 200
+    _assert_no_secrets(response)
+    after = _read_state()
+    assert after["config"]["ocr_provider"] == "openai"
+    assert after["config"]["ocr_base_url"] == CHAT_URL
+    assert after["config"]["ocr_model"] == "independent-vision-model"
+    assert secrets.decrypt_secret(after["config"]["ocr_api_key_cipher"]) == CHAT_KEY
+    for field, previous in before["config"].items():
+        if not field.startswith("ocr_") and field not in {"updated_by", "updated_at"}:
+            assert after["config"][field] == previous, field
+    assert after["jobs"] == after["profiles"] == 0
+
+
+@pytest.mark.parametrize("chat_provider", ["disabled", "ollama"])
+def test_ocr_copy_rejects_inactive_saved_chat_even_with_leftover_openai_credentials(client, chat_provider):
+    test_client, _ = client
+    _seed_config(provider=chat_provider)
+    before = _read_state()
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={"provider": "openai", "reuse_chat": True, "model": "not-saved"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "ocr_reuse_requires_chat"
+    assert _read_state() == before
+
+
+@pytest.mark.parametrize("extra", [
+    {"provider": "disabled"},
+    {"api_key_action": "clear"},
+    {"api_key_action": "replace", "api_key": "conflicting-synthetic-key"},
+])
+def test_ocr_copy_rejects_conflicting_parameters_without_mutation(client, extra):
+    test_client, _ = client
+    _seed_config()
+    before = _read_state()
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={"provider": "openai", "reuse_chat": True, **extra},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "ocr_reuse_conflict"
+    assert "conflicting-synthetic-key" not in response.text
+    assert _read_state() == before
+
+
+def test_ocr_copy_corrupt_cipher_is_safe_and_rolls_back_partial_fields(client):
+    test_client, _ = client
+    corrupt = "synthetic-corrupt-chat-cipher"
+    _seed_config(openai_api_key_cipher=corrupt)
+    before = _read_state()
+    response = test_client.patch(
+        "/api/settings/ai/ocr",
+        json={"provider": "openai", "reuse_chat": True, "model": "not-saved", "timeout_seconds": 45},
+    )
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "ocr_reuse_decrypt_failed"
+    assert corrupt not in response.text
+    _assert_no_secrets(response)
+    assert _read_state() == before

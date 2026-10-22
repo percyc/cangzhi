@@ -1324,6 +1324,9 @@ async def discover_models(
         api_key = (payload.api_key or "").strip()
         if not api_key and payload.use_saved_api_key:
             row = await _get_or_create_config(db)
+            saved_provider = {"chat": row.provider, "embedding": row.embedding_provider, "ocr": row.ocr_provider}[payload.channel]
+            if saved_provider != "openai":
+                raise HTTPException(status_code=400, detail={"code": "saved_key_provider_mismatch", "message": "该渠道未启用 OpenAI 兼容连接，请明确输入密钥"})
             saved_url = {
                 "chat": row.openai_base_url,
                 "embedding": row.embedding_base_url,
@@ -1555,10 +1558,16 @@ def _apply_ocr_payload(
 ) -> None:
     """Mutate ``row`` according to the OCR patch payload."""
 
+    if payload.reuse_chat:
+        if payload.provider not in {None, "openai"} or payload.api_key_action != "keep" or payload.api_key:
+            raise HTTPException(status_code=400, detail={"code": "ocr_reuse_conflict", "message": "复制已保存连接时请选择 OpenAI 兼容，并勿同时替换或清除密钥"})
+        if row.provider != "openai":
+            raise HTTPException(status_code=400, detail={"code": "ocr_reuse_requires_chat", "message": "请先保存并启用 OpenAI 兼容对话连接"})
+
     if payload.provider is not None:
         provider_value = payload.provider or "disabled"
         if provider_value == "openai":
-            if not payload.base_url:
+            if not payload.base_url and not payload.reuse_chat:
                 raise HTTPException(
                     status_code=400,
                     detail={
