@@ -153,3 +153,31 @@ class ExternalItemExclusion(BaseModel):
             name="uix_external_exclusions_workspace_identity",
         ),
     )
+
+
+class WebDAVScan(BaseModel):
+    """One durable current scan per source; no credentials or source content."""
+    __tablename__ = "webdav_scans"
+    source_id = Column(Integer, ForeignKey("webdav_sources.id", ondelete="CASCADE"), nullable=False, unique=True)
+    status = Column(String(24), nullable=False)
+    config_hash = Column(String(64), nullable=False)
+    root = Column(Text, nullable=False)
+    pending = Column(_JSON_TYPE, nullable=False)
+    visited = Column(_JSON_TYPE, nullable=False)
+    scanned = Column(Integer, nullable=False, default=0)
+    files = Column(Integer, nullable=False, default=0)
+    entries = Column(Integer, nullable=False, default=0)
+    resumed = Column(Boolean, nullable=False, default=False)
+    error = Column(Text)
+    lease_token = Column(String(64))
+    lease_until = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    result = Column(_JSON_TYPE)
+
+
+class WebDAVScanFile(BaseModel):
+    __tablename__ = "webdav_scan_files"
+    scan_id = Column(Integer, ForeignKey("webdav_scans.id", ondelete="CASCADE"), nullable=False, index=True)
+    path = Column(String(2048), nullable=False)
+    data = Column(_JSON_TYPE, nullable=False)
+    __table_args__ = (UniqueConstraint("scan_id", "path", name="uix_webdav_scan_file"),)

@@ -325,6 +325,9 @@ Docker Socket 暴露给 Web。
 
 ## 6. 局域网与 WebDAV
 
+后台扫描需要迁移0039及新版普通Worker；升级步骤、进度与中断恢复见
+[WebDAV后台扫描](WEBDAV_SCANNING.md)。迁移不自动扫描来源或重处理文档。
+
 从局域网访问时，使用服务器的固定 IP 或内网域名。WebDAV 连接由 Worker 发起：
 
 - 公网 WebDAV 默认按 URL 安全规则访问；

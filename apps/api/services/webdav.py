@@ -6,6 +6,7 @@ import hashlib
 import posixpath
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from urllib.parse import quote, unquote, urljoin, urlsplit
@@ -155,6 +156,7 @@ async def propfind(
     depth: str = "1",
     timeout_seconds: float = 20,
     absolute_path: bool = False,
+    client: httpx.AsyncClient | None = None,
 ) -> list[RemoteEntry]:
     safe_base = validate_webdav_url(
         base_url, trusted_private_network=trusted_private_network
@@ -168,6 +170,8 @@ async def propfind(
     token = base64.b64encode(f"{username}:{password}".encode()).decode()
     headers = {
         "Authorization": f"Basic {token}",
+        # Reused clients must not carry a server session between connectors.
+        "Cookie": "",
         "Depth": depth,
         "Content-Type": "application/xml; charset=utf-8",
         "Accept": "application/xml,text/xml",
@@ -178,11 +182,11 @@ async def propfind(
 <d:getcontentlength/><d:getcontenttype/>
 </d:prop></d:propfind>"""
     try:
-        async with httpx.AsyncClient(
+        async with (nullcontext(client) if client else httpx.AsyncClient(
             timeout=timeout_seconds,
             follow_redirects=False,
             trust_env=False,
-        ) as client:
+        )) as client:
             async with client.stream(
                 "PROPFIND", request_url, headers=headers, content=body
             ) as response:

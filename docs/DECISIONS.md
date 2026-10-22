@@ -1,5 +1,7 @@
 # 藏知关键技术决策
 
+- [ADR-032：后台 WebDAV 扫描](ADR-032-background-webdav-scan.md)
+
 - [ADR-031：WPS 文字文件兼容](ADR-031-wps-writer.md)
 
 - [ADR-030：运行时文件上传限额](ADR-030-runtime-upload-limit.md)

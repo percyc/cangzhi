@@ -1,7 +1,35 @@
 'use client';
 
 import Link from 'next/link';
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+
+type Scan = {
+  id: number;
+  status: string;
+  scanned_directories: number;
+  pending_directories: number;
+  discovered_files: number;
+  elapsed_seconds: number;
+  resumed: boolean;
+  error: string | null;
+  result: { eligible_files: number; missing_check_performed: boolean } | null;
+};
+
+function scanActive(source: Source) {
+  return source.scan?.status === 'queued' || source.scan?.status === 'running';
+}
+
+export function WebDavScanProgress({ scan }: { scan: Scan }) {
+  const active = scan.status === 'queued' || scan.status === 'running';
+  return <div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm" role="status" aria-live="polite">
+    <p className="font-medium">{({ queued: '等待后台扫描', running: '正在扫描目录', completed: '扫描完成', failed: '扫描中断', cancelled: '扫描已取消' } as Record<string, string>)[scan.status] ?? scan.status}</p>
+    <p className="mt-1 text-slate-600">已扫描 {scan.scanned_directories} 个目录 · 待扫描 {scan.pending_directories} 个 · 发现 {scan.discovered_files} 个文件 · 已耗时 {scan.elapsed_seconds} 秒</p>
+    {active && <p className="mt-1 text-xs text-slate-500">可以离开页面，后台会继续扫描。目录总数尚未确定；扫描只发现变化，不下载或调用 AI。长时间等待时请检查 Worker 是否运行。</p>}
+    {scan.error && <p className="mt-2 text-red-700">{scan.error}。本次未更新入库清单，也未确认远端删除。</p>}
+    {scan.resumed && <p className="mt-1 text-xs text-amber-700">这是断点继续的扫描，本次不确认远端缺失；需要核对删除时请重新扫描。</p>}
+    {scan.result && <p className="mt-2">可导入 {scan.result.eligible_files} 个文件。点击“同步入库”才会下载并处理。{!scan.result.missing_check_performed && '本次未执行远端缺失确认。'}</p>}
+  </div>;
+}
 
 type Counts = {
   total: number;
@@ -29,6 +57,7 @@ type Source = {
   last_scan_at: string | null;
   last_sync_at: string | null;
   entry_counts: Counts;
+  scan?: Scan | null;
 };
 type Entry = {
   id: number;
@@ -98,22 +127,50 @@ export function WebDavSourcePanel() {
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [progressError, setProgressError] = useState('');
   const [removeDialog, setRemoveDialog] = useState<RemoveDialog | null>(null);
+  const loadSequence = useRef(0);
+  const mounted = useRef(true);
 
   const load = useCallback(async () => {
-    const response = await fetch('/api/webdav', { cache: 'no-store' });
+    const sequence = ++loadSequence.current;
+    const response = await fetch('/api/webdav', { cache: 'no-store', signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error(await readError(response, '知识源读取失败'));
-    setSources((await response.json()) as Source[]);
+    const next = (await response.json()) as Source[];
+    if (mounted.current && sequence === loadSequence.current) setSources(next);
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
+    const sequenceRef = loadSequence;
     const timer = window.setTimeout(() => {
       void load().catch((caught) =>
         setError(caught instanceof Error ? caught.message : '知识源读取失败'),
       );
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => { mounted.current = false; ++sequenceRef.current; window.clearTimeout(timer); };
   }, [load]);
+
+  const scanning = sources.some(scanActive);
+  useEffect(() => {
+    if (!scanning) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        if (!document.hidden) {
+          await load();
+          if (!stopped) setProgressError('');
+        }
+      } catch {
+        if (!stopped) setProgressError('扫描进度暂时无法刷新；后台任务不会因此取消，将自动重试。');
+      } finally {
+        if (!stopped) timer = setTimeout(() => void poll(), 2000);
+      }
+    };
+    timer = setTimeout(() => void poll(), 2000);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [scanning, load]);
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
@@ -182,27 +239,28 @@ export function WebDavSourcePanel() {
     }
   };
 
-  const action = async (source: Source, kind: 'test' | 'scan' | 'sync') => {
+  const action = async (source: Source, kind: 'test' | 'scan' | 'sync' | 'resume' | 'cancel') => {
     setBusy(`${source.id}:${kind}`);
     setError('');
     setMessage('');
     try {
-      const response = await fetch(`/api/webdav/${source.id}/${kind}`, {
+      const route = { scan: 'scan-jobs', resume: 'scan-jobs?resume=true', cancel: 'scan-jobs/cancel', test: 'test', sync: 'sync' }[kind];
+      const response = await fetch(`/api/webdav/${source.id}/${route}`, {
         method: 'POST',
       });
       if (!response.ok) throw new Error(await readError(response, '操作失败'));
       const result = (await response.json()) as Record<string, unknown>;
       if (kind === 'test') setMessage(`${source.name}：连接正常`);
-      if (kind === 'scan')
-        setMessage(
-          `${source.name}：已扫描 ${String(result.scanned_directories ?? 1)} 个目录，可导入 ${String(result.eligible_files ?? 0)} 个，待确认缺失 ${String(result.suspected_missing ?? 0)} 个，已确认缺失 ${String(result.missing ?? 0)} 个，移入回收站 ${String(result.trashed ?? 0)} 个，自动恢复 ${String(result.restored ?? 0)} 个`,
-        );
+      if (kind === 'scan' || kind === 'resume') setMessage(`${source.name}：已提交后台扫描，可以离开页面。`);
+      if (kind === 'cancel') setMessage(`${source.name}：已取消扫描，保留断点，原有入库资料不变。`);
       if (kind === 'sync')
         setMessage(
           `${source.name}：新增 ${String(result.imported ?? 0)}，更新 ${String(result.updated ?? 0)}，失败 ${String(result.failed ?? 0)}`,
         );
       await load();
-      if (kind !== 'test') await showEntries(source.id);
+      if (kind === 'sync') {
+        setEntries((current) => { const next = { ...current }; delete next[source.id]; return next; });
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '操作失败');
     } finally {
@@ -374,6 +432,7 @@ export function WebDavSourcePanel() {
 
       {message && <p className="mt-4 rounded bg-emerald-50 p-3 text-sm text-emerald-800">{message}</p>}
       {error && <p className="mt-4 rounded bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+      {progressError && <p className="mt-4 rounded bg-amber-50 p-3 text-sm text-amber-800" role="status">{progressError}</p>}
 
       <div className="mt-6 space-y-4">
         {sources.map((source) => (
@@ -428,24 +487,27 @@ export function WebDavSourcePanel() {
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   {(['test', 'scan', 'sync'] as const).map((kind) => (
-                    <button key={kind} type="button" disabled={Boolean(busy) || (!source.is_enabled && kind !== 'test')} onClick={() => void action(source, kind)} className={`rounded-xl px-3 py-2 text-sm font-medium disabled:opacity-40 ${kind === 'sync' ? 'bg-slate-950 text-white hover:bg-slate-800' : 'border border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
+                    <button key={kind} type="button" disabled={Boolean(busy) || (scanActive(source) && kind !== 'test') || (!source.is_enabled && kind !== 'test')} onClick={() => void action(source, kind)} className={`rounded-xl px-3 py-2 text-sm font-medium disabled:opacity-40 ${kind === 'sync' ? 'bg-slate-950 text-white hover:bg-slate-800' : 'border border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
                       {busy === `${source.id}:${kind}` ? '执行中…' : { test: '测试连接', scan: '扫描文件', sync: '同步入库' }[kind]}
                     </button>
                   ))}
-                  <button type="button" disabled={Boolean(busy)} onClick={() => startEditing(source)} className="rounded px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-40">
+                  {scanActive(source) && <button type="button" disabled={Boolean(busy)} onClick={() => void action(source, 'cancel')} className="rounded-xl border px-3 py-2 text-sm">取消扫描</button>}
+                  {source.scan && ['failed', 'cancelled'].includes(source.scan.status) && <button type="button" disabled={Boolean(busy) || !source.is_enabled} onClick={() => void action(source, 'resume')} className="rounded-xl border px-3 py-2 text-sm">从断点继续</button>}
+                  <button type="button" disabled={Boolean(busy) || scanActive(source)} onClick={() => startEditing(source)} className="rounded px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-40">
                     编辑配置
                   </button>
                   <button type="button" onClick={() => void showEntries(source.id).catch((caught) => setError(caught instanceof Error ? caught.message : '读取失败'))} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100">
                     {entries[source.id] ? '收起清单' : '查看文件'}
                   </button>
-                  <button type="button" disabled={Boolean(busy)} onClick={() => void toggleEnabled(source)} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40">
+                  <button type="button" disabled={Boolean(busy) || scanActive(source)} onClick={() => void toggleEnabled(source)} className="rounded px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40">
                     {busy === `${source.id}:enabled` ? '处理中…' : source.is_enabled ? '停用' : '启用'}
                   </button>
-                  <button type="button" disabled={Boolean(busy)} onClick={() => void prepareRemove(source)} className="rounded px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
+                  <button type="button" disabled={Boolean(busy) || scanActive(source)} onClick={() => void prepareRemove(source)} className="rounded px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40">
                     {busy === `${source.id}:impact` ? '正在核对影响…' : '删除连接器'}
                   </button>
                 </div>
-                {source.last_error && <p className="mt-3 text-sm text-red-700">{source.last_error}</p>}
+                {source.scan && <WebDavScanProgress scan={source.scan} />}
+                {source.last_error && !source.scan?.error && <p className="mt-3 text-sm text-red-700">{source.last_error}</p>}
                 {entries[source.id] && <EntryTable entries={entries[source.id]} sourceId={source.id} busy={busy} onAllowReimport={allowReimport} onKeepSnapshot={keepSnapshot} />}
               </>
             )}

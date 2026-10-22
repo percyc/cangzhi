@@ -22,7 +22,7 @@ from .taxonomy import (
     Tag,
     TagMergeRecord,
 )
-from .webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource
+from .webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource, WebDAVScan, WebDAVScanFile
 from .workspaces import DEFAULT_WORKSPACE_SLUG, Workspace, WorkspaceError
 
 __all__ = [
@@ -64,6 +64,8 @@ __all__ = [
     "TagMergeRecord",
     "WebDAVEntry",
     "WebDAVSource",
+    "WebDAVScan",
+    "WebDAVScanFile",
     "Workspace",
     "WorkspaceError",
 ]

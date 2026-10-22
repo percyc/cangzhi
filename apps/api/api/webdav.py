@@ -15,7 +15,7 @@ from ..core.db import get_db
 from ..models.blobs import Blob
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from ..models.processing import ProcessingJob
-from ..models.webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource
+from ..models.webdav import ExternalItemExclusion, WebDAVEntry, WebDAVSource, WebDAVScan
 from ..security.secrets import decrypt_secret, encrypt_secret
 from ..security.url_safety import URLSecurityError
 from ..services.document_lifecycle import (
@@ -29,16 +29,49 @@ from ..services.webdav import (
     download_file,
     propfind,
     scan_tree,
-    in_scan_scope,
     matches_ignore_pattern as _matches_ignore_pattern,
     validate_webdav_url,
     webdav_external_identity,
 )
 from ..storage import get_storage
+from ..services.webdav_reconciliation import reconcile_scan
+from ..services.webdav_scan_jobs import (
+    ScanConflict, cancel_scan, current_scan, ensure_not_scanning, public_scan, start_scan,
+)
 from ..storage.base import BlobStorage
 from .files import normalized_filename, validate_file_type
 
 router = APIRouter(prefix="/webdav", tags=["webdav"])
+
+
+async def _scan_guard(db, source_id):
+    try:
+        await ensure_not_scanning(db, source_id)
+    except ScanConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
+@router.post("/{source_id}/scan-jobs", status_code=202)
+async def enqueue_scan(source_id: int, resume: bool = False, db: AsyncSession = Depends(get_db)):
+    await _source_or_404(db, source_id)
+    try:
+        return await start_scan(db, source_id, resume=resume)
+    except ScanConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
+@router.get("/{source_id}/scan-jobs")
+async def scan_progress(source_id: int, db: AsyncSession = Depends(get_db)):
+    await _source_or_404(db, source_id)
+    return public_scan(await current_scan(db, source_id))
+
+
+@router.post("/{source_id}/scan-jobs/cancel")
+async def stop_scan(source_id: int, db: AsyncSession = Depends(get_db)):
+    await _source_or_404(db, source_id)
+    return await cancel_scan(db, source_id)
+
+
 DEFAULT_EXTENSIONS = [
     ".pdf",
     ".doc",
@@ -176,8 +209,12 @@ async def list_sources(db: AsyncSession = Depends(get_db)):
         ).all()
     }
     result = []
+    scans = {run.source_id: public_scan(run) for run in (
+        await db.scalars(select(WebDAVScan).where(WebDAVScan.source_id.in_([row.id for row in rows])))
+    ).all()}
     for row in rows:
         item = row.to_public_dict()
+        item["scan"] = scans.get(row.id)
         item["entry_counts"] = counts.get(
             row.id,
             {
@@ -351,6 +388,7 @@ async def update_source(
     """Update a connector while preserving its imported documents and password."""
 
     source = await _source_or_404(db, source_id)
+    await _scan_guard(db, source_id)
     if payload.clear_password and payload.password:
         raise HTTPException(
             status_code=400,
@@ -478,6 +516,7 @@ async def set_source_enabled(
     db: AsyncSession = Depends(get_db),
 ):
     source = await _source_or_404(db, source_id)
+    await _scan_guard(db, source_id)
     source.is_enabled = payload.is_enabled
     source.sync_status = "idle"
     source.last_error = None
@@ -495,6 +534,7 @@ async def delete_source(
     """Remove a connector, optionally moving its active knowledge to trash."""
 
     source = await _source_or_404(db, source_id)
+    await _scan_guard(db, source_id)
     linked_ids = list(
         (
             await db.execute(
@@ -573,6 +613,7 @@ async def test_source(source_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{source_id}/scan", response_model=dict[str, Any])
 async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
     source = await _source_or_404(db, source_id)
+    await _scan_guard(db, source_id)
     if not source.is_enabled:
         raise HTTPException(status_code=409, detail="知识源已停用，请先启用")
     source.sync_status = "scanning"
@@ -595,182 +636,11 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         await db.commit()
         raise HTTPException(status_code=502, detail=str(exc)) from None
 
-    now = datetime.now(timezone.utc)
-    extensions = set(source.include_extensions or DEFAULT_EXTENSIONS)
-    remote_file_paths = {
-        entry.path for entry in remote if not entry.is_collection
-    }
-    files = [
-        entry
-        for entry in remote
-        if not entry.is_collection
-        and PurePosixPath(entry.path).suffix.lower() in extensions
-        and not _matches_ignore_pattern(entry.path, source.ignore_patterns or [])
-    ]
-    existing = {
-        entry.remote_path: entry
-        for entry in (
-            await db.execute(
-                select(WebDAVEntry).where(WebDAVEntry.source_id == source.id)
-            )
-        ).scalars()
-    }
-    linked_document_ids = {
-        entry.document_id
-        for entry in existing.values()
-        if entry.document_id is not None
-    }
-    linked_documents = (
-        {
-            document.id: document
-            for document in (
-                await db.execute(
-                    select(Document).where(Document.id.in_(linked_document_ids))
-                )
-            )
-            .scalars()
-            .all()
-        }
-        if linked_document_ids
-        else {}
+    return await reconcile_scan(
+        db, source, remote, scan_root, scanned_directories,
+        extensions=set(source.include_extensions or DEFAULT_EXTENSIONS),
+        confirmations=REMOTE_MISSING_CONFIRMATIONS, grace=REMOTE_MISSING_GRACE,
     )
-    discovered = changed = unchanged = ignored = restored = 0
-    seen: set[str] = set()
-    for remote_entry in files:
-        seen.add(remote_entry.path)
-        identity = webdav_external_identity(source.base_url, remote_entry.path)
-        entry = existing.get(remote_entry.path)
-        if entry is None:
-            document = await db.scalar(
-                select(Document).where(Document.external_identity == identity)
-            )
-            exclusion = await db.scalar(
-                select(ExternalItemExclusion).where(
-                    ExternalItemExclusion.external_identity == identity
-                )
-            )
-            entry = WebDAVEntry(
-                source_id=source.id,
-                remote_path=remote_entry.path,
-                external_identity=identity,
-                document_id=document.id if document is not None else None,
-                state=(
-                    "ignored"
-                    if exclusion is not None
-                    or (document is not None and document.is_deleted)
-                    else "discovered"
-                ),
-            )
-            if exclusion is not None:
-                entry.ignore_reason = exclusion.reason
-                entry.ignored_at = now
-            elif document is not None and document.is_deleted:
-                entry.ignore_reason = "document_trashed"
-                entry.resume_state = "discovered"
-                entry.ignored_at = now
-            db.add(entry)
-            if entry.state == "ignored":
-                ignored += 1
-            else:
-                discovered += 1
-        elif entry.state == "ignored":
-            document = linked_documents.get(entry.document_id)
-            if (
-                entry.ignore_reason == "document_trashed"
-                and document is not None
-                and document.is_deleted
-                and document.delete_reason == "remote_missing"
-            ):
-                await restore_document_records(db, [document], commit=False)
-                entry.state = "changed"
-                entry.keep_snapshot = False
-                restored += 1
-                changed += 1
-            else:
-                ignored += 1
-        elif (
-            entry.state in ("missing", "suspected_missing")
-            or
-            entry.etag != remote_entry.etag
-            or entry.last_modified != remote_entry.last_modified
-            or entry.file_size != remote_entry.size
-        ):
-            entry.state = "changed"
-            changed += 1
-        else:
-            unchanged += 1
-        entry.etag = remote_entry.etag
-        entry.external_identity = identity
-        entry.last_modified = remote_entry.last_modified
-        entry.file_size = remote_entry.size
-        entry.content_type = remote_entry.content_type
-        entry.last_seen_at = now
-        entry.missing_since = None
-        entry.missing_count = 0
-        if entry.state != "ignored":
-            entry.keep_snapshot = False
-    suspected_missing = confirmed_missing = trashed = 0
-    documents_to_trash: list[Document] = []
-    for path, entry in existing.items():
-        if not in_scan_scope(path, scan_root, source.recursive, source.ignore_patterns or []):
-            continue
-        if PurePosixPath(path).suffix.lower() not in extensions:
-            continue
-        # A file excluded by a changed extension or ignore rule still exists
-        # remotely and must never be interpreted as a remote deletion.
-        if path in remote_file_paths or entry.state == "ignored":
-            continue
-        if entry.missing_since is None:
-            entry.missing_since = now
-            entry.missing_count = 1
-            entry.state = "suspected_missing"
-            suspected_missing += 1
-            continue
-        entry.missing_count = (entry.missing_count or 0) + 1
-        missing_since = entry.missing_since
-        if missing_since.tzinfo is None:
-            missing_since = missing_since.replace(tzinfo=timezone.utc)
-        confirmed = (
-            entry.missing_count >= REMOTE_MISSING_CONFIRMATIONS
-            and now - missing_since >= REMOTE_MISSING_GRACE
-        )
-        if not confirmed:
-            entry.state = "suspected_missing"
-            suspected_missing += 1
-            continue
-        entry.state = "missing"
-        confirmed_missing += 1
-        document = linked_documents.get(entry.document_id)
-        if (
-            source.remote_delete_policy == "trash"
-            and not entry.keep_snapshot
-            and document is not None
-            and not document.is_deleted
-        ):
-            documents_to_trash.append(document)
-    if documents_to_trash:
-        trashed = await trash_document_records(
-            db,
-            documents_to_trash,
-            reason="remote_missing",
-            commit=False,
-        )
-    source.sync_status = "idle"
-    source.last_scan_at = now
-    await db.commit()
-    return {
-        "ok": True,
-        "discovered": discovered,
-        "changed": changed,
-        "unchanged": unchanged,
-        "ignored": ignored,
-        "suspected_missing": suspected_missing,
-        "missing": confirmed_missing,
-        "trashed": trashed,
-        "restored": restored,
-        "eligible_files": len(files),
-        "scanned_directories": scanned_directories,
-    }
 
 
 @router.post("/{source_id}/sync", response_model=dict[str, Any])
@@ -782,6 +652,7 @@ async def sync_source(
     """Download new/changed files and enqueue the normal ingestion pipeline."""
 
     source = await _source_or_404(db, source_id)
+    await _scan_guard(db, source_id)
     if not source.is_enabled:
         raise HTTPException(status_code=409, detail="知识源已停用，请先启用")
     entries = (

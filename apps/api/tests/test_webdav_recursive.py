@@ -112,6 +112,23 @@ def test_optional_property_failure_does_not_hide_valid_resource():
 
 
 @pytest.mark.asyncio
+async def test_shared_http_client_is_not_closed_or_reuses_connector_cookies():
+    import httpx
+    cookies = []
+    def handler(request):
+        cookies.append(request.headers.get('Cookie'))
+        return httpx.Response(207, content=b'<d:multistatus xmlns:d="DAV:"/>',
+                              headers={'set-cookie': 'session=private; Path=/'})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for username in ('one', 'two'):
+            await propfind(base_url='https://dav.example/', root_path='/docs',
+                           username=username, password='test', trusted_private_network=True,
+                           client=client)
+            assert not client.is_closed
+    assert cookies == ['', '']
+
+
+@pytest.mark.asyncio
 async def test_oversized_directory_response_fails_closed(monkeypatch):
     import httpx
     original_client = httpx.AsyncClient

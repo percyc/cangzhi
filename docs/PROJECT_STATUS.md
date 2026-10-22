@@ -6,6 +6,12 @@
 
 更新时间：2026-10-22
 
+最新开发交付：`CZ-S02` 后台WebDAV扫描，Codex，分支
+`codex/CZ-S02-background-webdav`。持久进度、取消/继续、小并发连接复用、租约恢复，
+完整成功才对账；需迁移0039并更新普通Worker/API/Web，尚未部署或推送。
+API相关47项、Worker相关55项、独立PostgreSQL并发/迁移、Web124项与隔离浏览器通过。
+真实WebDAV服务质量与更大规模吞吐未验收，定时/后台下载仍待完成；见WEBDAV_SCANNING。
+
 最新部署：`v1.3.5`，运行源码`da1ec50`，WebDAV全层递归修复已按维护者追加授权
 快进合并main并部署。API/Web/Worker版本一致、dirty=false，四服务healthy。
 发布镜像API42项、Web124项与lint/类型检查/25页构建通过；Worker业务未变，
@@ -139,6 +145,9 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
   快照、DuckDB 受控查询。
 
 ## 3. 进行中任务
+
+- `CZ-S02` 后台WebDAV扫描已完成本轮开发与隔离验收，见顶部交付快照。
+  尚未部署；后台下载、定时扫描与完整运行历史继续留在BACKLOG。
 
 - `CZ-S02` WebDAV 全层递归与缺失保护已完成，功能`d83ed35`；已追加授权
   合并部署v1.3.5。后台持久进度与续扫仍属后续，具体测试与交付见 DEVLOG。
