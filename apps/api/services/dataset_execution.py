@@ -195,7 +195,10 @@ def build_dataset_parquet(
     session.flush()
 
     root = _storage_root(storage_root)
-    relative = Path("datasets") / str(dataset.id) / f"v{next_version}.parquet"
+    # Never overwrite a previous/crashed attempt's artifact. The database
+    # pointer is published transactionally; rollback cleanup owns only this file.
+    import uuid
+    relative = Path("datasets") / str(dataset.id) / f"v{next_version}-{uuid.uuid4().hex}.parquet"
     final_path = root / relative
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = final_path.with_suffix(f".parquet.tmp-{os.getpid()}-{artifact.id}")

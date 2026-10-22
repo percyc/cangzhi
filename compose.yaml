@@ -4,6 +4,12 @@ x-build-metadata: &build-metadata
   CANGZHI_BUILD_TIME: ${CANGZHI_BUILD_TIME:-unknown}
   CANGZHI_BUILD_DIRTY: ${CANGZHI_BUILD_DIRTY:-true}
 
+x-model-admission: &model-admission
+  MODEL_ADMISSION_CAPACITY: ${MODEL_ADMISSION_CAPACITY:-2}
+  MODEL_ADMISSION_BACKGROUND_CAPACITY: ${MODEL_ADMISSION_BACKGROUND_CAPACITY:-1}
+  MODEL_ADMISSION_MAX_OCR: ${MODEL_ADMISSION_MAX_OCR:-1}
+  MODEL_ADMISSION_POOL_MAP: ${MODEL_ADMISSION_POOL_MAP:-}
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -49,6 +55,7 @@ services:
     ports:
       - "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8000}:8000"
     environment:
+      <<: *model-admission
       DATABASE_URL: postgresql://${POSTGRES_USER:-cangzhi}:${POSTGRES_PASSWORD:-cangzhi-dev}@postgres:5432/${POSTGRES_DB:-cangzhi}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -86,6 +93,7 @@ services:
     volumes:
       - "${STORAGE_HOST_PATH:-./storage}:/app/storage"
     environment:
+      <<: *model-admission
       DATABASE_URL: postgresql://${POSTGRES_USER:-cangzhi}:${POSTGRES_PASSWORD:-cangzhi-dev}@postgres:5432/${POSTGRES_DB:-cangzhi}
       POLL_INTERVAL: ${POLL_INTERVAL:-5}
       STORAGE_PATH: /app/storage
@@ -110,6 +118,11 @@ services:
       PDF_OCR_MIN_NATIVE_CHARS: ${PDF_OCR_MIN_NATIVE_CHARS:-24}
       PDF_OCR_MAX_PAGES: ${PDF_OCR_MAX_PAGES:-300}
       PDF_OCR_TIMEOUT_SECONDS: ${PDF_OCR_TIMEOUT_SECONDS:-30}
+      TASK_EXECUTION_ENABLED: ${TASK_EXECUTION_ENABLED:-true}
+      TASK_LEASE_SECONDS: ${TASK_LEASE_SECONDS:-120}
+      TASK_HEARTBEAT_SECONDS: ${TASK_HEARTBEAT_SECONDS:-30}
+      TASK_MAX_ATTEMPTS: ${TASK_MAX_ATTEMPTS:-3}
+    stop_grace_period: 3h
     depends_on:
       api:
         condition: service_healthy

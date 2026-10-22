@@ -59,7 +59,13 @@ boundaries.
 
 ## Version and development status
 
-- **The current delivery version is `v1.3.7`**, adding an administrator operations overview
+- **The `v1.4.0` reliability milestone** adds shared API/Worker model admission,
+  bounded task leases, supervised subprocesses, stale-write fencing, and recovery metrics.
+  Apply migrations 0042/0043 and update API/Web/Worker together. CPU execution remains serial;
+  historical failed jobs are not automatically replayed. See the [project status](docs/PROJECT_STATUS.md)
+  for verified deployment details and [ADR-034](docs/ADR-034-model-admission.md) /
+  [ADR-035](docs/ADR-035-task-ownership.md) for limits.
+  `v1.3.7` added an administrator operations overview
   with low-frequency capacity, knowledge and queue snapshots. Upgrade migration 0040 and
   the API, Web and regular Worker together. See [monitoring boundaries](docs/OPERATIONS_OVERVIEW.md).
   `v1.3.6` added background WebDAV scans with

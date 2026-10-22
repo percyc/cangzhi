@@ -42,6 +42,7 @@ from sqlalchemy.sql import ColumnElement
 from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
+from . import model_admission as admission
 from .scope_keys import DocumentSelection
 from .search import (
     extract_cjk_ngrams,
@@ -522,6 +523,15 @@ class QAService:
                 question=question,
                 evidence=provider_payload,
             )
+        except admission.AdmissionError as exc:
+            # Admission refused the slot (busy / cooldown / unavailable /
+            # deadline) before any request was sent. Map to the existing safe
+            # provider-failed error so the API returns a stable 502 instead of
+            # an unhandled 500; the exact message is a truthful, secret-free
+            # summary (no pool id / URL / key).
+            if isinstance(exc, admission.AdmissionCooldownError):
+                raise AskError("provider_failed", "模型渠道正在冷却，请稍后再试") from exc
+            raise AskError("provider_failed", "模型额度繁忙，请稍后再试") from exc
         except AIProviderError as exc:
             raise AskError("provider_failed", "模型暂时不可用，请稍后再试") from exc
         if on_progress is not None:

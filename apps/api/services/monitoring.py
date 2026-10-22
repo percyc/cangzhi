@@ -17,13 +17,14 @@ INTERVALS = {"queue": 60, "knowledge": 900, "capacity": 900}
 METRIC_NAMES = {
     "knowledge": ["documents", "files", "trash", "versions", "chunks",
                   "parent_chunks", "vectors", "active_vectors", "datasets"],
-    "queue": ["waiting", "running", "failed", "oldest_waiting_at"],
+    "queue": ["waiting", "running", "failed", "oldest_waiting_at", "model_pools",
+              "waiting_model", "quarantined", "recoveries"],
     "capacity": ["blobs", "blob_bytes", "original_bytes", "preview_bytes",
                  "other_blob_bytes", "parquet_bytes", "database_bytes",
                  "vector_table_bytes", "disk"],
 }
 
-# At most 9 + 4 + 9 metrics across the three global kinds.
+# At most 9 + 8 + 9 metrics across the three global kinds.
 _METRIC_READ_LIMIT = 100
 
 

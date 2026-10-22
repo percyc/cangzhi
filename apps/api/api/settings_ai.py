@@ -35,6 +35,7 @@ from ..models.auth import Admin, AIRuntimeConfig
 from ..models.documents import Document
 from ..models.processing import ProcessingJob
 from ..services.ocr_probe import probe_ocr
+from ..services import model_admission as admission
 from ..models.taxonomy import DocumentCategory, DocumentSummary, DocumentTag
 from ..security.secrets import (
     SecretDecryptError,
@@ -55,6 +56,9 @@ _OCR_PROVIDER_VALUES = ("disabled", "openai")
 _SINGLETON_KEY = "singleton"
 
 _URL_RE = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
+
+
+# --- Model list endpoint ---------------------------------------------------
 
 
 def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
@@ -1011,13 +1015,23 @@ async def _probe_openai_embedding(
         "Accept": "application/json",
     }
     body = {"model": model, "input": _EMBEDDING_PROBE_TEXT}
+    pool_id = admission.channel_pool_id(admission.EMBEDDING)
     try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.post(url, headers=headers, json=body)
+        async with admission.async_channel(
+            admission.EMBEDDING, hard_lifetime_seconds=timeout
+        ) as channel:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                response = await channel.run(client.post(url, headers=headers, json=body))
+    except admission.AdmissionError:
+        return {"ok": False, "message": "Embedding 模型额度繁忙或暂时不可用，请稍后再试"}
+    except TimeoutError:
+        return {"ok": False, "message": "Embedding 服务请求超时，请稍后再试"}
     except httpx.HTTPError as exc:
         return _safe_failure("无法连接 Embedding 服务", exc)
 
     if response.status_code >= 400:
+        admission.apply_response_cooldown(pool_id, response.status_code,
+                                          admission.parse_retry_after(response.headers))
         return {
             "ok": False,
             "message": f"服务返回 HTTP {response.status_code}，请检查地址、密钥和模型权限",
@@ -1049,21 +1063,35 @@ async def _probe_ollama_embedding(
     model: str,
     timeout: float,
 ) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + timeout
     url = f"{base_url.rstrip('/')}/api/embed"
     body = {"model": model, "input": _EMBEDDING_PROBE_TEXT}
+    pool_id = admission.channel_pool_id(admission.EMBEDDING)
     try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.post(url, json=body)
+        async with admission.async_channel(
+            admission.EMBEDDING, hard_lifetime_seconds=timeout
+        ) as channel:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                response = await channel.run(client.post(url, json=body))
+    except admission.AdmissionError:
+        return {"ok": False, "message": "Embedding 模型额度繁忙或暂时不可用，请稍后再试"}
+    except TimeoutError:
+        return {"ok": False, "message": "Ollama Embedding 服务请求超时，请稍后再试"}
     except httpx.HTTPError as exc:
         return _safe_failure("无法连接 Ollama Embedding 服务", exc)
 
     if response.status_code >= 400:
+        admission.apply_response_cooldown(pool_id, response.status_code,
+                                          admission.parse_retry_after(response.headers))
         # Some older Ollama builds only expose ``/api/embeddings``.
         # Fall back to that legacy path so the user still gets a
         # useful result instead of a hard error.
         if response.status_code in (404, 405):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining < 1:
+                return {"ok": False, "message": "Ollama Embedding 服务请求超时，请稍后再试"}
             return await _probe_ollama_legacy_embedding(
-                base_url=base_url, model=model, timeout=timeout
+                base_url=base_url, model=model, timeout=remaining
             )
         return {
             "ok": False,
@@ -1095,12 +1123,22 @@ async def _probe_ollama_legacy_embedding(
 ) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/api/embeddings"
     body = {"model": model, "prompt": _EMBEDDING_PROBE_TEXT}
+    pool_id = admission.channel_pool_id(admission.EMBEDDING)
     try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            response = await client.post(url, json=body)
+        async with admission.async_channel(
+            admission.EMBEDDING, hard_lifetime_seconds=timeout
+        ) as channel:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                response = await channel.run(client.post(url, json=body))
+    except admission.AdmissionError:
+        return {"ok": False, "message": "Embedding 模型额度繁忙或暂时不可用，请稍后再试"}
+    except TimeoutError:
+        return {"ok": False, "message": "Ollama Embedding 服务请求超时，请稍后再试"}
     except httpx.HTTPError as exc:
         return _safe_failure("无法连接 Ollama Embedding 服务", exc)
     if response.status_code >= 400:
+        admission.apply_response_cooldown(pool_id, response.status_code,
+                                          admission.parse_retry_after(response.headers))
         return {
             "ok": False,
             "message": f"Ollama Embedding 返回 HTTP {response.status_code}",

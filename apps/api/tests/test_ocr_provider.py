@@ -38,18 +38,27 @@ def _png_bytes() -> bytes:
 
 @pytest.fixture
 def patched_post(monkeypatch):
+    """Patch ``httpx.AsyncClient`` (the transport now runs inside a real,
+    cancellable async request under admission) with a canned async client."""
     captured: dict[str, Any] = {}
 
     def install(handler):
-        def fake_post(url, *, json=None, headers=None, timeout=None, **_kwargs):
-            captured["url"] = url
-            captured["body"] = json
-            captured["headers"] = headers or {}
-            captured["timeout"] = timeout
-            return handler(captured, url)
+        class FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return None
+
+            async def post(self, url, *, json=None, headers=None, **_kwargs):
+                captured["url"] = str(url)
+                captured["body"] = json
+                captured["headers"] = headers or {}
+                return handler(captured, str(url))
 
         monkeypatch.setattr(
-            "apps.api.ocr.openai_compatible.httpx.post", fake_post
+            "apps.api.ocr.openai_compatible.httpx.AsyncClient",
+            lambda *a, **kw: FakeAsyncClient(),
         )
         return captured
 

@@ -185,9 +185,7 @@ def test_parquet_build_and_duckdb_pushdown(tmp_path: Path):
     assert result["rows"] == [{"地区": "华东", "metric": 30.0, "matched_rows": 2}]
     assert ("日期", "2026-07-31") in literals
     assert ("地区", "华东") in literals
-    assert (
-        tmp_path / "storage" / "datasets" / str(dataset_id) / "v1.parquet"
-    ).is_file()
+    assert len(list((tmp_path / "storage" / "datasets" / str(dataset_id)).glob("v1-*.parquet"))) == 1
 
 
 def test_background_freshness_serves_fixed_snapshot_and_schedules_refresh(
@@ -445,12 +443,9 @@ def test_failed_rebuild_keeps_previous_active_artifact(tmp_path: Path, monkeypat
         assert (
             session.query(DatasetArtifact).filter_by(dataset_id=dataset_id).count() == 1
         )
-    assert (
-        tmp_path / "storage" / "datasets" / str(dataset_id) / "v1.parquet"
-    ).is_file()
-    assert not (
-        tmp_path / "storage" / "datasets" / str(dataset_id) / "v2.parquet"
-    ).exists()
+    folder = tmp_path / "storage" / "datasets" / str(dataset_id)
+    assert len(list(folder.glob("v1-*.parquet"))) == 1
+    assert not list(folder.glob("v2-*.parquet"))
 
 
 def test_null_is_rejected_for_ordered_comparison(tmp_path: Path):

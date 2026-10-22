@@ -232,6 +232,29 @@ def test_cancellation_discards_in_flight_response(db, monkeypatch):
     assert all(w["result"] is None for w in detail["windows"])
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_admission_refund_is_attempt_scoped_and_preserves_cancellation(db, monkeypatch, cancelled):
+    from apps.api.services.model_admission import AdmissionBusyError
+    from apps.worker.services.processor import _run_claimed_job
+    enable(db)
+    doc, _ = document(db)
+    run = service.start_run(db, doc.id, cost_acknowledged=True)
+    db.commit()
+    def busy():
+        if cancelled:
+            service.cancel_run(db, run["id"])
+            db.commit()
+        raise AdmissionBusyError("busy before send")
+    provider(monkeypatch, callback=busy)
+    job = db.scalar(select(ProcessingJob).where(ProcessingJob.stage == service.STAGE))
+    assert _run_claimed_job(db, job.id) == 0
+    detail = service.read_run(db, run["id"])
+    assert detail["run"]["status"] == ("cancelled" if cancelled else "queued")
+    assert detail["run"]["calls_used"] == (1 if cancelled else 0)
+    assert job.status == "retry" and job.retry_count == 0
+    assert all(w["result"] is None for w in detail["windows"])
+
+
 def test_source_change_discards_result(db, monkeypatch):
     enable(db)
     doc, version = document(db)

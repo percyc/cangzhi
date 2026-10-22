@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import model_admission as admission
+
 HIERARCHY_VERSION = "hierarchy:v1"
 HIERARCHY_FANOUT = 4
 MIN_TOTAL_WINDOWS = 1
@@ -243,6 +245,10 @@ def synthesize_node(provider: Any, children: list) -> dict:
     )
     try:
         response = provider.generate_json(system=SYSTEM_PROMPT, prompt=prompt)
+    except admission.AdmissionError:
+        # No request was sent: a busy/cooldown queue must not be reported as a
+        # model failure and must not consume/refund the enhancement budget.
+        raise
     except Exception:
         raise ValueError(GENERIC_ERROR) from None
     cleaned = _validate_response(response, valid_refs)

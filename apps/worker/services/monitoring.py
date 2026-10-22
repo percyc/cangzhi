@@ -149,7 +149,35 @@ def _queue_probes():
     return [
         (("waiting", "running", "failed"), lambda db: _queue_states(db)),
         (("oldest_waiting_at",), lambda db: _queue_oldest(db)),
+        (("model_pools",), _model_pool_metrics),
+        (("waiting_model", "quarantined", "recoveries"), _recovery_metrics),
     ]
+
+
+def _model_pool_metrics(db):
+    rows = db.execute(text("""
+        SELECT p.pool_id, p.capacity, p.background_capacity, p.ocr_sublimit,
+               p.cooldown_until, count(l.id) AS in_use,
+               count(l.id) FILTER (WHERE l.kind='background') AS background_in_use
+        FROM model_admission_pools p LEFT JOIN model_admission_leases l
+          ON l.pool_id=p.pool_id AND l.lease_until > CURRENT_TIMESTAMP
+        GROUP BY p.id ORDER BY p.pool_id LIMIT 32
+    """)).mappings().all()
+    return {"model_pools": [{**dict(row), "cooldown_until":
+        (row.cooldown_until.isoformat() if hasattr(row.cooldown_until, "isoformat")
+         else str(row.cooldown_until)) if row.cooldown_until else None} for row in rows]}
+
+
+def _recovery_metrics(db):
+    row = db.execute(text("""
+        SELECT count(*) FILTER (WHERE j.status='retry' AND
+                   j.error_details->>'deferred'='true') AS waiting_model,
+               count(*) FILTER (WHERE j.quarantined_at IS NOT NULL) AS quarantined,
+               coalesce(sum(j.recovery_count), 0) AS recoveries
+        FROM processing_jobs j JOIN documents d ON d.current_version_id=j.document_version_id
+        WHERE NOT d.is_deleted
+    """)).mappings().one()
+    return dict(row)
 
 
 def _queue_states(db):

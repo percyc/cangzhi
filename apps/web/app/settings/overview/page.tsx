@@ -15,7 +15,11 @@ type Section<T> = { data: T | null; sampled_at: string | null; attempted_at?: st
 type Capacity = { disk: { total: number; used: number; free: number } | null; blob_bytes: number;
   original_bytes: number; preview_bytes: number; other_blob_bytes: number; parquet_bytes: number;
   database_bytes: number | null; vector_table_bytes: number | null; blobs: number };
-type Overview = { sections: { knowledge: Section<Metrics>; queue: Section<Metrics>; capacity: Section<Capacity> };
+type Pool = { pool_id: string; capacity: number; background_capacity: number; ocr_sublimit: number;
+  in_use: number; background_in_use: number; cooldown_until: string | null };
+type QueueMetrics = { waiting?: number; running?: number; failed?: number; oldest_waiting_at?: string;
+  waiting_model?: number; quarantined?: number; recoveries?: number; model_pools?: Pool[] };
+type Overview = { sections: { knowledge: Section<Metrics>; queue: Section<QueueMetrics>; capacity: Section<Capacity> };
   history: { at: string; documents: number | null; blob_bytes: number; disk_used: number | null }[] };
 
 function bytes(value: number | null | undefined) {
@@ -41,6 +45,7 @@ const metricLabels: Record<string, string> = {
   chunks: '在线检索切片', parent_chunks: '在线父片段', vectors: '全部存储向量',
   active_vectors: '当前有效向量', datasets: '可用数据集', waiting: '等待任务',
   running: '执行中任务', failed: '失败任务记录', oldest_waiting_at: '最早排队时间',
+  model_pools: '模型共享额度', waiting_model: '等待模型额度/冷却', quarantined: '隔离任务', recoveries: '累计执行恢复',
   blobs: 'Blob 对象', blob_bytes: 'Blob 占用', original_bytes: '原文占用',
   preview_bytes: '预览占用', other_blob_bytes: '其他 Blob 占用', parquet_bytes: 'Parquet 占用',
   database_bytes: '数据库占用', vector_table_bytes: '向量表占用', disk: '数据盘容量',
@@ -195,6 +200,14 @@ export default function OverviewPage() {
       <section className={panel}>
         <h2 className="font-semibold text-slate-900">处理队列</h2>
         <p className="mt-2 text-sm leading-6 text-slate-600">等待 {count(q?.waiting)} · 执行中 {count(q?.running)} · 失败记录 {count(q?.failed)}</p>
+        <p className="mt-2 text-sm text-slate-600">等待模型额度/渠道恢复 {count(q?.waiting_model)} · 隔离待检查 {count(q?.quarantined)} · 累计恢复 {count(q?.recoveries)}</p>
+        <div className="mt-3 space-y-2 text-sm text-slate-600">
+          {q?.model_pools?.map(pool => <div key={pool.pool_id} className="rounded-lg bg-slate-50 p-3">
+            <p>额度池 {pool.pool_id}：使用 {pool.in_use} / {pool.capacity}；后台 {pool.background_in_use} / {pool.background_capacity}；OCR 上限 {pool.ocr_sublimit}</p>
+            {pool.cooldown_until && <p>最近记录的冷却截止：{new Date(pool.cooldown_until).toLocaleString('zh-CN')}</p>}
+          </div>)}
+          <p className="text-xs">额度占用为后台采样快照，不是实时计数。默认共享额度池，后台不会占满前台保留名额。</p>
+        </div>
         <p className="mt-2 text-sm text-slate-600">最早排队时间：{oldestKnown ? q?.oldest_waiting_at ? new Date(String(q.oldest_waiting_at)).toLocaleString('zh-CN') : '暂无排队任务' : '暂不可用'}</p>
         <p className="mt-2 text-xs leading-5 text-slate-500">统计当前、未回收文档的任务记录，不是文档数；一篇文档可产生多个向量任务。失败记录可能包含已重试的旧尝试，不能直接当作当前失败文档数或成功率。WebDAV 扫描任务另见知识源。</p>
         <Stamp section={data?.sections.queue} />

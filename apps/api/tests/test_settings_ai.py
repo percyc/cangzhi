@@ -1770,18 +1770,20 @@ def test_ocr_test_calls_vision_without_model_list(client, monkeypatch):
         },
     )
 
-    def handler(url, **kwargs):
-        assert url == "https://ocr.example.com/v1/chat/completions"
-        assert kwargs["json"]["model"] == "vision-listed"
-        assert "data:image/png;base64," in json.dumps(kwargs["json"])
-        assert "CANGZHI 5827" not in json.dumps(kwargs["json"])
+    def handler(request):
+        assert str(request.url) == "https://ocr.example.com/v1/chat/completions"
+        payload = json.loads(request.content)
+        assert payload["model"] == "vision-listed"
+        assert "data:image/png;base64," in json.dumps(payload)
+        assert "CANGZHI 5827" not in json.dumps(payload)
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps({"lines": [{"text": "CANGZHI 5827", "bbox": [0, 0, 1000, 1000]}]})}}]},
         )
 
     monkeypatch.setattr(
-        "apps.api.ocr.openai_compatible.httpx.post", handler,
+        "apps.api.ocr.openai_compatible.httpx.AsyncClient",
+        lambda **kwargs: _MockAsyncClient(httpx.MockTransport(handler)),
     )
     body = test_client.post("/api/settings/ai/ocr/test").json()
     assert body["ok"] is True
@@ -1803,14 +1805,15 @@ def test_ocr_test_failure_message_does_not_leak_key(client, monkeypatch):
         },
     )
 
-    def handler(url, **kwargs):
+    def handler(request):
         return httpx.Response(
             500,
             text=json.dumps({"error": f"upstream failed because {secret}"}),
         )
 
     monkeypatch.setattr(
-        "apps.api.ocr.openai_compatible.httpx.post", handler,
+        "apps.api.ocr.openai_compatible.httpx.AsyncClient",
+        lambda **kwargs: _MockAsyncClient(httpx.MockTransport(handler)),
     )
     body = test_client.post("/api/settings/ai/ocr/test").json()
     assert body["ok"] is False

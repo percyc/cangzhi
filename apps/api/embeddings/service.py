@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.auth import AIRuntimeConfig
 from ..models.embedding_profiles import EmbeddingProfile
+from ..services import model_admission as admission
 from ..security.secrets import (
     SecretDecryptError,
     SecretStoreError,
@@ -366,22 +367,20 @@ def _extract_ollama_canary(payload: Any) -> list[list[float]]:
     raise ValueError("响应缺少 embeddings/embedding 字段")
 
 
-async def _request_canary_vectors(
-    *,
-    descriptor: CandidateDescriptor,
-    texts: Sequence[str],
-    client_factory: ClientFactory | None = None,
-) -> list[list[float]]:
-    """Send the canary texts to the configured embedding endpoint.
+class _EmbeddingLegacyFallback(Exception):
+    """Internal signal: the primary ``/api/embed`` returned 404/405 for an
+    Ollama descriptor and the caller should retry the same canary texts
+    against the legacy ``/api/embeddings`` endpoint.
 
-    The factory parameter exists so tests can inject a mock
-    transport. Production code passes ``None`` and gets the real
-    ``httpx.AsyncClient`` with ``trust_env=False``.
+    Raised only for Ollama and only before any successful request, so it is
+    never treated as a cooldown or a model failure and never burns the shared
+    channel's remaining deadline.
     """
 
-    factory = client_factory or (
-        lambda **kwargs: httpx.AsyncClient(**kwargs)
-    )
+
+def _build_canary_request(
+    descriptor: CandidateDescriptor, texts: Sequence[str]
+) -> tuple[str, dict[str, str], dict[str, Any]]:
     headers = {"Accept": "application/json"}
     if descriptor.provider == "openai":
         url = f"{descriptor.base_url.rstrip('/')}/embeddings"
@@ -394,18 +393,63 @@ async def _request_canary_vectors(
         url = f"{descriptor.base_url.rstrip('/')}/api/embed"
         headers["Content-Type"] = "application/json"
         body = {"model": descriptor.model, "input": list(texts)}
+    return url, headers, body
 
+
+async def _request_canary_vectors(
+    *,
+    descriptor: CandidateDescriptor,
+    texts: Sequence[str],
+    client_factory: ClientFactory | None = None,
+    channel: Any | None = None,
+) -> list[list[float]]:
+    """Send the canary texts to the configured embedding endpoint.
+
+    When ``channel`` is provided, the request reuses that existing admission
+    channel (and its remaining absolute deadline) instead of acquiring a new
+    one; this is what lets the legacy-fallback wrapper share one slot and one
+    deadline across the primary probe and its fallback. When ``channel`` is
+    None a fresh channel is acquired.
+
+    The factory parameter exists so tests can inject a mock transport.
+    Production code passes ``None`` and gets the real ``httpx.AsyncClient``
+    with ``trust_env=False``.
+    """
+
+    factory = client_factory or (lambda **kwargs: httpx.AsyncClient(**kwargs))
+    url, headers, body = _build_canary_request(descriptor, texts)
     try:
-        async with factory(timeout=descriptor.timeout_seconds, trust_env=False) as client:
-            response = await client.post(url, headers=headers, json=body)
+        if channel is not None:
+            async with factory(timeout=descriptor.timeout_seconds, trust_env=False) as client:
+                response = await channel.run(client.post(url, headers=headers, json=body))
+        else:
+            async with admission.async_channel(
+                admission.EMBEDDING, hard_lifetime_seconds=descriptor.timeout_seconds
+            ) as own:
+                async with factory(timeout=descriptor.timeout_seconds, trust_env=False) as client:
+                    response = await own.run(client.post(url, headers=headers, json=body))
+    except admission.AdmissionError:
+        # No request was sent (or the slot was refused by a busy/cooldown gate)
+        # and no URL / pool id / key may leak.
+        raise ValueError("Embedding 额度繁忙或暂时不可用，请稍后再试")
+    except TimeoutError:
+        raise ValueError("Embedding 请求超时，请稍后再试")
     except httpx.HTTPError as exc:
         # Sanitise: never echo the underlying message because it
         # sometimes contains a URL with embedded credentials.
         raise ValueError(f"无法连接 Embedding 服务：{type(exc).__name__}") from exc
 
     if response.status_code >= 400:
-        # Legacy Ollama fallback handled in the caller so the
-        # verdict message is more useful.
+        # 404/405 from an Ollama descriptor is a sign the build only exposes
+        # the legacy endpoint; signal it to the wrapper, which shares this
+        # channel. Every other status cooldowns the shared pool.
+        if descriptor.provider == "ollama" and response.status_code in (404, 405):
+            raise _EmbeddingLegacyFallback(response.status_code)
+        admission.apply_response_cooldown(
+            pool_id=admission.channel_pool_id(admission.EMBEDDING),
+            status_code=response.status_code,
+            retry_after=admission.parse_retry_after(response.headers),
+        )
         raise ValueError(f"Embedding 服务返回 HTTP {response.status_code}")
 
     try:
@@ -427,39 +471,51 @@ async def _request_canary_vectors_ollama_with_legacy_fallback(
     """Like :func:`_request_canary_vectors` but tries the legacy
     ``/api/embeddings`` endpoint on 404/405 for older Ollama builds.
 
-    The legacy endpoint only accepts a single ``prompt`` per call,
-    so the fallback iterates the canary texts sequentially. The
-    fallback exists only to keep the test endpoint usable for
-    operators who still run an older Ollama; it is not a path
-    used by the production probe in M3-6b phase 1.
+    The primary probe and the legacy fallback share ONE admission slot and
+    ONE remaining absolute deadline: if the slot is busy we refuse once (not
+    twice) and if the deadline is half-spent on the primary probe the fallback
+    only gets what is left, never a fresh reset. A 404/405 is not a cooldown
+    and does not leak as a model error.
+
+    The legacy endpoint only accepts a single ``prompt`` per call, so the
+    fallback iterates the canary texts sequentially. The fallback exists only
+    to keep the test endpoint usable for operators who still run an older
+    Ollama; it is not a path used by the production probe in M3-6b phase 1.
     """
 
+    factory = client_factory or (lambda **kwargs: httpx.AsyncClient(**kwargs))
     try:
-        return await _request_canary_vectors(
-            descriptor=descriptor,
-            texts=texts,
-            client_factory=client_factory,
-        )
-    except ValueError as exc:
-        if descriptor.provider != "ollama":
-            raise
-        if "HTTP 404" not in str(exc) and "HTTP 405" not in str(exc):
-            raise
-        factory = client_factory or (
-            lambda **kwargs: httpx.AsyncClient(**kwargs)
-        )
-        url = f"{descriptor.base_url.rstrip('/')}/api/embeddings"
-        vectors: list[list[float]] = []
-        try:
+        async with admission.async_channel(
+            admission.EMBEDDING, hard_lifetime_seconds=descriptor.timeout_seconds
+        ) as channel:
+            try:
+                return await _request_canary_vectors(
+                    descriptor=descriptor,
+                    texts=texts,
+                    client_factory=client_factory,
+                    channel=channel,
+                )
+            except _EmbeddingLegacyFallback:
+                pass
+            pool_id = admission.channel_pool_id(admission.EMBEDDING)
+            url = f"{descriptor.base_url.rstrip('/')}/api/embeddings"
+            vectors: list[list[float]] = []
             async with factory(
                 timeout=descriptor.timeout_seconds, trust_env=False
             ) as client:
                 for text in texts:
-                    response = await client.post(
-                        url,
-                        json={"model": descriptor.model, "prompt": text},
+                    response = await channel.run(
+                        client.post(
+                            url,
+                            json={"model": descriptor.model, "prompt": text},
+                        )
                     )
                     if response.status_code >= 400:
+                        admission.apply_response_cooldown(
+                            pool_id,
+                            response.status_code,
+                            admission.parse_retry_after(response.headers),
+                        )
                         raise ValueError(
                             f"Ollama Embedding 返回 HTTP {response.status_code}"
                         )
@@ -470,11 +526,13 @@ async def _request_canary_vectors_ollama_with_legacy_fallback(
                             "Ollama Embedding 返回的不是 JSON"
                         ) from inner_exc
                     vectors.append(_extract_ollama_canary(payload)[0])
-        except httpx.HTTPError as inner_exc:
-            raise ValueError(
-                f"无法连接 Embedding 服务：{type(inner_exc).__name__}"
-            ) from inner_exc
-        return vectors
+            return vectors
+    except admission.AdmissionError:
+        raise ValueError("Embedding 额度繁忙或暂时不可用，请稍后再试")
+    except TimeoutError:
+        raise ValueError("Embedding 请求超时，请稍后再试")
+    except httpx.HTTPError as exc:
+        raise ValueError(f"无法连接 Embedding 服务：{type(exc).__name__}") from exc
 
 
 # --- Persistence ---------------------------------------------------------

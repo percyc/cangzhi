@@ -63,9 +63,17 @@ def _stage_payload(job: ProcessingJob | None) -> dict:
         "completed": "已完成",
         "failed": "处理失败",
     }
+    details = getattr(job, "error_details", None) or {}
+    message = labels.get(job.status, job.status)
+    if getattr(job, "quarantined_at", None):
+        message = "执行已隔离，等待人工检查"
+    elif job.status == "retry" and details.get("deferred"):
+        message = "等待模型额度或渠道恢复"
+    elif job.status == "retry" and details.get("recovered"):
+        message = "执行中断，退避后自动恢复"
     return {
         "status": job.status,
-        "message": labels.get(job.status, job.status),
+        "message": message,
         "last_error": job.last_error,
     }
 
@@ -271,6 +279,8 @@ async def _load_pipeline_inputs(
                     ProcessingJob.stage,
                     ProcessingJob.status,
                     ProcessingJob.last_error,
+                    ProcessingJob.error_details,
+                    ProcessingJob.quarantined_at,
                 )
                 .where(
                     ProcessingJob.document_version_id.in_(unique_ids),

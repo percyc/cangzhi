@@ -188,6 +188,12 @@ class _StubTransport(httpx.MockTransport):
         return super().handle_request(request)
 
 
+def _patch_async_transport(monkeypatch, transport):
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr("apps.api.ai.provider.httpx.AsyncClient",
+                        lambda **kwargs: client_class(transport=transport, **kwargs))
+
+
 def _openai_provider(handler) -> tuple[OpenAICompatibleProvider, _StubTransport]:
     transport = _StubTransport(handler)
     provider = OpenAICompatibleProvider(
@@ -227,7 +233,7 @@ def test_openai_generate_json_accepts_common_content_variants(monkeypatch, conte
         )
 
     provider, transport = _openai_provider(handler)
-    monkeypatch.setattr("apps.api.ai.provider.httpx.post", transport)
+    _patch_async_transport(monkeypatch, transport)
     assert provider.generate_json(system="JSON", prompt="search") == {
         "action": "search",
         "query": "菜谱",
@@ -263,7 +269,7 @@ def test_openai_answer_question_parses_structured_response(monkeypatch):
         )
 
     provider, transport = _openai_provider(handler)
-    monkeypatch.setattr("apps.api.ai.provider.httpx.post", transport)
+    _patch_async_transport(monkeypatch, transport)
     result = provider.answer_question(
         question="什么是向量检索？",
         evidence=[
@@ -302,7 +308,7 @@ def test_openai_answer_question_rejects_fabricated_citation(monkeypatch):
         )
 
     provider, transport = _openai_provider(handler)
-    monkeypatch.setattr("apps.api.ai.provider.httpx.post", transport)
+    _patch_async_transport(monkeypatch, transport)
     with pytest.raises(AIProviderError, match="不存在的证据"):
         provider.answer_question(
             question="什么是向量检索？",
@@ -339,7 +345,7 @@ def test_openai_answer_question_rejects_sufficient_without_citation(monkeypatch)
         )
 
     provider, transport = _openai_provider(handler)
-    monkeypatch.setattr("apps.api.ai.provider.httpx.post", transport)
+    _patch_async_transport(monkeypatch, transport)
     with pytest.raises(AIProviderError, match="必须至少引用一条"):
         provider.answer_question(
             question="什么是向量检索？",
@@ -369,7 +375,7 @@ def test_openai_answer_question_keeps_insufficient_with_no_citation(monkeypatch)
         )
 
     provider, transport = _openai_provider(handler)
-    monkeypatch.setattr("apps.api.ai.provider.httpx.post", transport)
+    _patch_async_transport(monkeypatch, transport)
     result = provider.answer_question(
         question="什么是向量检索？",
         evidence=[{"id": 1, "title": "t", "heading_path": [], "snippet": "s"}],
@@ -413,7 +419,7 @@ def test_ollama_answer_question_parses_structured_response(monkeypatch):
         )
 
     provider, transport = _ollama_provider(handler)
-    monkeypatch.setattr("apps.api.ai.provider.httpx.post", transport)
+    _patch_async_transport(monkeypatch, transport)
     result = provider.answer_question(
         question="什么是向量检索？",
         evidence=[{"id": 1, "title": "t", "heading_path": [], "snippet": "s"}],
