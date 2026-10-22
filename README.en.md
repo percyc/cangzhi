@@ -59,7 +59,10 @@ boundaries.
 
 ## Version and development status
 
-- **The current delivery version is `v1.3.6`**, adding background WebDAV scans with
+- **The current delivery version is `v1.3.7`**, adding an administrator operations overview
+  with low-frequency capacity, knowledge and queue snapshots. Upgrade migration 0040 and
+  the API, Web and regular Worker together. See [monitoring boundaries](docs/OPERATIONS_OVERVIEW.md).
+  `v1.3.6` added background WebDAV scans with
   durable progress, cancellation and resume. Inventory is reconciled only after a complete scan.
   Upgrade migration 0039 and the API, Web and regular Worker together.
   `v1.3.5` fixed recursive scans and missing-file safeguards.
