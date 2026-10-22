@@ -20,6 +20,11 @@ def test_real_pg_aggregation_lock_timeout_and_retry(tmp_path):
     engine = create_engine(url)
     now = datetime.now(timezone.utc)
     try:
+        # This explicitly isolated fixture must be repeatable across hours and
+        # reruns; stale synthetic history is not a collector duplicate.
+        with engine.begin() as db:
+            for table in ("monitoring_history", "monitoring_metrics", "monitoring_snapshots"):
+                db.execute(text(f"DELETE FROM {table}"))
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = [pool.submit(collect_once, engine, str(tmp_path), now=now) for _ in range(2)]
             for future in results:
@@ -28,6 +33,10 @@ def test_real_pg_aggregation_lock_timeout_and_retry(tmp_path):
             assert db.query(MonitoringSnapshot).count() == 3
             assert db.query(MonitoringHistory).count() == 1
             assert all(row.error is None for row in db.query(MonitoringSnapshot))
+            assert isinstance(db.get(MonitoringSnapshot, 'queue').data['model_pools'], list)
+            assert db.get(MonitoringSnapshot, 'queue').data['quarantined'] >= 0
+            assert db.get(MonitoringSnapshot, 'queue').data['waiting_model'] >= 0
+            assert db.get(MonitoringSnapshot, 'queue').data['recoveries'] >= 0
             before_waiting = db.get(MonitoringSnapshot, 'queue').data['waiting']
             assert db.get(MonitoringSnapshot, 'capacity').data['database_bytes'] > 0
 

@@ -142,17 +142,6 @@ class EmbeddingJobOutcome:
 ClientFactory = Callable[..., httpx.Client]
 
 
-def _retry_after_seconds(headers) -> float | None:
-    raw = headers.get("Retry-After") if headers else None
-    if not raw:
-        return None
-    try:
-        value = float(raw)
-        return value if value > 0 else None
-    except (TypeError, ValueError):
-        return None
-
-
 async def _request_embedding_async(
     url: str,
     headers: dict,
@@ -173,12 +162,11 @@ async def _request_embedding_async(
         client = factory(timeout=timeout_seconds, trust_env=False)
         async with client:
             response = await channel.run(client.post(url, headers=headers, json=body))
-        if response.status_code == 429:
-            ra = _retry_after_seconds(response.headers)
-            admission.apply_cooldown(
+        if response.status_code >= 400:
+            admission.apply_response_cooldown(
                 admission.channel_pool_id(admission.EMBEDDING),
-                (ra or 60.0),
-                retry_after=ra,
+                response.status_code,
+                admission.parse_retry_after(response.headers),
             )
         return response
 
@@ -225,6 +213,8 @@ def _request_embedding(
         )
     except admission.AdmissionError:
         raise
+    except TimeoutError:
+        raise ValueError("Embedding 请求超时，请稍后再试")
     except httpx.HTTPError as exc:
         raise ValueError(
             f"无法连接 Embedding 服务：{type(exc).__name__}"

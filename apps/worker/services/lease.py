@@ -98,7 +98,7 @@ def worker_id() -> str:
 
     The raw hostname can be 63 chars, so we never embed it verbatim. A short
     process id plus a random salt keep two processes (even after PID reuse)
-    distinct while staying well inside the String(64) schema col====umn.
+    distinct while staying well inside the String(64) schema column.
     """
     global _worker_id
     with _worker_id_lock:
@@ -183,24 +183,27 @@ def require_supervised_supported(session: Session) -> None:
 def bounded_engine(url: str) -> Engine:
     """PostgreSQL engine with a per-operation deadline.
 
-    Every connection sets ``statement_timeout``, ``lock_timeout`` and
-    ``idle_in_transaction_session_timeout`` so a fence verification, heartbeat
-    refresh or an idle lease cannot block on a locked row (or an idle
-    transaction) forever. The timeouts are hardcoded from the clamped policy,
+    Every connection sets ``statement_timeout`` and ``lock_timeout`` so a
+    fence verification or heartbeat cannot block on a locked row forever.
+    Read-only transactions may wait for a model; their lifetime is bounded by
+    the supervisor instead of idle-in-transaction termination. The timeouts
+    come from the clamped policy,
     never left to a mis-typed environment, so a fence or heartbeat call that
     exceeds the budget fails fast instead of hanging the supervisor.
     """
     from sqlalchemy import create_engine
 
-    engine = create_engine(url, pool_pre_ping=True)
+    engine = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=0,
+                          pool_timeout=3, connect_args={"connect_timeout": 3})
     ms = max(int(lease_policy().db_timeout_ms), 100)
 
     def _set_timeouts(dbapi_conn, record):  # noqa: ANN001
         cursor = dbapi_conn.cursor()
         try:
             cursor.execute(f"SET statement_timeout = {ms}")
-            cursor.execute(f"SET lock_timeout = {ms}")
-            cursor.execute(f"SET idle_in_transaction_session_timeout = {ms}")
+            cursor.execute(f"SET lock_timeout = {min(ms, 1000)}")
+            # Existing stages may read metadata then wait for a model. Killing
+            # that read transaction would discard an otherwise useful response.
         finally:
             cursor.close()
 
@@ -236,6 +239,7 @@ class LeaseExpectation:
     current_version_id: int | None
     lease_until: datetime.datetime
     hard_deadline: datetime.datetime
+    profile_fingerprint: str | None = None
 
 
 def capture_expectation(session: Session, job: ProcessingJob) -> LeaseExpectation:
@@ -246,6 +250,11 @@ def capture_expectation(session: Session, job: ProcessingJob) -> LeaseExpectatio
     version = None
     if job.document_version_id is not None:
         version = session.get(DocumentVersion, job.document_version_id)
+    profile_fingerprint = None
+    if job.embedding_profile_id is not None:
+        from apps.api.models.embedding_profiles import EmbeddingProfile
+        profile_fingerprint = session.scalar(select(EmbeddingProfile.config_fingerprint).where(
+            EmbeddingProfile.id == job.embedding_profile_id))
     return LeaseExpectation(
         job_id=job.id,
         attempt_id=job.attempt_id or "",
@@ -258,80 +267,65 @@ def capture_expectation(session: Session, job: ProcessingJob) -> LeaseExpectatio
         current_version_id=getattr(doc, "current_version_id", None),
         lease_until=_aware_utc(job.lease_until),
         hard_deadline=_aware_utc(job.hard_deadline),
+        profile_fingerprint=profile_fingerprint,
     )
 
 
-def verify_against(
-    session: Session, expectation: LeaseExpectation, *, db_now: datetime.datetime
-) -> None:
-    """Fencing proof: re-assert the live state still matches the expectation.
-
-    Uses ``SELECT ... FOR UPDATE`` on the job row so the check sees the latest
-    committed row version even within an older MVCC snapshot, and is short —
-    it fires only at DML/commit moments, never across an external model wait.
-    Document/version/hash are re-read with fresh SQL (``populate_existing``),
-    never ``session.get``, so the identity map cannot hand back a cached old
-    target. Raises :class:`StaleAttemptError` on any mismatch. ``db_now`` must
-    come from :func:`db_utc_now` (``clock_timestamp()``) so lease/deadline
-    comparisons use the DB clock at the actual fence moment.
-    """
-    row = session.execute(
-        select(ProcessingJob)
-        .where(ProcessingJob.id == expectation.job_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    ).scalars().first()
-    if row is None:
-        raise StaleAttemptError(f"job {expectation.job_id} no longer exists")
-    held = (
-        row.attempt_id == expectation.attempt_id
-        and row.worker_id == expectation.worker_id
-        and row.status == "processing"
-        and row.config_version == expectation.config_version
-        and row.document_version_id == expectation.document_version_id
-        and row.embedding_profile_id == expectation.embedding_profile_id
-    )
-    if not held:
-        raise StaleAttemptError(
-            f"attempt {expectation.attempt_id} lost ownership of job {expectation.job_id}"
-        )
-    lease_deadline = _aware_utc(row.lease_until)
-    hard_deadline = _aware_utc(row.hard_deadline)
-    if lease_deadline is None or hard_deadline is None:
-        raise StaleAttemptError(f"job {expectation.job_id} lost its lease/deadline")
-    if db_now >= lease_deadline:
-        raise StaleAttemptError(f"lease for job {expectation.job_id} expired")
-    if db_now >= hard_deadline:
-        raise StaleAttemptError(f"hard deadline for job {expectation.job_id} passed")
-    # Live document/version target must be unchanged — read fresh, not from the
-    # ORM identity map, which could return a stale cached row.
-    live_doc = None
-    if row.document_id is not None:
-        live_doc = session.execute(
-            select(Document)
-            .where(Document.id == row.document_id)
-            .execution_options(populate_existing=True)
-        ).scalars().first()
-    if expectation.current_version_id is not None and (
-        live_doc is None or live_doc.current_version_id != expectation.current_version_id
+def _verify_connection(conn, expectation, *, lock_source=False, lock_job=False,
+                       check_source=True, allow_terminal=False, protected_commit=False):
+    """Core reads only: never refresh/flush pending ORM objects."""
+    table = ProcessingJob.__table__
+    stmt = select(table).where(table.c.id == expectation.job_id)
+    row = conn.execute(stmt).mappings().first()
+    # Match the application's document-before-job lock order. This only runs
+    # at first write, never around a model request or source download.
+    if row is not None and lock_source:
+        conn.execute(select(Document.__table__.c.id).where(
+            Document.__table__.c.id == row.document_id).with_for_update()).first()
+    if lock_job:
+        row = conn.execute(stmt.with_for_update()).mappings().first()
+    if row is None or (
+        row.attempt_id != expectation.attempt_id
+        or row.worker_id != expectation.worker_id
+        or row.config_version != expectation.config_version
+        or row.document_version_id != expectation.document_version_id
+        or row.embedding_profile_id != expectation.embedding_profile_id
+        or row.quarantined_at is not None
+        or row.status not in ({"processing", "completed", "retry", "failed"} if allow_terminal else {expectation.status})
     ):
-        raise StaleAttemptError(
-            f"document {row.document_id} changed target version; refusing stale publish"
-        )
-    live_version = None
-    if row.document_version_id is not None:
-        live_version = session.execute(
-            select(DocumentVersion)
-            .where(DocumentVersion.id == row.document_version_id)
-            .execution_options(populate_existing=True)
-        ).scalars().first()
-    live_hash = getattr(live_version, "content_hash", None)
-    if expectation.content_hash is not None and live_hash != expectation.content_hash:
-        raise StaleAttemptError(
-            f"version {row.document_version_id} content_hash changed; refusing stale publish"
-        )
+        raise StaleAttemptError("task ownership changed")
+    now = (conn.execute(text("SELECT clock_timestamp()")).scalar()
+           if conn.dialect.name == "postgresql" else utc_now())
+    deadlines = (row.hard_deadline,) if protected_commit else (row.lease_until, row.hard_deadline)
+    if any(value is None or _aware_utc(value) <= now for value in deadlines):
+        raise StaleAttemptError("task lease or deadline expired")
+    doc_table, version_table = Document.__table__, DocumentVersion.__table__
+    stmt = select(doc_table.c.current_version_id, doc_table.c.is_deleted).where(
+        doc_table.c.id == row.document_id)
+    if lock_source:
+        stmt = stmt.with_for_update()
+    doc = conn.execute(stmt).first()
+    source_hash = conn.execute(select(version_table.c.content_hash).where(
+        version_table.c.id == row.document_version_id)).scalar()
+    if doc is None or doc.is_deleted:
+        raise StaleAttemptError("source deleted")
+    if check_source and (doc.current_version_id != expectation.current_version_id
+                         or source_hash != expectation.content_hash):
+        raise StaleAttemptError("source changed")
+    if expectation.profile_fingerprint is not None:
+        from apps.api.models.embedding_profiles import EmbeddingProfile
+        profile = EmbeddingProfile.__table__
+        stmt = select(profile.c.config_fingerprint).where(profile.c.id == expectation.embedding_profile_id)
+        if lock_job:
+            stmt = stmt.with_for_update()
+        if conn.execute(stmt).scalar() != expectation.profile_fingerprint:
+            raise StaleAttemptError("embedding profile changed")
+    return doc.current_version_id, source_hash, row.status
 
 
+def verify_against(session: Session, expectation: LeaseExpectation, *, db_now=None) -> None:
+    with session.no_autoflush:
+        _verify_connection(session.connection(), expectation)
 def refresh_lease(
     session: Session, expectation: LeaseExpectation, *, db_now: datetime.datetime
 ) -> int:
@@ -378,6 +372,8 @@ def is_recoverable_claim(job: ProcessingJob, now: datetime.datetime) -> bool:
     if job is None or job.status != "processing":
         return False
     if job.lease_until is None or job.attempt_id is None or job.worker_id is None:
+        return False
+    if job.quarantined_at is not None:
         return False
     return _aware_utc(job.lease_until) < now
 
@@ -428,8 +424,8 @@ def acquire_document_claim_lock(session: Session, document_ids) -> None:
     ordered = sorted({int(doc_id) for doc_id in document_ids if doc_id is not None})
     for doc_id in ordered:
         session.execute(
-            text("SELECT pg_advisory_xact_lock(:key)"),
-            {"key": _DOC_CLAIM_LOCK_NAMESPACE + doc_id},
+            text("SELECT pg_advisory_xact_lock(:namespace, :document)"),
+            {"namespace": _DOC_CLAIM_LOCK_NAMESPACE, "document": doc_id},
         )
 
 
@@ -441,24 +437,20 @@ def busy_document_filter(doc_id_column):
     job-scoped claim). It serializes execution across distinct job rows for the
     same document (and therefore across executors, including maintenance /
     rechunk): a new claim for any stage is disallowed while the document has
-    another ``processing`` job whose lease is still valid (or pre-migration,
-    never auto-reclaimed but also serializing). The inner table is aliased so
+    another ``processing`` job, even if its lease expired: that job must first
+    go through owned recovery. The inner table is aliased so
     it cannot self-correlate against the outer job set.
 
     With CPU concurrency 1 this is a no-op in today's deployment, but it makes
     the same guarantee hold if a second executor is ever introduced.
     """
-    from sqlalchemy import alias, exists, or_
+    from sqlalchemy import exists
 
     busy = ProcessingJob.__table__.alias("pj_busy")
     return ~exists(
         select(busy.c.id).where(
             busy.c.document_id == doc_id_column,
             busy.c.status == "processing",
-            or_(
-                busy.c.lease_until.is_(None),
-                busy.c.lease_until > text("(now() AT TIME ZONE 'UTC')"),
-            ),
         )
     )
 
@@ -486,23 +478,14 @@ def document_has_inflight(
 ) -> bool:
     """True if the document already has an in-flight (processing) job.
 
-    An in-flight job is ``processing`` with a lease that is NULL (pre-migration
-    orphan, never auto-reclaimed but still serializing) or not yet expired
-    under ``clock_timestamp()``. Used by the maintenance / rechunk executors
-    after taking ``acquire_document_claim_lock`` to make the same serialization
-    guarantee the ordinary Worker's two-step claim provides.
+    Expired or missing leases still block a different job until owned recovery
+    or manual inspection. Maintenance and ordinary claims share this rule.
     """
-    from sqlalchemy import or_
-
     stmt = (
         select(ProcessingJob.id)
         .where(
             ProcessingJob.document_id == document_id,
             ProcessingJob.status == "processing",
-            or_(
-                ProcessingJob.lease_until.is_(None),
-                ProcessingJob.lease_until > text("clock_timestamp()"),
-            ),
         )
         .limit(1)
     )
@@ -521,7 +504,10 @@ def claim_one_guarded(session: Session, job: ProcessingJob) -> bool:
     """
     if not supervised_claims_active(session):
         return True
-    acquire_document_claim_lock(session, [job.document_id])
+    if not try_document_execution_lock(session.connection(), job.document_id, transaction=True):
+        return False
+    if job.quarantined_at is not None:
+        return False
     if document_has_inflight(session, job.document_id, exclude_job_id=job.id):
         return False
     return True
@@ -566,64 +552,87 @@ _DML_KEYWORDS = {"insert", "update", "delete", "merge"}
 
 
 class LeaseFence:
-    """Write fence bound to an **isolated** executor engine.
+    """Fence all child DB engines, including async database-refresh sessions.
 
-    Registered on an engine that only the fencing session uses (the child's
-    own engine), never a global engine that other threads share. Guards every
-    DML — ORM flush via ``before_commit`` and bulk/raw statements via
-    ``before_execute`` — by re-asserting :func:`verify_against`. The compare
-    uses a short ``FOR UPDATE`` read with ``statement_timeout``/``lock_timeout``
-    applied by :func:`bounded_engine`, so it cannot hang on a competing row
-    lock across an external-model wait.
+    First write locks the source document (not the job heartbeat row). Commit
+    takes the job row briefly and validates the token/deadline. Core reads avoid
+    ORM autoflush and never overwrite pending values. Self-authored hash/version
+    changes (URL extraction/database refresh) advance the expectation only at
+    commit, while the source lock excludes external updates.
     """
 
-    def __init__(self, session: Session, expectation: LeaseExpectation) -> None:
-        self.session = session
-        self.expectation = expectation
-        self._installed = False
+    def __init__(self, session, expectation, *, all_engines=False):
+        self.session, self.expectation = session, expectation
+        self.target = Engine if all_engines else session.get_bind()
         self._in_verify = False
+        self._protected = set()
 
-    def _assert_holds(self) -> None:
+    def _check(self, conn, *, first=False, commit=False):
         if self._in_verify:
             return
         self._in_verify = True
         try:
-            verify_against(self.session, self.expectation, db_now=db_utc_now(self.session))
+            return _verify_connection(
+                conn, self.expectation, lock_source=first, lock_job=first or commit,
+                check_source=first, allow_terminal=commit, protected_commit=commit)
         finally:
             self._in_verify = False
 
-    def _before_execute(self, conn, statement, multiparams, params, execution_options):  # noqa: ANN001
-        if _is_dml(statement):
-            self._assert_holds()
+    def _before_execute(self, conn, statement, multiparams, params, execution_options):
+        if self._in_verify or not _is_dml(statement):
+            return statement, multiparams, params
+        # Admission uses an independent short transaction, not task data.
+        table_name = getattr(getattr(statement, "table", None), "name", "")
+        raw = str(getattr(statement, "text", ""))
+        if table_name.startswith("model_admission_") or "model_admission_" in raw:
+            return statement, multiparams, params
+        if conn not in self._protected:
+            self._check(conn, first=True)
+            self._protected.add(conn)
         return statement, multiparams, params
 
-    def _before_commit(self, session) -> None:  # noqa: ANN001
-        self._assert_holds()
+    def _commit(self, conn):
+        if conn in self._protected:
+            target = self._check(conn, commit=True)
+            from dataclasses import replace
+            self.expectation = replace(self.expectation, current_version_id=target[0],
+                                       content_hash=target[1], status=target[2])
+            if conn.dialect.name == "postgresql":
+                # Publication owns the row lock, so heartbeats may wait. Its
+                # finite hard deadline still applies; renew before releasing
+                # the atomic publication lock, not after a stale handoff.
+                conn.execute(text("UPDATE processing_jobs SET heartbeat_at=clock_timestamp(), "
+                    "lease_until=LEAST(hard_deadline,clock_timestamp()+(:seconds * interval '1 second')) "
+                    "WHERE id=:id AND attempt_id=:attempt"),
+                    {"id": self.expectation.job_id, "attempt": self.expectation.attempt_id,
+                     "seconds": lease_policy().lease_seconds})
+            self._protected.discard(conn)
 
-    def __enter__(self) -> "LeaseFence":
-        bind = self.session.get_bind()
-        event.listen(bind, "before_execute", self._before_execute, retval=True)
-        # ``before_commit`` is a Session event, not a Connection event: listen
-        # on the session *instance*. The ``before_execute`` hook guards bulk and
-        # raw DML; this session-level hook is the final, unconditional fence for
-        # ORM flush commits.
-        event.listen(self.session, "before_commit", self._before_commit)
-        self._installed = True
+    def _rollback(self, conn, *args):
+        self._protected.discard(conn)
+
+    def __enter__(self):
+        event.listen(self.target, "before_execute", self._before_execute, retval=True)
+        event.listen(self.target, "commit", self._commit)
+        event.listen(self.target, "rollback", self._rollback)
+        event.listen(self.target, "rollback_savepoint", self._rollback)
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if not self._installed:
-            return
-        bind = self.session.get_bind()
-        try:
-            event.remove(bind, "before_execute", self._before_execute)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "lease_fence_remove_execute_failed", job_id=self.expectation.job_id
-            )
-        try:
-            event.remove(self.session, "before_commit", self._before_commit)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "lease_fence_remove_commit_failed", job_id=self.expectation.job_id
-            )
+    def __exit__(self, *args):
+        event.remove(self.target, "before_execute", self._before_execute)
+        event.remove(self.target, "commit", self._commit)
+        event.remove(self.target, "rollback", self._rollback)
+        event.remove(self.target, "rollback_savepoint", self._rollback)
+        self._protected.clear()
+
+
+def try_document_execution_lock(connection, document_id: int, *, transaction=False) -> bool:
+    """Same namespace for execution and recovery; nonblocking, no deadlock."""
+    fn = "pg_try_advisory_xact_lock" if transaction else "pg_try_advisory_lock"
+    return bool(connection.execute(text(f"SELECT {fn}(:namespace, :document)"),
+        {"namespace": _DOC_CLAIM_LOCK_NAMESPACE, "document": int(document_id)}).scalar())
+
+
+def release_document_execution_lock(connection, document_id: int) -> None:
+    connection.execute(text("SELECT pg_advisory_unlock(:namespace, :document)"),
+        {"namespace": _DOC_CLAIM_LOCK_NAMESPACE, "document": int(document_id)})

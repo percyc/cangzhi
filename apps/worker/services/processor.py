@@ -2186,6 +2186,7 @@ def process_single_job(session: Session, job_id: int) -> bool:
     supervised path is disabled by default until the isolated PostgreSQL
     reliability integration tests pass.
     """
+    lease.require_supervised_supported(session)
     if lease.supervised_claims_active(session):
         from apps.worker.services.task_execution import run_task_with_supervisor
         return run_task_with_supervisor(session, job_id)
@@ -2206,15 +2207,8 @@ def _supervised_source_ok(session: Session, job: ProcessingJob) -> bool:
     """
     if job is None:
         return False
-    stage = _normalize_stage(job.stage)
-    if stage in ("understanding", "knowledge_enhancement"):
-        # These write to a versioned side table / read-only exploration and
-        # their own idempotency already guards concurrent replacement.
-        return True
-    if stage == "embedding":
-        return True
     document = session.get(Document, job.document_id)
-    if document is None:
+    if document is None or document.is_deleted:
         return False
     return document.current_version_id == job.document_version_id
 
@@ -3203,11 +3197,10 @@ def _claim_jobs(
     1. candidate discovery (``FOR UPDATE SKIP LOCKED``) picks due rows without
        a busy filter — a plain ``NOT EXISTS`` is *not* atomic by itself;
     2. before committing, the parent takes a per-document advisory lock
-       (:func:`apps.worker.services.lease.acquire_document_claim_lock`) and
+       (:func:`apps.worker.services.lease.try_document_execution_lock`) and
        re-checks that no in-flight job exists for each candidate's document.
-       With the advisory lock held, a second claimer of the same document waits
-       then, on its re-check, sees the first's committed ``processing`` row and
-       skips — so two distinct rows for the same document never run together
+       A competing claimer skips a held advisory lock without blocking, then
+       rechecks the committed processing row — so distinct rows never run together
        across ordinary, maintenance or rechunk executors.
 
     ``conditions`` must NOT include a busy filter; it is applied in pass 2 only
@@ -3234,40 +3227,47 @@ def _claim_jobs(
         session.commit()
         return jobs
 
-    # Supervised: two-step with document advisory locks.
-    candidates = list(
-        session.scalars(
-            select(ProcessingJob)
-            .where(*conditions)
-            .order_by(*order)
-            .with_for_update(skip_locked=True)
-            .limit(limit)
-        ).all()
-    )
-    if not candidates:
-        session.commit()
-        return []
-    lease.acquire_document_claim_lock(
-        session, [job.document_id for job in candidates]
-    )
-    ids = [job.id for job in candidates]
-    jobs = list(
-        session.scalars(
-            select(ProcessingJob)
-            .where(ProcessingJob.id.in_(ids), *conditions)
-            .where(lease.busy_document_filter(ProcessingJob.document_id))
-            .order_by(*order)
-            .with_for_update(skip_locked=True)
-        ).all()
-    )
-    for job in jobs:
-        job.status = "processing"
-        job.started_at = now
-        job.finished_at = None
+    # One CPU executor: never pre-claim a batch. A live child holds this
+    # document's session lock, so an expired lease alone cannot authorize replay.
+    # Exclude known-busy documents at discovery too: their first 32 queued
+    # rows must not starve unrelated documents. The lock + recheck below still
+    # provides the atomic guarantee (this prefilter alone cannot).
+    from sqlalchemy import exists
+    busy = ProcessingJob.__table__.alias("other_processing")
+    available_document = ~exists(select(busy.c.id).where(
+        busy.c.document_id == ProcessingJob.document_id,
+        busy.c.id != ProcessingJob.id,
+        busy.c.status == "processing",
+    ))
+    candidates = list(session.scalars(
+        select(ProcessingJob).where(*conditions, ProcessingJob.quarantined_at.is_(None))
+        .where(available_document)
+        .order_by(*order).with_for_update(skip_locked=True).limit(32)).all())
+    for job in candidates:
+        if not lease.try_document_execution_lock(session.connection(), job.document_id, transaction=True):
+            continue
+        other = session.scalar(select(ProcessingJob.id).where(
+            ProcessingJob.document_id == job.document_id, ProcessingJob.id != job.id,
+            ProcessingJob.status == "processing").limit(1))
+        if other is not None:
+            continue
+        now = lease.db_utc_now(session)
+        if job.status == "processing":
+            if not lease.is_recoverable_claim(job, now):
+                continue
+            job.recovery_count = (job.recovery_count or 0) + 1
+            if job.stage == "knowledge_enhancement" or job.recovery_count >= lease.lease_policy().max_attempts:
+                job.status, job.finished_at = "failed", now
+                job.last_error = "执行已中断，达到恢复上限或涉及付费增强，请人工检查"
+                job.error_details = {"reason": "recovery_exhausted", "recovered": True}
+                session.commit()
+                return []
+        job.status, job.started_at, job.finished_at = "processing", now, None
         lease.stamp_lease(session, job, now)
-        session.add(job)
+        session.commit()
+        return [job]
     session.commit()
-    return jobs
+    return []
 
 
 def _claim_one_unknown_stage_job(session: Session) -> int | None:
@@ -3284,16 +3284,16 @@ def _claim_one_unknown_stage_job(session: Session) -> int | None:
     """
     supervised = lease.supervised_claims_active(session)
     now = lease.db_utc_now(session) if supervised else utc_now()
+    due = ProcessingJob.status.in_(("created", "retry"))
+    if supervised:
+        due = due | (
+            (ProcessingJob.status == "processing")
+            & ProcessingJob.lease_until.isnot(None)
+            & ProcessingJob.attempt_id.isnot(None)
+            & (ProcessingJob.lease_until < now)
+        )
     conditions = [
-        (
-            ProcessingJob.status.in_(("created", "retry"))
-            | (
-                (ProcessingJob.status == "processing")
-                & (ProcessingJob.lease_until.isnot(None))
-                & (ProcessingJob.attempt_id.isnot(None))
-                & (ProcessingJob.lease_until < now)
-            )
-        ),
+        due,
         (
             ProcessingJob.next_retry_at.is_(None)
             | (ProcessingJob.next_retry_at <= now)
@@ -3319,7 +3319,7 @@ def _run_claimed_job(session: Session, job_id: int) -> int:
     admission.set_process_role("worker")
     try:
         return int(process_single_job(session, job_id))
-    except admission.AdmissionError:
+    except admission.AdmissionError as exc:
         # Model admission Busy/Unavailable/Cooldown/Deadline means no request
         # was actually sent. Defer the job WITHOUT charging retry_count or
         # marking it failed/inbox: a full background queue is not a task failure.
@@ -3327,15 +3327,19 @@ def _run_claimed_job(session: Session, job_id: int) -> int:
         job = session.get(ProcessingJob, job_id)
         if job is not None:
             job.status = "retry"
-            job.next_retry_at = utc_now() + datetime.timedelta(
-                seconds=ADMISSION_BUSY_DEFER_SECONDS
-            )
+            cooldown = getattr(exc, "retry_after", None)
+            delay = max(ADMISSION_BUSY_DEFER_SECONDS, min(float(cooldown or 0), 3600))
+            job.next_retry_at = utc_now() + datetime.timedelta(seconds=delay)
+            job.finished_at = utc_now()
             job.last_error = "模型额度繁忙，任务已推迟重试"
             job.error_details = {"deferred": True, "reason": "model_admission_busy"}
             session.add(job)
             session.commit()
         logger.warning("model_admission_busy_deferred", job_id=job_id)
         return 0
+    except lease.StaleAttemptError:
+        session.rollback()
+        raise
     except Exception as exc:
         session.rollback()
         job = session.get(ProcessingJob, job_id)
@@ -3395,6 +3399,7 @@ def _run_claimed_job(session: Session, job_id: int) -> int:
 def process_pending_jobs(
     session: Session,
     max_jobs: int | None = BATCH_SIZE,
+    *, should_stop=None,
 ) -> int:
     """Run one stage-fair pass over due processing jobs.
 
@@ -3428,6 +3433,8 @@ def process_pending_jobs(
     cursor_key = "cangzhi_stage_cursor"
     cursor = session.info.get(cursor_key, 0) % slot_count
     while attempted < budget and empty_slots < slot_count:
+        if should_stop is not None and should_stop():
+            break
         if cursor == len(STAGE_CYCLE):
             job_id = _claim_one_unknown_stage_job(session)
         else:
@@ -3456,4 +3463,10 @@ def run_understanding_for_version(
         session, document_id=document_id, version_id=version_id
     )
     session.commit()
+    if lease.supervised_claims_active(session):
+        claimed = _claim_jobs(session, [ProcessingJob.id == job.id,
+            ProcessingJob.status.in_(("created", "retry"))], 1,
+            supervised=True, now=lease.db_utc_now(session))
+        if not claimed:
+            return False
     return process_single_job(session, job.id)

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+from . import model_admission as admission
+
 ALLOWED_MODULES: frozenset[str] = frozenset({"chapter", "graph"})
 ALLOWED_RESPONSE_KEYS: frozenset[str] = frozenset(
     {"summary", "entities", "relations", "events"}
@@ -269,6 +271,10 @@ def analyze_window(provider, segments, modules) -> dict:
 
     try:
         response = provider.generate_json(system=SYSTEM_PROMPT, prompt=prompt)
+    except admission.AdmissionError:
+        # No request was sent: a busy/cooldown queue must not be reported as a
+        # model failure and must not consume/refund the enhancement budget.
+        raise
     except Exception:
         # Never store or return the upstream exception; it may contain
         # credentials, request bodies or model responses.

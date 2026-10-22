@@ -216,27 +216,38 @@ def _run_and_commit(session, job):
     return outcome
 
 
-class _MockSyncClient:
+class _MockAsyncClient:
     def __init__(self, transport: httpx.MockTransport, **kwargs):
         self._transport = transport
         self._kwargs = kwargs
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *args):
+    async def __aexit__(self, *args):
         return None
 
-    def post(self, url, **kwargs):
+    async def post(self, url, **kwargs):
         request = httpx.Request("POST", str(url), **kwargs)
         return self._transport.handle_request(request)
 
 
 def _patch_transport(monkeypatch, transport: httpx.MockTransport):
     monkeypatch.setattr(
-        "apps.worker.services.embedding_processor.httpx.Client",
-        lambda *args, **kwargs: _MockSyncClient(transport, **kwargs),
+        "apps.worker.services.embedding_processor.httpx.AsyncClient",
+        lambda *args, **kwargs: _MockAsyncClient(transport, **kwargs),
     )
+
+
+def _reset_admission_backend():
+    """Swap in a fresh in-memory admission backend so independent failure
+    scenarios in a single test each start from a clean pool (no leftover
+    429/5xx cooldown lingering from a previous iteration). Production
+    cooldown behaviour is untouched; this only isolates test scenarios."""
+    from apps.api.services import model_admission as _admission
+
+    _admission.configure_admission_backend(_admission.InMemoryAdmissionBackend())
+    _admission.set_process_role("foreground")
 
 
 def _vector_payload(dim: int, seed: int = 1) -> dict:
@@ -591,8 +602,13 @@ class TestProcessEmbeddingJob:
             monkeypatch,
             httpx.MockTransport(lambda request: httpx.Response(500, text="boom")),
         )
-        # Drain retries.
+        # Drain retries. Each iteration is an independent upstream 500
+        # scenario, so reset the admission backend first: a real 500 applies
+        # a production cooldown, and without the reset the second iteration
+        # would be refused at the admission gate (a different, defer-style
+        # event) instead of exercising another upstream failure.
         for _ in range(4):
+            _reset_admission_backend()
             session.refresh(job)
             job.retry_count = 0
             job.status = "processing"

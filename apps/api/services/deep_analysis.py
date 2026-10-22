@@ -62,6 +62,7 @@ from .dataset_execution import (
     list_visible_datasets,
 )
 from .knowledge_read import KnowledgeReadError, read_current_chunk
+from . import model_admission as admission
 from .qa import (
     MAX_QUESTION_LENGTH,
     AskError,
@@ -301,6 +302,7 @@ class DeepAnalysisService:
                     ValidationError,
                     TypeError,
                     ValueError,
+                    admission.AdmissionError,
                 ) as exc:
                     logger.warning(
                         "deep agent decision failed iteration=%s error=%s",
@@ -357,6 +359,7 @@ class DeepAnalysisService:
                         ValidationError,
                         TypeError,
                         ValueError,
+                        admission.AdmissionError,
                     ) as exc:
                         logger.warning("deep evidence audit failed error=%s", str(exc))
                         break
@@ -634,7 +637,7 @@ class DeepAnalysisService:
                     evidence=[item.to_provider_dict() for item in evidence],
                 )
                 break
-            except (AIProviderError, ValueError) as exc:
+            except (AIProviderError, ValueError, admission.AdmissionError) as exc:
                 logger.warning(
                     "deep answer synthesis failed attempt=%s error=%s",
                     _attempt + 1,
@@ -644,7 +647,7 @@ class DeepAnalysisService:
         if answer is None:
             try:
                 answer = await self._repair_answer(question, evidence)
-            except (AIProviderError, ValidationError, TypeError, ValueError) as exc:
+            except (AIProviderError, ValidationError, TypeError, ValueError, admission.AdmissionError) as exc:
                 logger.warning("deep answer repair failed error=%s", str(exc))
                 raise AskError(
                     "provider_failed", "模型暂时不可用，请稍后再试"
@@ -817,7 +820,7 @@ class DeepAnalysisService:
                     prompt=serialized_prompt,
                 )
                 return AgentDecision.model_validate(payload)
-            except (AIProviderError, ValidationError, TypeError, ValueError) as exc:
+            except (AIProviderError, ValidationError, TypeError, ValueError, admission.AdmissionError) as exc:
                 last_error = exc
                 logger.warning(
                     "deep agent decision retry attempt=%s error=%s",

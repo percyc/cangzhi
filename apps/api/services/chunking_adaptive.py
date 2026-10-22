@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict
 
 from ..parsers.base import Block, StructuredContent
+from . import model_admission as admission
 from .chunker import (
     CHILD_HARD_MAX_CHARS, CHILD_OVERLAP_CHARS, CHILD_TARGET_MAX_CHARS,
     CHILD_TARGET_MIN_CHARS, build_chunk_specs,
@@ -94,6 +95,10 @@ def build_adaptive_candidate(
             try:
                 response = provider.generate_json(system=SYSTEM, prompt=json.dumps({"blocks": request}, ensure_ascii=False))
                 ends = _validate_ends(response, start, stop, blocks)
+            except admission.AdmissionError:
+                # No request was sent; a busy/cooldown queue is not a window
+                # failure. Let the supervisor defer the whole job.
+                raise
             except Exception:
                 failed += 1  # Never persist provider exception bodies or credentials.
                 continue

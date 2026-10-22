@@ -249,17 +249,6 @@ def _coerce_payload(payload: Any) -> dict:
     return payload
 
 
-def _retry_after_seconds(response: httpx.Response) -> float | None:
-    raw = response.headers.get("Retry-After")
-    if not raw:
-        return None
-    try:
-        value = float(raw)
-        return value if value > 0 else None
-    except (TypeError, ValueError):
-        return None
-
-
 async def _post_chat_async(
     url: str,
     body: dict,
@@ -280,12 +269,11 @@ async def _post_chat_async(
             admission.CHAT, hard_lifetime_seconds=timeout
         ) as channel:
             response = await channel.run(worker())
-            if response.status_code == 429:
-                ra = _retry_after_seconds(response)
-                admission.apply_cooldown(
+            if response.status_code >= 400:
+                admission.apply_response_cooldown(
                     admission.channel_pool_id(admission.CHAT),
-                    (ra or 60.0),
-                    retry_after=ra,
+                    response.status_code,
+                    admission.parse_retry_after(response.headers),
                 )
             return response
 
@@ -312,6 +300,11 @@ def _post_chat(
         )
     except admission.AdmissionError:
         raise
+    except TimeoutError as exc:
+        # The absolute hard deadline (or an httpx timeout) expired while the
+        # request was in flight. Report truthfully as a timeout, never as an
+        # unhandled 500. The slot was already released inside the transport.
+        raise AIProviderError("调用模型超时：模型响应未在期限内返回") from exc
     except httpx.HTTPError as exc:
         raise AIProviderError(f"调用模型失败：{type(exc).__name__}") from None
 

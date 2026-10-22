@@ -6,9 +6,14 @@
 
 更新时间：2026-10-23
 
-本轮进行中：Codex（OpenCode协作），`codex/CZ-Q09-reliability-complete`。
-维护者明确授权完成模型准入与任务恢复、测试后合并部署推送；修复草案阻断项，
-不恢复历史失败任务。尚未通过验收，不将开发能力描述为已上线。
+本轮进行中：Codex（OpenCode ark/M3协作），`codex/CZ-Q09-reliability-complete`。
+维护者明确授权完成模型准入与任务恢复、测试后合并部署推送；草案阻断项已修复，
+准备v1.4.0发布验证。API全量1474通过/6条件跳过，Worker303通过/33条件跳过，
+另有父进程死亡/数据库失联2项及设置/问答101项通过。真实PG所有权10项、模型准入
+10项、实际监督子进程9项通过；2000个无模型小任务完整监督耗时133.923秒，0失败，
+不等于模型吞吐承诺。Web138项、lint、26页构建和合成桌面/手机监控页通过。
+旧Worker已正常退出且无processing遗留，历史failed11项未重置；准备联合备份、
+迁移回退复验及干净镜像构建。尚未记录为线上v1.4.0，部署结果另行追加。
 
 本机最新部署：v1.3.9，运行源码`3598148`，Codex（OpenCode协作），
 分支`codex/CZ-S04-webdav-version-original`。修复WebDAV PDF固定版本预览误报404；
@@ -18,8 +23,8 @@ API/Web/普通Worker版本一致、dirty=false，数据库保持0041且未重启
 联合备份`backups/cangzhi-20261022-170914`已校验，保留rollback-v1.3.9镜像。
 旧Worker停止宽限期耗尽导致一份在途大PDF被中断；确认旧进程退出、原件校验完整后，
 仅恢复该任务，新Worker已接手；未重置历史失败11项或重处理1135。详情见DEVLOG。
-第二、三批原型已单独保存在`codex/CZ-Q09-admission-recovery-draft`（69b9285），
-有未通过回归与发布阻断项，禁止部署或合入正式分支；生产仍为0041。
+第二、三批旧原型保存在`codex/CZ-Q09-admission-recovery-draft`（69b9285），
+该旧分支本身不可部署；本轮修复在reliability-complete中，不改写原草案历史。
 
 此前本机部署：v1.3.8，运行源码`5c2edc2`，WebDAV目录选择导入与指标级统计恢复。
 负责人Codex（OpenCode协作），按维护者本轮明确授权合并发布；迁移0041完成，

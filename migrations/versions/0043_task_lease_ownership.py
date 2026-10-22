@@ -12,16 +12,16 @@ Ownership semantics (see ADR-035 for the exact limits):
   ``lease_until`` / ``hard_deadline`` bound the executor lifetime;
   ``heartbeat_at`` is refreshed by the holder while live;
   ``worker_id`` identifies the executor process;
-  ``attempt_count`` is the bounded recovery counter (kept separate from the
+  ``recovery_count`` is the bounded recovery counter (kept separate from the
   application ``retry_count`` so a crash-recovery attempt is not silently
   charged to a model/parse retry budget).
 * A ``processing`` row whose ``lease_until`` is NULL is a *historical orphan*
   created before this migration. It is intentionally never taken over: there
   is no fencing token proving the old executor stopped.
 
-This migration depends on 0042 (model admission). It is part of the shared
-processing schema and is coordinated with the parent session; it is not
-applied against a live instance outside an isolated validation container.
+``attempt_count`` counts all claims, including deferred model-admission work.
+This migration depends on 0042 (model admission). Stop old executors before
+production migration; historical rows remain unowned until explicitly queued.
 """
 from alembic import op
 import sqlalchemy as sa
@@ -33,6 +33,8 @@ branch_labels = depends_on = None
 
 
 def upgrade():
+    op.add_column("processing_jobs", sa.Column("quarantined_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column("processing_jobs", sa.Column("recovery_count", sa.Integer(), nullable=False, server_default="0"))
     op.add_column(
         "processing_jobs",
         sa.Column("worker_id", sa.String(64), nullable=True),
@@ -75,6 +77,8 @@ def upgrade():
 
 
 def downgrade():
+    op.drop_column("processing_jobs", "recovery_count")
+    op.drop_column("processing_jobs", "quarantined_at")
     op.drop_index("ix_processing_jobs_attempt_id", table_name="processing_jobs")
     op.drop_index("ix_processing_jobs_lease_recovery", table_name="processing_jobs")
     op.drop_column("processing_jobs", "attempt_count")

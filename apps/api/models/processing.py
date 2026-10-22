@@ -83,3 +83,4 @@ class ProcessingJob(BaseModel):
     # expired lease is *not* an exit proof; without this, the unconfirmed job
     # would be reclaimed while its old process may still run (double execution).
     quarantined_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    recovery_count = Column(Integer, nullable=False, default=0, server_default=text("0"))

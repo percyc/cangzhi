@@ -40,15 +40,9 @@ class Settings(BaseSettings):
     # --- ADR-035 task ownership / lease / recovery.
     # ``task_execution_enabled`` gates the supervised execution path (unique
     # attempt, finite lease + heartbeat, hard subprocess deadline, write
-    # fencing, bounded crash recovery). It defaults to False: the new path is
-    # only safe once migration 0043 is applied on a real PostgreSQL database
-    # and the gated reliability integration tests pass on an isolated
-    # container, *and* the reusable-child transport overhead is measured on a
-    # representative embedding batch (thousands of one-chunk jobs). While False
-    # the worker keeps the historical in-process serial execution exactly as
-    # before — nothing is silently bypassed, the unsafe path is simply not
-    # activated yet.
-    task_execution_enabled: bool = False
+    # fencing, bounded crash recovery). Requires migration 0043 + PostgreSQL.
+    # Tests may explicitly disable it to isolate ordinary stage behavior.
+    task_execution_enabled: bool = True
     # Finite lease (seconds) the holder must refresh via heartbeat before
     # exceeding; poll/heartbeat interval drifts are bounded by clamps below.
     task_lease_seconds: float = 120.0
@@ -70,7 +64,7 @@ class Settings(BaseSettings):
     # Grace after the hard deadline before a non-cooperative child is
     # SIGKILLed; the child is always joined before the job is requeued.
     task_terminate_grace_seconds: float = 15.0
-    # Max attempt_count a recovered job may accumulate via crash recovery.
+    # Max recovery_count a job may accumulate via crash recovery.
     # This is separate from the application retry_count.
     task_max_attempts: int = 3
     # Per-operation statement_timeout / lock_timeout (ms) applied to the
@@ -111,7 +105,7 @@ def pdf_ocr_options_summary() -> dict:
     }
 
 
-# --- ADR-035 task execution policy (clamped, safe default stays off).
+# --- ADR-035 task execution policy (clamped).
 
 
 def _clamp_timeout(value: float, low: float, high: float, default: float) -> float:
@@ -122,7 +116,8 @@ def _clamp_timeout(value: float, low: float, high: float, default: float) -> flo
         number = float(value)
     except (TypeError, ValueError):
         return default
-    if number <= 0 or number != number:  # NaN
+    import math
+    if number <= 0 or not math.isfinite(number):
         return default
     return max(low, min(high, number))
 
@@ -148,13 +143,13 @@ def _task_execution_policy() -> dict:
     )
     # A heartbeat interval larger than the lease would let the lease expire
     # between refreshes; force it below the clamped lease.
-    heartbeat = min(heartbeat, max(lease / 2, 1.0))
-    max_attempts = max(int(settings.task_max_attempts) if settings.task_max_attempts else 3, 1)
+    heartbeat = min(heartbeat, max(lease / 3, 0.1))
+    max_attempts = min(10, max(int(settings.task_max_attempts) if settings.task_max_attempts else 3, 1))
     try:
         db_timeout_ms = int(settings.task_db_timeout_ms)
     except (TypeError, ValueError):
         db_timeout_ms = 10000
-    db_timeout_ms = max(db_timeout_ms, 100)
+    db_timeout_ms = min(10000, max(db_timeout_ms, 100))
     return {
         "enabled": bool(settings.task_execution_enabled),
         "lease_seconds": lease,
@@ -179,7 +174,7 @@ def stage_hard_deadline_seconds(stage: str) -> float:
     raw = mapping.get(key)
     if raw is None:
         raw = settings.task_hard_deadline_seconds
-    return _clamp_timeout(float(raw), 10.0, 86400.0, 3600.0)
+    return _clamp_timeout(raw, 10.0, 86400.0, 3600.0)
 
 
 def ai_settings_summary() -> dict:

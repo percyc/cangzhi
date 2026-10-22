@@ -515,6 +515,24 @@ docker exec cangzhi-postgres psql -U cangzhi -d cangzhi -c \
 
 ## 11. 部署验收
 
+### v1.4.0 任务/模型准入升级注意
+
+迁移 0042/0043 必须先于新 API/Worker 启动。先对当前数据库和 storage 做联合备份，
+等待旧 Worker 的当前任务自然结束后停止（长 PDF 不使用短强杀倒计时），再迁移并
+更新全部 API/Web/普通 Worker。旧维护执行器不要与新版同时运行。
+
+默认模型池总量 2、后台 1、OCR 子限额 1；多个空间和模型不会各自复制配额。
+Compose 可透传 MODEL_ADMISSION_CAPACITY、MODEL_ADMISSION_BACKGROUND_CAPACITY、
+MODEL_ADMISSION_MAX_OCR、MODEL_ADMISSION_POOL_MAP，API/Worker 必须一致。
+这些默认值只用于首次创建池；已有池以数据库持久配置为准，不会因环境变量变化被覆盖。
+设置里的运行概览显示池实际容量及采样占用，不是实时计数。无需修改模型 Key。
+
+普通任务默认启用监督执行：租约 120 秒、心跳 30 秒，单 CPU 任务，最多 3 次中断恢复；
+模型额度等待不扣应用重试次数。旧无租约 processing 和历史 failed 不自动接管。
+无法确认子进程退出会隔离，需维护者确认进程终止后显式恢复，不要直接批量重置状态。
+回退时先停止新执行器，再换回旧镜像；保留新增字段/表通常无需降级，勿在线降级迁移。
+详见 [ADR-034](ADR-034-model-admission.md)、[ADR-035](ADR-035-task-ownership.md)。
+
 完成部署或升级后，至少确认：
 
 - `make doctor` 全部通过；

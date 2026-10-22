@@ -106,6 +106,25 @@ def test_typed_cooldown_with_retry_after_no_retry():
     assert time.monotonic() - started < 0.2
 
 
+@pytest.mark.parametrize("raw,expected", [("NaN", None), ("Infinity", None), ("-1", None),
+    ("0", None), ("45", 45), ("999999", 3600), ("bad", None)])
+def test_retry_after_is_finite_and_bounded(raw, expected):
+    assert ma.parse_retry_after({"Retry-After": raw}) == expected
+
+
+def test_retry_after_http_date():
+    from email.utils import format_datetime
+    value = ma.parse_retry_after({"Retry-After": format_datetime(ma._now() + timedelta(seconds=90))})
+    assert 88 <= value <= 90
+
+
+@pytest.mark.parametrize("status,seconds", [(429, 60), (401, 300), (403, 300), (503, 60), (404, 0)])
+def test_response_cooldown_categories(status, seconds):
+    ma.apply_response_cooldown(ma.DEFAULT_POOL, status)
+    remaining = ma.admission_backend().cooldown_remaining(ma.DEFAULT_POOL)
+    assert max(0, seconds - 2) <= remaining <= seconds
+
+
 def test_typed_busy_quickly_bounded():
     backend = ma.admission_backend()
     l1 = _acquire(backend, ma.DEFAULT_POOL, ttl=900)

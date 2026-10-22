@@ -6,6 +6,7 @@ from sqlalchemy import select
 from apps.api.ai.provider import build_provider_from_session
 from apps.api.models.enhancement import EnhancementRun, EnhancementWindow, EnhancementNode
 from apps.api.models.processing import ProcessingJob
+from apps.api.services import model_admission as admission
 from apps.api.services import knowledge_enhancement as service
 
 
@@ -103,6 +104,32 @@ def process_enhancement_job(session, job):
                               for segment in segments]
             result = analyze_window(provider, model_segments, modules)
         error = None
+    except admission.AdmissionError:
+        # No request was sent: admission refused the slot (busy / cooldown /
+        # unavailable) before any bytes went out. Refund exactly this one
+        # unissued reservation and reset the window/run so the deferred job can
+        # re-attempt cleanly. Prior or uncertain paid calls are untouched.
+        session.rollback()
+        try:
+            current = service.get_run(session, run_id, lock=True)
+        except service.EnhancementError:
+            session.rollback()
+            raise
+        if current.active_attempt == token and current.status == "running":
+            window = session.get(EnhancementNode if is_overview else EnhancementWindow,
+                                 window_id, populate_existing=True, with_for_update=True)
+            if window is not None and window.status == "running":
+                current.calls_used = max(0, int(current.calls_used or 0) - 1)
+                current.active_attempt, current.lease_until = None, None
+                current.status, current.last_error = "queued", None
+                window.status, window.model_identity = "pending", None
+                window.last_error = None
+                session.commit()
+            else:
+                session.rollback()
+        else:
+            session.rollback()  # Concurrent cancellation/successor wins.
+        raise
     except Exception:
         result, error = None, "模型调用失败或输出证据无效，可追加预算重试"
     try:

@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import model_admission as admission
 from ..embeddings.compatibility import validate_embedding_vector
 from ..models.auth import AIRuntimeConfig
 from ..models.chunks import DocumentChunk
@@ -107,6 +108,8 @@ async def recall_vector_chunks(
         SecretStoreError,
         SecretDecryptError,
         SQLAlchemyError,
+        admission.AdmissionError,
+        TimeoutError,
     ) as exc:
         return _degraded(
             _public_failure_reason(exc),
@@ -201,12 +204,18 @@ async def _request_query_embedding(
     else:
         url = f"{base_url}/api/embed"
         body = {"model": model, "input": text}
-    async with httpx.AsyncClient(
-        timeout=timeout_seconds,
-        trust_env=False,
-    ) as client:
-        response = await client.post(url, headers=headers, json=body)
+    pool_id = admission.channel_pool_id(admission.EMBEDDING)
+    async with admission.async_channel(
+        admission.EMBEDDING, hard_lifetime_seconds=timeout_seconds
+    ) as channel:
+        async with httpx.AsyncClient(
+            timeout=timeout_seconds,
+            trust_env=False,
+        ) as client:
+            response = await channel.run(client.post(url, headers=headers, json=body))
     if response.status_code >= 400:
+        admission.apply_response_cooldown(pool_id, response.status_code,
+                                          admission.parse_retry_after(response.headers))
         raise ValueError(f"向量服务返回 HTTP {response.status_code}")
     try:
         payload = response.json()
@@ -312,7 +321,13 @@ def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
 
 
 def _public_failure_reason(exc: Exception) -> str:
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, admission.AdmissionBusyError):
+        return "向量模型额度繁忙，已自动使用关键词检索"
+    if isinstance(exc, admission.AdmissionCooldownError):
+        return "向量渠道正在冷却，已自动使用关键词检索"
+    if isinstance(exc, admission.AdmissionError):
+        return "向量模型准入暂不可用，已自动使用关键词检索"
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return "向量服务请求超时，已自动使用关键词检索"
     if isinstance(exc, httpx.HTTPError):
         return "向量服务暂时无法连接，已自动使用关键词检索"

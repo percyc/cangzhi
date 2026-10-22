@@ -540,9 +540,7 @@ def test_first_import_creates_document_dataset_and_artifact(
 
     document_id = body["document_id"]
     dataset_id = body["dataset_id"]
-    parquet_path = (
-        Path(tmp_path) / "storage" / "datasets" / str(dataset_id) / "v1.parquet"
-    )
+    parquet_path = next((Path(tmp_path) / "storage" / "datasets" / str(dataset_id)).glob("v1-*.parquet"))
     assert parquet_path.is_file(), f"missing parquet at {parquet_path}"
 
     async def go():
@@ -661,9 +659,7 @@ def test_reimport_creates_new_version_and_replaces_dataset(
         json={"tag_ids": [custom_tag.json()["id"]]},
     )
     assert updated_tags.status_code == 200
-    first_path = (
-        Path(tmp_path) / "storage" / "datasets" / str(first_dataset_id) / "v1.parquet"
-    )
+    first_path = next((Path(tmp_path) / "storage" / "datasets" / str(first_dataset_id)).glob("v1-*.parquet"))
     assert first_path.is_file()
 
     _install_fake_driver(
@@ -733,13 +729,7 @@ def test_reimport_creates_new_version_and_replaces_dataset(
             await generator.aclose()
 
     asyncio.run(go())
-    new_path = (
-        Path(tmp_path)
-        / "storage"
-        / "datasets"
-        / str(second["dataset_id"])
-        / "v1.parquet"
-    )
+    new_path = next((Path(tmp_path) / "storage" / "datasets" / str(second["dataset_id"])).glob("v1-*.parquet"))
     assert new_path.is_file()
     assert not first_path.exists(), "re-import should remove the superseded parquet"
 
@@ -868,9 +858,7 @@ def test_empty_refresh_preserves_history_and_semantics_until_nonempty_recovery(
     ).json()["id"]
     _import_via_api(test_client, source_id)
     imported = _import_via_api(test_client, source_id).json()
-    artifact_path = (
-        tmp_path / "storage" / "datasets" / str(imported["dataset_id"]) / "v1.parquet"
-    )
+    artifact_path = next((tmp_path / "storage" / "datasets" / str(imported["dataset_id"])).glob("v1-*.parquet"))
     artifact_bytes = artifact_path.read_bytes()
 
     async def seed_edits():
@@ -1094,13 +1082,7 @@ def test_failed_reimport_preserves_previous_dataset_and_parquet(
         "/api/database-sources", json=_create_source_payload()
     ).json()["id"]
     first = _import_via_api(test_client, source_id).json()
-    first_path = (
-        Path(tmp_path)
-        / "storage"
-        / "datasets"
-        / str(first["dataset_id"])
-        / "v1.parquet"
-    )
+    first_path = next((Path(tmp_path) / "storage" / "datasets" / str(first["dataset_id"])).glob("v1-*.parquet"))
     first_bytes = first_path.read_bytes()
 
     _install_fake_driver(monkeypatch, rows=[(2, "beta")])

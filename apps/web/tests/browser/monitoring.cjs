@@ -32,7 +32,10 @@ const fixture = http.createServer((req, res) => {
     if (fail) return json({}, 503);
     return json({ sections: {
       knowledge: knowledgeSection(),
-      queue: { ...section(empty ? null : { waiting: 12, running: 1, failed: 2, completed: 800, oldest_waiting_at: null }), stale: !empty, error: empty ? null : '采集暂不可用，保留上次结果' },
+      queue: { ...section(empty ? null : { waiting: 12, running: 1, failed: 2, completed: 800, oldest_waiting_at: null,
+        waiting_model: 3, quarantined: 1, recoveries: 4,
+        model_pools: [{ pool_id: 'model', capacity: 2, background_capacity: 1, ocr_sublimit: 1, in_use: 1, background_in_use: 1, cooldown_until: null }],
+      }), stale: !empty, error: empty ? null : '采集暂不可用，保留上次结果' },
       capacity: section(empty ? null : { disk: { total: 100000, used: 95000, free: 5000 }, blob_bytes: 3000, original_bytes: 2000, preview_bytes: 1000, other_blob_bytes: 0, parquet_bytes: 40, database_bytes: 100, vector_table_bytes: 20, blobs: 40 }),
     }, history: empty ? [] : [1, 2, 3].map(n => ({ at: new Date(Date.now() - (4-n)*3600000).toISOString(), documents: n*100, blob_bytes: n*1000 })) });
   }
@@ -61,6 +64,8 @@ async function main() {
     await page.getByText(/数据盘已使用 95/).waitFor();
     await page.getByText(/数据已过期/).waitFor();
     await page.getByRole('img', { name: '已登记文件容量趋势' }).waitFor();
+    await page.getByText(/额度池 model：使用 1 \/ 2；后台 1 \/ 1/).waitFor();
+    await page.getByText(/等待模型额度\/渠道恢复 3 · 隔离待检查 1 · 累计恢复 4/).waitFor();
     for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);

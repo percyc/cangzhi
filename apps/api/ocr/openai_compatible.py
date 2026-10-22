@@ -44,6 +44,7 @@ from typing import Any
 
 import httpx
 
+from ..services import model_admission as admission
 from .base import (
     ExternalOcrError,
     ExternalOcrLine,
@@ -162,19 +163,24 @@ class OpenAICompatibleOcrProvider(ExternalOcrProvider):
         data_url = self._build_data_url(png_bytes)
         request_body = self._build_request_body(data_url)
         try:
-            response = httpx.post(
-                f"{self._base_url}/chat/completions",
-                json=request_body,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self._timeout,
-                # OCR endpoints are configured explicitly by the operator;
-                # do not silently route document images through process-wide
-                # HTTP(S)/SOCKS proxy variables.
-                trust_env=False,
+            response = admission.run_sync(
+                lambda: self._recognize_async(request_body)
             )
+        except admission.AdmissionError:
+            raise ExternalOcrError(
+                "外部 OCR 额度繁忙或暂时不可用，请稍后再试",
+                category="upstream",
+                provider=self.name,
+            ) from None
+        except TimeoutError as exc:
+            # The absolute hard deadline (builtin ``TimeoutError`` alias of
+            # ``asyncio.TimeoutError``) expired while the request was in
+            # flight. The slot was already released inside the transport.
+            raise ExternalOcrError(
+                f"外部 OCR 请求超时：{type(exc).__name__}",
+                category="timeout",
+                provider=self.name,
+            ) from None
         except httpx.TimeoutException as exc:
             raise ExternalOcrError(
                 f"外部 OCR 请求超时：{type(exc).__name__}",
@@ -189,6 +195,11 @@ class OpenAICompatibleOcrProvider(ExternalOcrProvider):
             ) from None
 
         if response.status_code >= 400:
+            admission.apply_response_cooldown(
+                admission.channel_pool_id(admission.OCR),
+                response.status_code,
+                admission.parse_retry_after(response.headers),
+            )
             self._raise_for_status(response)
 
         try:
@@ -205,6 +216,30 @@ class OpenAICompatibleOcrProvider(ExternalOcrProvider):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _recognize_async(self, request_body: dict[str, Any]) -> httpx.Response:
+        """Run one real, cancellable OCR POST under the admission channel's
+        absolute hard deadline. Runs inside the sync :meth:`recognize` via
+        :func:`admission.run_sync`, so the slot is held for the whole request
+        and never released while the outbound call is still in flight."""
+        url = f"{self._base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        async with admission.async_channel(
+            admission.OCR, hard_lifetime_seconds=self._timeout
+        ) as channel:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                # OCR endpoints are configured explicitly by the operator;
+                # do not silently route document images through process-wide
+                # HTTP(S)/SOCKS proxy variables.
+                trust_env=False,
+            ) as client:
+                return await channel.run(
+                    client.post(url, json=request_body, headers=headers)
+                )
 
     def _build_data_url(self, png_bytes: bytes) -> str:
         encoded = base64.b64encode(png_bytes).decode("ascii")

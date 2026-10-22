@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, replace
 
 from ..parsers.base import Block, StructuredContent
+from . import model_admission as admission
 from .chunker import (
     CHILD_HARD_MAX_CHARS,
     CHILD_OVERLAP_CHARS,
@@ -153,6 +154,11 @@ def build_candidate(
                     mode = "ai"
                     accepted += 1
                     assisted_blocks += stop-start
+                except admission.AdmissionError:
+                    # No request was sent: the background queue is full. This is
+                    # not a chunking failure, so let the supervisor defer the job
+                    # instead of silently continuing with a rules-only candidate.
+                    raise
                 except Exception:
                     # Never retain upstream messages (may contain keys or source text).
                     fallback += 1

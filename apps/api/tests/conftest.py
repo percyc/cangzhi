@@ -26,6 +26,25 @@ from apps.api.storage import get_storage
 from apps.api.storage.local import LocalBlobStorage
 
 
+@pytest.fixture(autouse=True)
+def _isolated_execution_and_admission(monkeypatch):
+    """Keep worker direct-calls explicit and give every API test a safe,
+    in-memory model-admission backend (test-only; production never fails open).
+
+    The in-memory backend mirrors the Postgres lease/CAS/cooldown semantics and
+    is gated on the test interpreter, exactly like the worker test fixture.
+    """
+    from apps.api.services import model_admission as admission
+    from apps.worker.core.config import settings as worker_settings
+
+    monkeypatch.setattr(worker_settings, "task_execution_enabled", False)
+    admission.configure_admission_backend(admission.InMemoryAdmissionBackend())
+    admission.set_process_role("foreground")
+    yield
+    admission.reset_admission_backend()
+    admission.set_process_role("foreground")
+
+
 @pytest.fixture
 def client(tmp_path: Path):
     """Yield a TestClient with an in-memory database and a stub admin.

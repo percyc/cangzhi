@@ -28,6 +28,7 @@ Design invariants (ADR-034):
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
 import logging
 import math
@@ -484,6 +485,87 @@ def apply_cooldown(pool_id: str, cooldown_seconds: float, retry_after: float | N
 
 def cooldown_remaining(pool_id: str) -> float:
     return admission_backend().cooldown_remaining(pool_id)
+
+
+# ---------------------------------------------------------------------------
+# Upstream-status cooldown
+# ---------------------------------------------------------------------------
+# A single shared pool means one upstream talks to the whole product. When it
+# answers 429 the pool cools down with the caller-supplied Retry-After;
+# 401/403 and transient 5xx add small bounded cooldowns so a revoked or broken
+# channel is not hot-spammed from every worker process. None of these record a
+# URL or key, and they never mask the *current* real request failure, which the
+# caller is still expected to report truthfully through its own error path.
+
+_AUTH_COOLDOWN_SECONDS = 300.0
+_TRANSIENT_COOLDOWN_SECONDS = 60.0
+_DEFAULT_RETRY_AFTER = 60.0
+
+
+def _bounded_retry_after(value: float | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    return min(3600.0, max(1.0, float(value)))
+
+
+def parse_retry_after(headers) -> float | None:
+    """Parse a ``Retry-After`` header into bounded seconds.
+
+    Supports both the delta-seconds form and the HTTP-date form, is
+    NaN/Inf-safe, and returns ``None`` when the header is absent or
+    cannot be interpreted. Extremely large values are clamped.
+    """
+    if not headers:
+        return None
+    raw = None
+    try:
+        raw = headers.get("Retry-After")
+    except (AttributeError, TypeError):
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        # HTTP-date form, e.g. "Wed, 21 Oct 2015 07:28:00 GMT".
+        try:
+            parsed = email.utils.parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed is None:
+            return None
+        delta = (parsed.astimezone(timezone.utc) - _now()).total_seconds()
+        return _bounded_retry_after(delta)
+    if math.isnan(value) or math.isinf(value) or value <= 0:
+        return None
+    return _bounded_retry_after(value)
+
+
+def apply_response_cooldown(
+    pool_id: str, status_code: int, retry_after: float | None = None
+) -> None:
+    """Apply a bounded pool cooldown derived from an upstream HTTP status.
+
+    * ``429`` honours ``Retry-After`` (falling back to a conservative 60 s).
+    * ``401/403`` add a short auth-failure cooldown so a revoked credential is
+      not retried from every process.
+    * ``5xx`` add a small transient cooldown.
+
+    The current request's real failure is left untouched; callers must still
+    surface it via their own error handling.
+    """
+    try:
+        status = int(status_code)
+    except (TypeError, ValueError):
+        return
+    ra = _bounded_retry_after(retry_after)
+    if status == 429:
+        apply_cooldown(pool_id, ra or _DEFAULT_RETRY_AFTER, retry_after=ra)
+    elif status in (401, 403):
+        apply_cooldown(pool_id, _AUTH_COOLDOWN_SECONDS)
+    elif 500 <= status <= 599:
+        apply_cooldown(pool_id, _TRANSIENT_COOLDOWN_SECONDS)
 
 
 # ---------------------------------------------------------------------------

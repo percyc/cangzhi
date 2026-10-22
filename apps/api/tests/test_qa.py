@@ -1565,7 +1565,12 @@ def test_qa_service_raises_when_provider_not_configured(qa_db):
     assert exc_info.value.code == "provider_not_configured"
 
 
-def test_qa_service_propagates_provider_failure_as_user_facing_error(qa_db):
+@pytest.mark.parametrize("error_kind", ["provider", "busy", "cooldown", "unavailable"])
+def test_qa_service_propagates_provider_failure_as_user_facing_error(qa_db, error_kind):
+    from apps.api.services import model_admission as admission
+    errors = {"provider": AIProviderError("boom"), "busy": admission.AdmissionBusyError("boom"),
+              "cooldown": admission.AdmissionCooldownError(message="boom"),
+              "unavailable": admission.AdmissionUnavailableError("boom")}
     async def _run():
         await _seed_document(
             qa_db,
@@ -1573,7 +1578,7 @@ def test_qa_service_propagates_provider_failure_as_user_facing_error(qa_db):
             body="向量检索会把文档转换为向量再做相似度比较。",
         )
         provider = StubProvider()
-        provider.fail_with(AIProviderError("boom"))
+        provider.fail_with(errors[error_kind])
         service = QAService(provider)
         async with qa_db() as session:
             return await service.ask(

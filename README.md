@@ -1,7 +1,6 @@
 # 藏知（Cangzhi）
 
-> 本分支为并发/任务恢复开发草案，未通过完整回归，禁止部署。正式版本使用main/v1.3.8。
-> 已知缺口与失败测试见docs/ADR-034-model-admission.md、docs/ADR-035-task-ownership.md。
+> 部署状态与验收记录见 [项目状态](docs/PROJECT_STATUS.md)。升级前请备份并等待在途任务正常结束。
 
 [简体中文](README.md) | [English](README.en.md)
 
@@ -56,7 +55,13 @@
 
 ## 版本与当前开发重点
 
-- **当前交付版本为 `v1.3.7`**，新增管理员[运行概览](docs/OPERATIONS_OVERVIEW.md)，
+- **`v1.4.0` 可靠性节点**：API/Worker 共享模型并发额度，失败/取消按真实请求释放；
+  普通任务增加心跳、有限租约、可终止子进程、迟到提交保护和有界恢复。
+  [运行概览](docs/OPERATIONS_OVERVIEW.md)展示模型池占用、额度等待、隔离与恢复数。
+  升级需迁移 0042/0043 并同步更新 API/Web/普通 Worker；CPU 仍串行，不自动重跑历史失败。
+  设计边界见 [模型准入](docs/ADR-034-model-admission.md)与[任务所有权](docs/ADR-035-task-ownership.md)。
+  `v1.3.8` 已提供 WebDAV 目录/选择导入与指标级采集；`v1.3.9` 修复固定版本原文回取。
+  `v1.3.7` 新增管理员运行概览，
   后台低频采集容量、知识规模与任务快照，升级需迁移0040并更新API/Web/普通Worker。
   `v1.3.6`将WebDAV扫描改为后台任务，提供持久进度、取消/继续，
   完整成功才更新清单；升级需执行0039迁移并更新API、Web与普通Worker。

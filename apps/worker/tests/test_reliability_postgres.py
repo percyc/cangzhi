@@ -66,9 +66,6 @@ def isolated_db():
         pytest.skip("explicit isolated database required (CANGZHI_PG_RELIABILITY_DATABASE_URL)")
     assert url.endswith("/cangzhi_test"), "refusing to run against any non-isolated database"
     engine = create_engine(url)
-    with engine.begin() as db:
-        for col in _LEASE_COLUMNS:
-            db.execute(text(f"ALTER TABLE processing_jobs ADD COLUMN IF NOT EXISTS {col}"))
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     yield Session
     engine.dispose()
@@ -77,7 +74,18 @@ def isolated_db():
 @pytest.fixture
 def session_area(isolated_db, monkeypatch):
     monkeypatch.setattr(settings, "task_execution_enabled", True)
+    with isolated_db() as s:
+        s.execute(text("DELETE FROM documents WHERE title LIKE 't-%'"))
+        s.commit()
+    monkeypatch.setattr(settings, "database_url", _url())
     yield isolated_db
+    from apps.worker.services.task_execution import close_executor
+    close_executor()
+    with isolated_db() as s:
+        s.execute(text("DELETE FROM processing_jobs WHERE document_id IN "
+                       "(SELECT id FROM documents WHERE title LIKE 't-%')"))
+        s.execute(text("DELETE FROM documents WHERE title LIKE 't-%'"))
+        s.commit()
     monkeypatch.setattr(settings, "task_execution_enabled", False)
 
 
@@ -105,6 +113,7 @@ def _make_doc_job(
         )
         s.add(version)
         s.flush()
+        doc.current_version_id = version.id
         jobs = []
         for i in range(doc_count):
             job = ProcessingJob(
@@ -116,11 +125,13 @@ def _make_doc_job(
                 config_version="1",
                 next_retry_at=None,
             )
+            s.add(job)
+            s.flush()
             if with_lease:
                 now = lease.db_utc_now(s)
                 job.worker_id = lease.worker_id()
                 job.attempt_id = lease.new_attempt_id(job.id)
-                job.lease_until = now - (timedelta(seconds=5) if lease_until_in_past else timedelta(seconds=300))
+                job.lease_until = now + timedelta(seconds=-5 if lease_until_in_past else 300)
                 job.hard_deadline = now + timedelta(seconds=1800)
                 job.attempt_count = 1
             s.add(job)
@@ -159,6 +170,17 @@ def test_competing_claims_same_document_serialize(session_area):
             assert j.attempt_id and j.lease_until  # stamped by the two-step claim
 
 
+def test_busy_document_backlog_cannot_starve_other_documents(session_area):
+    _, _, busy_jobs = _make_doc_job(session_area, doc_count=40, key_prefix="busy-backlog")
+    with session_area() as s:
+        blocker = s.get(ProcessingJob, busy_jobs[0].id)
+        blocker.status = "processing"  # historical unowned job, never auto-reclaimed
+        s.commit()
+    _, _, free_jobs = _make_doc_job(session_area, key_prefix="free-backlog")
+    with session_area() as s:
+        assert claim_pending_jobs(s, limit=10, stages=["parsing"]) == [free_jobs[0].id]
+
+
 def test_crash_recovery_new_attempt_fences_old(session_area):
     Session = session_area
     _, version, jobs = _make_doc_job(
@@ -176,7 +198,7 @@ def test_crash_recovery_new_attempt_fences_old(session_area):
     with Session() as s:
         recovered = s.get(ProcessingJob, job.id)
         assert recovered.attempt_id != old_attempt
-        assert recovered.worker_id != old_worker
+        assert recovered.worker_id == lease.worker_id()  # identity is per executor, token is per attempt
         assert recovered.status == "processing"
 
         # The old attempt must now be fenced off: a verify fails closed.
@@ -278,19 +300,19 @@ def test_hard_deadline_requeue_preserves_outcomes(session_area):
 
     # Simulate a confirmed child exit after a hard-deadline stop: requeue.
     with Session() as s:
-        from apps.worker.services.processor import requeue_safely
+        from apps.worker.services.task_execution import requeue_safely
         requeue_safely(
             s, job_id=job.id, attempt_id=job.attempt_id, reason="hard_deadline", dial="supervisor"
         )
         row = s.get(ProcessingJob, job.id)
         assert row.status == "retry"
-        assert row.attempt_id is None  # token cleared so a successor claims fresh
+        assert row.attempt_id == job.attempt_id  # retained for diagnostics; next claim replaces it
         assert row.lease_until is None
 
 
 def test_requeue_never_clobbers_success_or_other_attempt(session_area):
     Session = session_area
-    from apps.worker.services.processor import requeue_safely
+    from apps.worker.services.task_execution import requeue_safely
 
     # A completed job is untouched by a late (wrong-token) requeue.
     _, _, jobs = _make_doc_job(Session, status="processing", with_lease=True, key_prefix="noclobber")
@@ -310,7 +332,7 @@ def test_requeue_never_clobbers_success_or_other_attempt(session_area):
 
 def test_requeue_never_autoresumes_enhancement(session_area):
     Session = session_area
-    from apps.worker.services.processor import requeue_safely
+    from apps.worker.services.task_execution import requeue_safely
 
     _, _, jobs = _make_doc_job(Session, stage="knowledge_enhancement",
                                status="processing", with_lease=True, key_prefix="enh")
@@ -343,8 +365,8 @@ def test_source_change_fences_stale_publish(session_area):
         expectation = lease.capture_expectation(s, s.get(ProcessingJob, job.id))
         # A new current_version is published for the document mid-attempt.
         s.execute(
-            text("UPDATE documents SET current_version_id = :v WHERE id = :d"),
-            {"v": version.id + 99999, "d": doc.id},
+            text("UPDATE document_versions SET content_hash = :h WHERE id = :v"),
+            {"h": "changed", "v": version.id},
         )
         s.commit()
         # The stale attempt can no longer publish.
@@ -372,6 +394,7 @@ def test_child_protocol_response_fd_smoke(session_area):
         stderr=subprocess.STDOUT,
         bufsize=0,
         pass_fds=(write_fd,),
+        start_new_session=True,
     )
     os.close(write_fd)
     resp = os.fdopen(read_fd, "rb", buffering=0)

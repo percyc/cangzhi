@@ -35,7 +35,8 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
 
-    engine = create_engine(settings.database_url)
+    from apps.worker.services.lease import bounded_engine
+    engine = bounded_engine(settings.database_url)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     from apps.api.core.build_info import build_info
@@ -52,7 +53,7 @@ def main():
             # Check database connectivity
             with SessionLocal() as session:
                 session.execute(text("SELECT 1"))
-                processed = process_pending_jobs(session)
+                processed = process_pending_jobs(session, should_stop=lambda: not running)
                 if processed > 0:
                     logger.info("Processed pending jobs", count=processed)
         except Exception as e:
@@ -67,6 +68,8 @@ def main():
     scan_thread.join(timeout=35)
     monitor_stop.set()
     monitor_thread.join(timeout=35)
+    from apps.worker.services.task_execution import close_executor
+    close_executor()
     logger.info("Worker stopped")
 
 

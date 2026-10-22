@@ -23,6 +23,19 @@ def _session(dependency):
     return anext(dependency)
 
 
+@pytest.mark.parametrize("details,quarantine,expected", [
+    ({"deferred": True}, None, "等待模型额度或渠道恢复"),
+    ({"recovered": True}, None, "执行中断，退避后自动恢复"),
+    ({}, "present", "执行已隔离，等待人工检查"),
+])
+def test_processing_delay_labels(details, quarantine, expected):
+    from types import SimpleNamespace
+    from apps.api.services.processing_status import _stage_payload
+    job = SimpleNamespace(status="retry", error_details=details,
+                          quarantined_at=quarantine, last_error=None)
+    assert _stage_payload(job)["message"] == expected
+
+
 async def _seed_base(session, document_id, version_id):
     # The note endpoint creates real queued work; a completed fixture must
     # complete those original jobs as well as adding historical stage records.
