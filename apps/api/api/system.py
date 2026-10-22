@@ -6,7 +6,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,14 @@ from ..services.upload_settings import get_upload_limit_mb, save_upload_limit_mb
 
 router = APIRouter()
 _STARTED_AT = time.monotonic()
+
+
+@router.get("/system/overview")
+async def operational_overview(response: Response, days: int = Query(7, ge=1, le=30),
+                               db: AsyncSession = Depends(get_db)):
+    from ..services.monitoring import read_overview
+    response.headers["Cache-Control"] = "no-store"
+    return await read_overview(db, days)
 
 
 class UploadSettings(BaseModel):

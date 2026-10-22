@@ -42,6 +42,8 @@ def main():
     logger.info("Worker starting", poll_interval=settings.poll_interval, build=build_info())
     from apps.worker.services.webdav_scanner import start_scanner
     scan_stop, scan_thread = start_scanner(settings.database_url)
+    from apps.worker.services.monitoring import start_monitor
+    monitor_stop, monitor_thread = start_monitor(settings.database_url, settings.storage_path)
 
     while running:
         try:
@@ -61,6 +63,8 @@ def main():
 
     scan_stop.set()
     scan_thread.join(timeout=35)
+    monitor_stop.set()
+    monitor_thread.join(timeout=35)
     logger.info("Worker stopped")
 
 
