@@ -34,6 +34,7 @@ from ..services.document_lifecycle import (
 from ..services.document_lifecycle import (
     trash_documents as trash_document_records,
 )
+from ..services.document_original import OriginalReadError, read_webdav_original
 from ..services.processing_status import (
     NoActiveEmbeddingProfile,
     ProcessingStatusError,
@@ -925,47 +926,23 @@ async def download_document_original(
         raise HTTPException(status_code=404, detail="资料版本不存在")
 
     document_meta = document.meta or {}
-    if document_meta.get("external_source") == "webdav" and version_id is None:
-        source_id = document_meta.get("webdav_source_id")
-        source = (
-            await db.get(WebDAVSource, source_id)
-            if isinstance(source_id, int)
-            else None
-        )
-        entry = (
-            await db.scalar(
-                select(WebDAVEntry).where(
-                    WebDAVEntry.document_id == document.id,
-                    WebDAVEntry.source_id == source_id,
-                )
-            )
-            if source is not None
-            else None
-        )
-        if source is None or entry is None:
-            raise HTTPException(
-                status_code=409,
-                detail="原 WebDAV 连接器已不存在，无法获取原文件",
-            )
+    if document_meta.get("external_source") == "webdav" and (
+        version_id is None or version.blob_id is None
+    ):
         try:
-            payload, upstream_type = await download_file(
-                base_url=source.base_url,
-                remote_path=entry.remote_path,
-                username=source.username,
-                password=decrypt_secret(source.password_cipher),
-                trusted_private_network=source.trusted_private_network,
+            original = await read_webdav_original(
+                db, document, version,
+                pinned=version_id is not None,
                 max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+                downloader=download_file,
             )
-        except (WebDAVError, URLSecurityError) as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"获取 WebDAV 原文件失败：{exc}",
-            ) from None
+        except OriginalReadError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
         return _download_response(
-            BytesIO(payload),
-            filename=entry.remote_path.rsplit("/", 1)[-1],
-            content_type=upstream_type.split(";", 1)[0].strip(),
-            content_length=len(payload),
+            BytesIO(original.content),
+            filename=original.filename,
+            content_type=original.content_type,
+            content_length=len(original.content),
             disposition="inline" if inline else "attachment",
         )
 
