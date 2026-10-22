@@ -6,6 +6,13 @@
 
 更新时间：2026-10-23
 
+进行中：Codex（OpenCode协作），分支`codex/CZ-S04-webdav-version-original`。
+修复WebDAV已释放临时原件的PDF带版本预览误报404；回取必须匹配原版本哈希，
+不静默替换引用证据，不重解析资料。复用v1.3.8基线，不混入未验收并发原型。
+修复候选v1.3.9：关键回归2项、已有上传/WebDAV/引用/空间49项通过，尚待部署核验。
+第二、三批原型已单独保存在`codex/CZ-Q09-admission-recovery-draft`（69b9285），
+有未通过回归与发布阻断项，禁止部署或合入正式分支；生产仍为0041。
+
 本机最新部署：v1.3.8，运行源码`5c2edc2`，WebDAV目录选择导入与指标级统计恢复。
 负责人Codex（OpenCode协作），按维护者本轮明确授权合并发布；迁移0041完成，
 API/Web/普通Worker版本一致、dirty=false且healthy，数据库未重启。后台自动完成
