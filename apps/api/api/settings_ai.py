@@ -35,6 +35,7 @@ from ..models.auth import Admin, AIRuntimeConfig
 from ..models.documents import Document
 from ..models.processing import ProcessingJob
 from ..services.ocr_probe import probe_ocr
+from ..services.settings_connections import ConnectionUpdateError, apply_embedding_connection
 from ..services import model_admission as admission
 from ..models.taxonomy import DocumentCategory, DocumentSummary, DocumentTag
 from ..security.secrets import (
@@ -718,6 +719,60 @@ async def update_settings(
     return {"config": _to_public(row)}
 
 
+class EmbeddingConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=16)
+    base_url: str | None = Field(default=None, max_length=512)
+    model: str | None = Field(default=None, max_length=200)
+    api_key_action: str = Field(default="keep", max_length=16)
+    api_key: str | None = Field(default=None, max_length=512)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=600)
+    reuse_chat: bool = False
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in _PROVIDER_VALUES:
+            raise ValueError("不支持的向量模型来源")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_url(cls, value: str | None) -> str | None:
+        return _validate_url(value) if value else None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+    @field_validator("api_key_action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        if value not in {"keep", "replace", "clear"}:
+            raise ValueError("不支持的密钥操作")
+        return value
+
+
+@router.patch("/embedding", response_model=dict[str, Any])
+async def update_embedding_settings(
+    payload: EmbeddingConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(require_admin),
+) -> dict[str, Any]:
+    row = await _get_or_create_config(db)
+    try:
+        apply_embedding_connection(row, payload.model_dump(exclude_unset=True))
+    except ConnectionUpdateError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": str(exc)}) from None
+    row.updated_by = admin.id
+    await db.commit()
+    await db.refresh(row)
+    return {"config": _to_public(row)}
+
+
 @router.post("/test", response_model=dict[str, Any])
 async def test_settings(
     db: AsyncSession = Depends(get_db),
@@ -1269,6 +1324,16 @@ async def discover_models(
         api_key = (payload.api_key or "").strip()
         if not api_key and payload.use_saved_api_key:
             row = await _get_or_create_config(db)
+            saved_url = {
+                "chat": row.openai_base_url,
+                "embedding": row.embedding_base_url,
+                "ocr": row.ocr_base_url,
+            }[payload.channel]
+            if payload.base_url.rstrip("/") != (saved_url or "").rstrip("/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "saved_key_url_mismatch", "message": "服务地址已改变，请重新输入该地址的密钥；已保存密钥仅用于原连接"},
+                )
             api_key = _saved_model_discovery_key(
                 row,
                 channel=payload.channel,

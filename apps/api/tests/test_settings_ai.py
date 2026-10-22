@@ -672,7 +672,7 @@ def test_model_discovery_can_reuse_saved_channel_key(client, monkeypatch):
         json={
             "channel": "embedding",
             "provider": "openai",
-            "base_url": "https://new.example.com/v1",
+            "base_url": "https://old.example.com/v1",
             "use_saved_api_key": True,
         },
     )

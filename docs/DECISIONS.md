@@ -1,5 +1,7 @@
 # 藏知关键技术决策
 
+- [ADR-036：引导配置、连接复用与设置搜索](ADR-036-guided-settings.md)
+
 - [ADR-034：跨进程模型调用准入](ADR-034-model-admission.md)
 - [ADR-035：任务所有权与可终止执行](ADR-035-task-ownership.md)
 

@@ -76,6 +76,25 @@ export type OcrConfigPayload = {
   reuse_chat?: boolean;
 };
 
+export type EmbeddingConfigPayload = {
+  provider: 'disabled' | 'openai' | 'ollama';
+  base_url?: string | null;
+  model?: string | null;
+  api_key_action: 'keep' | 'replace' | 'clear';
+  api_key?: string;
+  timeout_seconds?: number;
+  reuse_chat?: boolean;
+};
+
+export async function updateEmbeddingConfig(payload: EmbeddingConfigPayload): Promise<AIConfig> {
+  const response = await fetch('/api/settings/ai/embedding', {
+    method: 'PATCH', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await extractErrorMessage(response, '保存向量设置失败'));
+  return (await parseJson<AIConfigResponse>(response)).config;
+}
+
 export type AITestResult = {
   ok: boolean;
   message: string;
