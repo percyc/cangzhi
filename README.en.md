@@ -59,7 +59,11 @@ boundaries.
 
 ## Version and development status
 
-- **The current delivery version is `v1.3.4`**, adding compatible WPS Writer upload,
+- **The current delivery version is `v1.3.6`**, adding background WebDAV scans with
+  durable progress, cancellation and resume. Inventory is reconciled only after a complete scan.
+  Upgrade migration 0039 and the API, Web and regular Worker together.
+  `v1.3.5` fixed recursive scans and missing-file safeguards.
+  `v1.3.4` added compatible WPS Writer upload,
   parsing, PDF preview and necessary OCR; see [compatibility limits](docs/WPS_COMPATIBILITY.md).
   `v1.3.3` fixed the desktop settings sidebar
   covering version information and actions in short windows.

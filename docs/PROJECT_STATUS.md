@@ -6,7 +6,14 @@
 
 更新时间：2026-10-22
 
-最新开发交付：`CZ-S02` 后台WebDAV扫描，Codex，分支
+最新部署：`v1.3.6`，运行源码`220ca26`（功能`338667e`）。按维护者追加授权
+部署后台WebDAV扫描，迁移0039成功，API/Web/Worker构建版本一致且dirty=false。
+发布镜像API51项、Worker扫描/依赖8项、Web124项与lint/类型检查/25页构建通过。
+联合备份backups/cangzhi-20261022-140955校验通过，保留rollback-v1.3.6镜像；
+数据库未重启，文档19/版本21、任务854completed和2failed不变，无主动扫描或重处理。
+本轮将main及v1.3.6同步Gitea/Gitee/GitHub；以下保留开发交付及历史部署快照。
+
+开发交付时快照：`CZ-S02` 后台WebDAV扫描，Codex，分支
 `codex/CZ-S02-background-webdav`。持久进度、取消/继续、小并发连接复用、租约恢复，
 完整成功才对账；需迁移0039并更新普通Worker/API/Web，尚未部署或推送。
 API相关47项、Worker相关55项、独立PostgreSQL并发/迁移、Web124项与隔离浏览器通过。
