@@ -6,7 +6,21 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { chromium } = require('playwright');
 let empty = false, fail = false, calls = 0;
+let metricMode = null;
 const section = data => ({ data, sampled_at: data ? new Date().toISOString() : null, stale: !data, error: null });
+function knowledgeSection() {
+  const initial = section(empty ? null : { documents: 1234, files: 1000, chunks: 45678, trash: 2, versions: 1400, parent_chunks: 200, datasets: 8, active_vectors: 300, vectors: 600 });
+  if (!metricMode) return initial;
+  const first = metricMode === 'first_failed';
+  const at = new Date().toISOString();
+  return { ...initial, data: first ? { active_vectors: null } : initial.data, sampled_at: first ? null : at,
+    attempted_at: at, state: metricMode, interval_seconds: 900, error: '采集超时', metrics: [
+      ...(!first ? [{ name: 'documents', value: 1234, state: 'ok', last_success_at: at, last_attempt_at: at, error: null }] : []),
+      { name: 'active_vectors', value: first ? null : 300, state: first ? 'first_failed' : 'degraded',
+        last_success_at: first ? null : new Date(Date.now() - 3600000).toISOString(), last_attempt_at: at,
+        error: '采集超时', next_attempt_at: new Date(Date.now() + 60000).toISOString(), consecutive_failures: 1 },
+    ] };
+}
 const fixture = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://fixture.test');
   const json = (body, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -17,7 +31,7 @@ const fixture = http.createServer((req, res) => {
     calls++;
     if (fail) return json({}, 503);
     return json({ sections: {
-      knowledge: section(empty ? null : { documents: 1234, files: 1000, chunks: 45678, trash: 2, versions: 1400, parent_chunks: 200, datasets: 8, active_vectors: 300, vectors: 600 }),
+      knowledge: knowledgeSection(),
       queue: { ...section(empty ? null : { waiting: 12, running: 1, failed: 2, completed: 800, oldest_waiting_at: null }), stale: !empty, error: empty ? null : '采集暂不可用，保留上次结果' },
       capacity: section(empty ? null : { disk: { total: 100000, used: 95000, free: 5000 }, blob_bytes: 3000, original_bytes: 2000, preview_bytes: 1000, other_blob_bytes: 0, parquet_bytes: 40, database_bytes: 100, vector_table_bytes: 20, blobs: 40 }),
     }, history: empty ? [] : [1, 2, 3].map(n => ({ at: new Date(Date.now() - (4-n)*3600000).toISOString(), documents: n*100, blob_bytes: n*1000 })) });
@@ -56,12 +70,28 @@ async function main() {
     await page.getByRole('button', { name: '重新读取快照' }).click();
     await page.getByRole('alert').filter({ hasText: '暂时无法读取' }).waitFor();
     assert.equal(await page.getByText('1,234', { exact: true }).count(), 2);
+    fail = false; metricMode = 'partial';
+    await page.getByRole('button', { name: '重新读取快照' }).click();
+    await page.getByText(/部分统计可用/).waitFor();
+    await page.getByText(/当前有效向量：采集超时/).waitFor();
+    assert.equal(await page.getByText('1,234', { exact: true }).count(), 2);
+    await page.getByText(/查看各指标采集时间/).click();
+    await page.getByText(/最近成功：.*最近尝试：/).first().waitFor();
+    metricMode = 'first_failed';
+    await page.getByRole('button', { name: '重新读取快照' }).click();
+    await page.getByText('首次采集失败，尚无可用结果。', { exact: true }).waitFor();
+    assert.equal(await page.getByText(/等待后台首次采集/).count(), 0);
+    await page.getByText(/当前有效向量：采集超时.*尚无成功结果.*预计/).waitFor();
+    metricMode = null;
+    await page.getByRole('button', { name: '重新读取快照' }).click();
+    await page.getByText('1,234', { exact: true }).first().waitFor();
+    assert.equal(await page.getByText('首次采集失败，尚无可用结果。', { exact: true }).count(), 0);
     fail = false; empty = true;
     await page.getByRole('button', { name: '重新读取快照' }).click();
     await page.getByText(/等待后台首次采集/).first().waitFor();
     await page.getByText(/趋势正在积累/).waitFor();
-    assert.ok(calls < 12); assert.deepEqual(errors, []);
-    console.log('PASS monitoring snapshots, alerts, stale/error/empty states, history selection and responsive layouts');
+    assert.ok(calls < 16); assert.deepEqual(errors, []);
+    console.log('PASS monitoring snapshots, alerts, partial/first-failed/recovery/empty states, per-metric times, history selection and responsive layouts');
   } catch (err) { process.stderr.write(log); throw err; }
   finally { await browser?.close(); server.kill('SIGTERM'); await new Promise(resolve => fixture.close(resolve)); }
 }

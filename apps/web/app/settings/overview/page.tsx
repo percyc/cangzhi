@@ -6,7 +6,12 @@ import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 import { withApiBasePath } from '@/lib/paths';
 
 type Metrics = Record<string, number | string | null>;
-type Section<T> = { data: T | null; sampled_at: string | null; stale: boolean; error: string | null };
+type MetricState = 'never' | 'first_failed' | 'degraded' | 'ok';
+type Metric = { name: string; value: unknown; last_success_at: string | null;
+  last_attempt_at: string | null; error: string | null; consecutive_failures: number;
+  next_attempt_at: string | null; state: MetricState; stale?: boolean; attempt_age_seconds?: number | null };
+type Section<T> = { data: T | null; sampled_at: string | null; attempted_at?: string | null;
+  stale: boolean; error: string | null; metrics?: Metric[]; state?: string; interval_seconds?: number };
 type Capacity = { disk: { total: number; used: number; free: number } | null; blob_bytes: number;
   original_bytes: number; preview_bytes: number; other_blob_bytes: number; parquet_bytes: number;
   database_bytes: number | null; vector_table_bytes: number | null; blobs: number };
@@ -23,10 +28,57 @@ function count(value: number | string | null | undefined) {
   return value == null ? '—' : Number(value).toLocaleString('zh-CN');
 }
 function Stamp({ section }: { section?: Section<unknown> }) {
+  if (!section) return null;
+  const attempted = Boolean(section.attempted_at || section.error || section.state === 'first_failed');
   return <div className="mt-3 text-xs leading-5 text-slate-500">
-    {section?.sampled_at ? `采集于 ${new Date(section.sampled_at).toLocaleString('zh-CN')}` : '等待后台首次采集，尚无统计数据'}
-    {section?.stale && section.sampled_at && <span className="ml-2 text-amber-700">数据已过期，请检查 Worker</span>}
-    {section?.error && <p className="text-amber-700">{section.error}</p>}
+    {section.sampled_at ? `最近成功指标采集于 ${new Date(section.sampled_at).toLocaleString('zh-CN')}` : attempted ? '已尝试采集，尚无可用结果' : '等待后台首次采集，尚无统计数据'}
+    {section.stale && section.sampled_at && <span className="ml-2 text-amber-700">数据已过期；各指标时间见下方</span>}
+    {section.error && !section.metrics?.length && <p className="text-amber-700">{section.sampled_at ? '本次采集暂不可用，显示上次成功结果。' : '首次采集失败，等待后台重试。'}</p>}
+  </div>;
+}
+const metricLabels: Record<string, string> = {
+  documents: '有效文档', files: '上传文件', trash: '回收站文档', versions: '内容版本',
+  chunks: '在线检索切片', parent_chunks: '在线父片段', vectors: '全部存储向量',
+  active_vectors: '当前有效向量', datasets: '可用数据集', waiting: '等待任务',
+  running: '执行中任务', failed: '失败任务记录', oldest_waiting_at: '最早排队时间',
+  blobs: 'Blob 对象', blob_bytes: 'Blob 占用', original_bytes: '原文占用',
+  preview_bytes: '预览占用', other_blob_bytes: '其他 Blob 占用', parquet_bytes: 'Parquet 占用',
+  database_bytes: '数据库占用', vector_table_bytes: '向量表占用', disk: '数据盘容量',
+};
+function MetricHealth({ section }: { section?: Section<unknown> }) {
+  if (!section) return null;
+  const metrics = section.metrics || [];
+  const failed = metrics.filter(m => m.state === 'degraded' || m.state === 'first_failed');
+  const never = metrics.filter(m => m.state === 'never');
+  const stale = metrics.filter(m => m.stale);
+  const noRecentAttempt = metrics.some(m => (m.attempt_age_seconds || 0) > (section.interval_seconds || 900) * 3
+    && (!m.next_attempt_at || (m.last_attempt_at && Date.parse(m.next_attempt_at)
+      < Date.parse(m.last_attempt_at) + (m.attempt_age_seconds || 0) * 1000)));
+  const issue = failed.length || never.length || stale.length;
+  const summary = section.state === 'first_failed' ? '首次采集失败，尚无可用结果。'
+    : section.state === 'partial' ? '部分统计可用；失败项保留旧值，无历史结果的项目显示未知。'
+    : section.state === 'degraded' ? '本次采集失败，当前显示历史结果。'
+    : stale.length ? '部分指标已过期，请以各自采集时间为准。' : '';
+  const timeLabel = (time: string | null) => time ? new Date(time).toLocaleString('zh-CN') : '尚无';
+  if (!metrics.length) return null;
+  return <div className={`mt-2 rounded-lg p-3 text-xs leading-5 ${issue ? 'bg-amber-50 text-amber-900' : 'bg-slate-50 text-slate-500'}`}>
+    {summary && <p>{summary}</p>}
+    {noRecentAttempt && <p>长时间未收到采集尝试记录，请检查 Worker 与数据库连接。</p>}
+    {failed.map(m => <p key={m.name}>
+      {metricLabels[m.name] || m.name}：{m.error?.includes('超时') ? '采集超时或锁等待放弃' : '采集暂不可用'}；
+      {m.last_success_at ? `保留 ${timeLabel(m.last_success_at)} 的旧值` : '尚无成功结果'}。
+      {m.next_attempt_at && `预计 ${timeLabel(m.next_attempt_at)} 后重试。`}
+    </p>)}
+    {never.map(m => <p key={m.name}>{metricLabels[m.name] || m.name}：尚未采集，等待后台执行。</p>)}
+    <details className="mt-1">
+      <summary className="cursor-pointer">查看各指标采集时间（{metrics.length} 项）</summary>
+      <div className="mt-2 max-h-60 space-y-2 overflow-auto">
+        {metrics.map(m => <div key={m.name}>
+          <p>{metricLabels[m.name] || m.name}{m.stale ? ' · 已过期' : ''}{m.state === 'degraded' ? ' · 旧值' : ''}</p>
+          <p>最近成功：{timeLabel(m.last_success_at)} · 最近尝试：{timeLabel(m.last_attempt_at)}</p>
+        </div>)}
+      </div>
+    </details>
   </div>;
 }
 const panel = 'min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm';
@@ -63,6 +115,10 @@ export default function OverviewPage() {
   const k = data?.sections.knowledge.data;
   const q = data?.sections.queue.data;
   const c = data?.sections.capacity.data;
+  const queueSection = data?.sections.queue;
+  const oldestKnown = queueSection?.metrics?.length
+    ? Boolean(queueSection.metrics.find(m => m.name === 'oldest_waiting_at')?.last_success_at)
+    : Boolean(q && queueSection?.sampled_at);
   const disk = c?.disk;
   const percent = disk && disk.total > 0 ? disk.used / disk.total * 100 : null;
   const history = data?.history || [];
@@ -109,6 +165,7 @@ export default function OverviewPage() {
           </dl>
           <p className="mt-4 text-xs leading-5 text-slate-500">文件占用按数据库登记字节去重汇总，不扫描目录；含历史版本与回收站。不含未登记临时文件、备份及 Docker 镜像。数据库可能位于另一块盘，以上数字不可直接相加解释数据盘占比。</p>
           <Stamp section={data?.sections.capacity} />
+          <MetricHealth section={data?.sections.capacity} />
         </section>
         <section className={panel}>
           <h2 className="font-semibold text-slate-900">知识资产</h2>
@@ -121,6 +178,7 @@ export default function OverviewPage() {
           </dl>
           <p className="mt-5 text-xs leading-5 text-slate-500">文档包含文件、网页与随手记。全部向量含候选和旧 Profile；当前有效向量匹配生效 Profile 与切片内容哈希。数据集可能只生成抽样向量，数量不代表覆盖率或检索质量。</p>
           <Stamp section={data?.sections.knowledge} />
+          <MetricHealth section={data?.sections.knowledge} />
           <Link href="/settings?section=embedding" className="mt-4 inline-block text-sm text-teal-700">查看向量构建与覆盖 →</Link>
         </section>
       </div>
@@ -137,9 +195,10 @@ export default function OverviewPage() {
       <section className={panel}>
         <h2 className="font-semibold text-slate-900">处理队列</h2>
         <p className="mt-2 text-sm leading-6 text-slate-600">等待 {count(q?.waiting)} · 执行中 {count(q?.running)} · 失败记录 {count(q?.failed)}</p>
-        <p className="mt-2 text-sm text-slate-600">最早排队时间：{q ? q.oldest_waiting_at ? new Date(String(q.oldest_waiting_at)).toLocaleString('zh-CN') : '暂无排队任务' : '等待采集'}</p>
+        <p className="mt-2 text-sm text-slate-600">最早排队时间：{oldestKnown ? q?.oldest_waiting_at ? new Date(String(q.oldest_waiting_at)).toLocaleString('zh-CN') : '暂无排队任务' : '暂不可用'}</p>
         <p className="mt-2 text-xs leading-5 text-slate-500">统计当前、未回收文档的任务记录，不是文档数；一篇文档可产生多个向量任务。失败记录可能包含已重试的旧尝试，不能直接当作当前失败文档数或成功率。WebDAV 扫描任务另见知识源。</p>
         <Stamp section={data?.sections.queue} />
+        <MetricHealth section={data?.sections.queue} />
         <div className="mt-4 flex flex-wrap gap-5 text-sm text-teal-700"><Link href="/processing">查看处理任务 →</Link><Link href="/inbox">处理待办与失败 →</Link><Link href="/settings/sources">查看来源扫描 →</Link></div>
       </section>
       <p className="text-xs leading-5 text-slate-500">本页不调用模型、不改变索引。检索 P95、调用成功率和备份完成时间尚未接入，不以数据库探活耗时冒充查询性能。</p>

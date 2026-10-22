@@ -1,12 +1,23 @@
 from datetime import datetime, timedelta, timezone
+import time
 from unittest.mock import patch
 
 import pytest
+import sqlalchemy
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from apps.api.models.monitoring import MonitoringHistory, MonitoringSnapshot
-from apps.worker.services.monitoring import collect_once, collect_capacity, collect_knowledge, collect_queue
+from apps.api.models.monitoring import MonitoringHistory, MonitoringMetrics, MonitoringSnapshot
+from apps.api.services.monitoring import aware
+from apps.worker.services.monitoring import (
+    _collect_kind,
+    ERROR_TIMEOUT,
+    ERROR_UNAVAILABLE,
+    collect_once,
+    collect_capacity,
+    collect_knowledge,
+    collect_queue,
+)
 
 
 @pytest.fixture
@@ -14,42 +25,21 @@ def engine():
     engine = create_engine("sqlite://")
     MonitoringSnapshot.__table__.create(engine)
     MonitoringHistory.__table__.create(engine)
+    MonitoringMetrics.__table__.create(engine)
     yield engine
     engine.dispose()
 
 
-def test_frequency_history_and_retention(engine, tmp_path):
-    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
-    capacity = {"blob_bytes": 100, "disk": {"used": 200}}
-    with patch('apps.worker.services.monitoring.collect_queue', return_value={"waiting": 2}) as queue, \
-         patch('apps.worker.services.monitoring.collect_knowledge', return_value={"documents": 3}) as knowledge, \
-         patch('apps.worker.services.monitoring.collect_capacity', return_value=capacity):
-        collect_once(engine, tmp_path, now=now)
-        collect_once(engine, tmp_path, now=now + timedelta(seconds=30))
-        assert queue.call_count == knowledge.call_count == 1
-        collect_once(engine, tmp_path, now=now + timedelta(seconds=61))
-        assert queue.call_count == 2 and knowledge.call_count == 1
-        with Session(engine) as db:
-            assert db.query(MonitoringHistory).count() == 1
-        collect_once(engine, tmp_path, now=now + timedelta(days=32))
-        with Session(engine) as db:
-            assert db.query(MonitoringHistory).count() == 1
+def _add_snapshot(db, kind, **kwargs):
+    snapshot = MonitoringSnapshot(kind=kind, attempted_at=datetime.now(timezone.utc))
+    for key, value in kwargs.items():
+        setattr(snapshot, key, value)
+    db.add(snapshot)
+    return snapshot
 
 
-def test_failure_preserves_last_good_and_sanitizes(engine, tmp_path):
-    now = datetime.now(timezone.utc)
-    with Session(engine) as db:
-        db.add(MonitoringSnapshot(kind="queue", data={"waiting": 5}, sampled_at=now - timedelta(hours=1), attempted_at=now - timedelta(hours=1)))
-        db.commit()
-    with patch('apps.worker.services.monitoring.collect_queue', side_effect=RuntimeError('secret-password')), \
-         patch('apps.worker.services.monitoring.collect_knowledge', return_value={"documents": 0}), \
-         patch('apps.worker.services.monitoring.collect_capacity', return_value={"blob_bytes": 0, "disk": None}):
-        collect_once(engine, tmp_path, now=now)
-    with Session(engine) as db:
-        row = db.get(MonitoringSnapshot, 'queue')
-        assert row.data == {"waiting": 5}
-        assert 'secret' not in row.error
-        assert row.sampled_at.replace(tzinfo=timezone.utc) == now - timedelta(hours=1)
+def _snapshot(db, kind):
+    return db.get(MonitoringSnapshot, kind)
 
 
 def test_aggregations_without_content_or_filesystem_walk(engine, tmp_path):
@@ -79,6 +69,13 @@ def test_aggregations_without_content_or_filesystem_walk(engine, tmp_path):
         k = collect_knowledge(db)
         assert k['documents'] == k['chunks'] == k['active_vectors'] == k['datasets'] == 1
         assert k['trash'] == 1 and k['vectors'] == 4
+        # A valid identifier is insufficient: changed, NULL and historical
+        # hashes must never count as current usable embeddings.
+        db.execute(text("UPDATE chunk_embeddings SET content_hash='stale' WHERE chunk_id=1 AND profile_id=1"))
+        assert collect_knowledge(db)['active_vectors'] == 0
+        db.execute(text("UPDATE chunk_embeddings SET content_hash=NULL WHERE chunk_id=1 AND profile_id=1"))
+        assert collect_knowledge(db)['active_vectors'] == 0
+        db.execute(text("UPDATE chunk_embeddings SET content_hash='h' WHERE chunk_id=1 AND profile_id=1"))
         q = collect_queue(db)
         assert q['waiting'] == 1 and q['failed'] == 0
         c = collect_capacity(db, tmp_path)
@@ -88,3 +85,125 @@ def test_aggregations_without_content_or_filesystem_walk(engine, tmp_path):
         assert c['disk']['total'] > 0
         with patch('shutil.disk_usage', side_effect=OSError):
             assert collect_capacity(db, tmp_path)['disk'] is None
+
+
+def test_metric_isolation_keeps_other_success_on_single_failure(engine, tmp_path):
+    now = datetime.now(timezone.utc)
+
+    def ok_probe(db):
+        return {"documents": 5, "files": 5}
+
+    def bad_probe(db):
+        raise sqlalchemy.exc.OperationalError("SELECT 1", {}, Exception("secret-password"))
+
+    def provider(kind, path):
+        if kind != "knowledge":
+            return []
+        return [(("documents", "files"), ok_probe), (("active_vectors",), bad_probe)]
+
+    with patch('apps.worker.services.monitoring._probes_for', side_effect=provider):
+        collect_once(engine, tmp_path, now=now)
+    with Session(engine) as db:
+        docs = db.get(MonitoringMetrics, ("knowledge", "documents"))
+        files = db.get(MonitoringMetrics, ("knowledge", "files"))
+        active = db.get(MonitoringMetrics, ("knowledge", "active_vectors"))
+        assert docs.value == 5 and files.value == 5 and docs.error is None
+        assert active.error == ERROR_TIMEOUT and active.value is None and active.last_success_at is None
+        assert active.consecutive_failures == 1 and active.next_attempt_at is not None
+        assert "secret-password" not in (active.error or "")
+        # The group snapshot no longer hides the partial success.
+        data = _snapshot(db, "knowledge").data
+        assert data["documents"] == 5 and data["active_vectors"] is None
+        queue = _snapshot(db, "queue")
+        assert queue is None  # No probe ran: do not invent a first attempt.
+
+
+def test_failure_retains_old_value_and_old_success_time(engine, tmp_path):
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=2)
+    with Session(engine) as db, db.begin():
+        db.add(MonitoringMetrics(kind="knowledge", metric="active_vectors", value=300,
+                                 last_success_at=old, last_attempt_at=old))
+
+    def bad(db):
+        raise sqlalchemy.exc.OperationalError("Q", {}, Exception("boom"))
+
+    def provider(kind, path):
+        return [(("active_vectors",), bad)] if kind == "knowledge" else []
+
+    with patch('apps.worker.services.monitoring._probes_for', side_effect=provider):
+        collect_once(engine, tmp_path, now=now)
+    with Session(engine) as db:
+        row = db.get(MonitoringMetrics, ("knowledge", "active_vectors"))
+        assert row.value == 300 and row.error == ERROR_TIMEOUT
+        assert row.last_success_at.replace(tzinfo=timezone.utc) == old
+        assert row.last_attempt_at.replace(tzinfo=timezone.utc) == now
+        assert row.consecutive_failures == 1 and row.next_attempt_at is not None
+        assert aware(row.next_attempt_at) > now  # bounded first backoff is soon but not instant
+
+
+def test_budget_marks_untried_metrics_as_not_attempted_not_failure(engine, tmp_path):
+    now = datetime.now(timezone.utc)
+    calls = {"n": 0}
+
+    def fake_monotonic():
+        calls["n"] += 1
+        return 0 if calls["n"] <= 2 else 40  # budget over: second probe never attempted
+
+    def provider(kind, path):
+        if kind != "knowledge":
+            return []
+        return [(("documents",), lambda db: {"documents": 5}),
+                (("active_vectors",), lambda db: {"active_vectors": 9})]
+
+    with Session(engine) as db, db.begin():
+        _add_snapshot(db, "knowledge", sampled_at=None)
+        db.flush()
+        with patch('apps.worker.services.monitoring._probes_for', side_effect=provider), \
+             patch('apps.worker.services.monitoring.time.monotonic', side_effect=fake_monotonic):
+            _collect_kind(db, "knowledge", 900, now, deadline=30, storage_path=str(tmp_path), snapshot=_snapshot(db, "knowledge"))
+    with Session(engine) as db:
+        assert db.get(MonitoringMetrics, ("knowledge", "documents")).value == 5
+        assert db.get(MonitoringMetrics, ("knowledge", "active_vectors")) is None  # never attempted, not a failure
+        snapshot = _snapshot(db, "knowledge")
+        assert snapshot.error is None  # no failed metric, just not-yet-attempted
+
+
+def test_healthy_cadence_but_failed_metric_retries_early(engine, tmp_path):
+    now = datetime.now(timezone.utc)
+    healthy_last = now - timedelta(seconds=100)  # < 900s interval: not due yet
+    with Session(engine) as db, db.begin():
+        db.add(MonitoringMetrics(kind="queue", metric="waiting", value=2,
+                                 last_success_at=healthy_last, last_attempt_at=healthy_last))
+        db.add(MonitoringMetrics(kind="queue", metric="failed", value=1,
+                                 last_success_at=now - timedelta(hours=1),
+                                 last_attempt_at=now - timedelta(hours=1),
+                                 error=ERROR_UNAVAILABLE, consecutive_failures=2,
+                                 next_attempt_at=now - timedelta(seconds=5)))
+
+    def ok_waiting(db):
+        return {"waiting": 7}
+
+    def ok_failed(db):
+        return {"failed": 0}
+
+    def provider(kind, path):
+        if kind != "queue":
+            return []
+        return [(("waiting",), ok_waiting), (("failed",), ok_failed)]
+
+    with Session(engine) as db, db.begin():
+        snapshot = db.get(MonitoringSnapshot, "queue")
+        if snapshot is None:
+            snapshot = MonitoringSnapshot(kind="queue", attempted_at=now)
+            db.add(snapshot)
+            db.flush()
+        with patch('apps.worker.services.monitoring._probes_for', side_effect=provider):
+            _collect_kind(db, "queue", 900, now, deadline=time.monotonic() + 30,
+                          storage_path=str(tmp_path), snapshot=snapshot)
+    with Session(engine) as db:
+        waiting = db.get(MonitoringMetrics, ("queue", "waiting"))
+        assert waiting.value == 2 and waiting.last_attempt_at.replace(tzinfo=timezone.utc) == healthy_last
+        failed = db.get(MonitoringMetrics, ("queue", "failed"))
+        assert failed.value == 0 and failed.last_attempt_at.replace(tzinfo=timezone.utc) == now
+        assert failed.error is None and failed.consecutive_failures == 0

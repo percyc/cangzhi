@@ -1,5 +1,7 @@
 # 藏知关键技术决策
 
+- [ADR-033：指标级运行统计与真实采集时间](ADR-033-monitoring-metrics.md)
+
 - [ADR-032：后台 WebDAV 扫描](ADR-032-background-webdav-scan.md)
 
 - [ADR-031：WPS 文字文件兼容](ADR-031-wps-writer.md)
