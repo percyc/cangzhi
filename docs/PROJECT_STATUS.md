@@ -6,6 +6,13 @@
 
 更新时间：2026-10-22
 
+最新部署：`v1.3.5`，运行源码`da1ec50`，WebDAV全层递归修复已按维护者追加授权
+快进合并main并部署。API/Web/Worker版本一致、dirty=false，四服务healthy。
+发布镜像API42项、Web124项与lint/类型检查/25页构建通过；Worker业务未变，
+核验构建标识和运行健康。联合备份校验通过，保留rollback-v1.3.5镜像。
+数据库未重启、schema0038，无来源扫描或历史重处理；38项开发回归覆盖缺失保护。
+本轮同步三端main和v1.3.5，并补推此前未同步的v1.3.4；下方为历史交付快照。
+
 最新部署：`v1.3.4`，运行源码`70fd207`，WPS文字兼容已按维护者本轮明确授权
 部署API/Web/Worker；四服务healthy，Web/API/Worker版本与提交一致、dirty=false。
 新联合备份校验通过，保留rollback-v1.3.4镜像；PostgreSQL未重启，schema0038。
@@ -133,9 +140,8 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
-- `CZ-S02` WebDAV 全层递归与缺失保护已实现，Codex，分支
-  `codex/CZ-S02-webdav-recursive`；本轮测试与交付见 DEVLOG。
-  仅代码、测试、提交与推送，不部署；后台续扫仍属后续。
+- `CZ-S02` WebDAV 全层递归与缺失保护已完成，功能`d83ed35`；已追加授权
+  合并部署v1.3.5。后台持久进度与续扫仍属后续，具体测试与交付见 DEVLOG。
 
 - `CZ-U08` 桌面版本入口遮挡已修复并部署，`d698d12`，发布节点v1.3.3。
 
