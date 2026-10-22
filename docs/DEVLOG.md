@@ -2131,3 +2131,29 @@
   无活动任务；先保留旧镜像、创建并校验联合备份，再更新API/Web/Worker。
 - 业务沿用已验收功能e8c80ef及记录212a782，版本号更新后干净构建；实际部署与
   镜像回归结果后补，不将开发测试当作运行实例验收。无需执行migrate。
+
+### 2026-10-22 v1.3.4 部署验收与提交
+
+- 运行源码`70fd207d32dc948ee50b0b749aa963c88a5c4d61`，工作区干净构建。
+  标准构建发现基础镜像变化并重新解析Python依赖（例如FastAPI0.159.1），立即中止，
+  未部署该候选。改以已验证的v1.3.3 API/Worker/Web镜像为底层，使用临时Dockerfile
+  COPY当前源码、写入统一构建标识；--network=none，不执行pip/npm安装，Web重新
+  lint/test:ux/build，运行工作目录保持/app/apps/web。未修改仓库常规Dockerfile。
+- 底层镜像APIc220980739b2、Workera2486ee07dfa、Web5f821bba6f8d；API/Worker新旧
+  pip freeze排序摘要分别均为9f7bab38deb9、6e7befe8acfd，证明本次未变更Python依赖。
+  这不是完整可复现依赖锁，CZ-O05/CZ-SEC01仍保留，不将功能回归等同于安全验收。
+- API候选镜像149项通过；Worker候选镜像全量275项通过，开启实际LibreOffice与
+  本地OCR集成，无跳过；Web候选镜像124项、lint/类型检查及25页生产构建通过。
+  测试均隔离、无生产数据挂载或真实模型请求，沿用既有依赖弃用警告。
+- 新联合备份backups/cangzhi-20261022-124658校验和、pg_restore目录与storage归档
+  检查通过，旧三服务镜像保留rollback-v1.3.4。发布前无活动任务，旧Worker正常
+  SIGTERM退出0；原Compose项目仅--no-deps --no-build --pull never更新应用服务。
+- 本次镜像：API300f4d53c194、Worker9cc5f8ccfac0、Webd7dfb952b36e；均标记
+  v1.3.4/70fd207、dirty=false。migrate仅同步本地镜像标签，未运行迁移。
+  PostgreSQL镜像ccc6e83d6e35及2026-09-09启动时间不变，schema0038。
+- 正式Web health与经Web转发的API readiness均200；API版本端点未认证401。
+  API/Web/Worker/PostgreSQL均healthy，Worker数据库健康命令通过。发布前后
+  文档19、版本21、Blob14，队列仍854completed/2failed，无活动任务；未重跑历史
+  文档、重置失败记录或修改模型/来源配置。真实私有WPS仍需维护者上传核验。
+- 本地标记v1.3.4，标签绑定实际运行源码70fd207，不将后补部署记录冒充运行提交。
+  本轮按“部署并提交”范围交付，未合并main、推送仓库或镜像；原标签不移动。
