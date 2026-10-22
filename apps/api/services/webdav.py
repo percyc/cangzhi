@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import posixpath
+from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from urllib.parse import unquote, urljoin, urlsplit
+from fnmatch import fnmatchcase
+from urllib.parse import quote, unquote, urljoin, urlsplit
 from xml.etree import ElementTree
 
 import httpx
@@ -24,6 +28,91 @@ class RemoteEntry:
     last_modified: str | None
     size: int | None
     content_type: str | None
+
+
+def normalized_remote_path(path: str) -> str:
+    # Entries are decoded once by parse_multistatus; do not decode again.
+    return "/" + posixpath.normpath("/" + path.lstrip("/")).lstrip("/")
+
+
+def scan_root_path(base_url: str, root_path: str) -> str:
+    url = urljoin(base_url.rstrip("/") + "/", (root_path or "/").lstrip("/"))
+    return normalized_remote_path(unquote(urlsplit(url).path))
+
+
+def matches_ignore_pattern(path: str, patterns: list[str]) -> bool:
+    return any(
+        fnmatchcase(path, pattern)
+        or any(fnmatchcase(part, pattern) for part in path.split("/") if part)
+        for pattern in patterns
+    )
+
+
+def in_scan_scope(path: str, root: str, recursive: bool, patterns: list[str]) -> bool:
+    path = normalized_remote_path(path)
+    prefix = root.rstrip("/") + "/"
+    if not path.startswith(prefix) or path == root:
+        return False
+    return (recursive or "/" not in path[len(prefix):]) and not matches_ignore_pattern(
+        path, patterns
+    )
+
+
+async def scan_tree(
+    *,
+    base_url: str,
+    root_path: str,
+    username: str,
+    password: str,
+    trusted_private_network: bool,
+    recursive: bool,
+    ignore_patterns: list[str],
+    list_directory: Callable[..., Awaitable[list[RemoteEntry]]] | None = None,
+    max_directories: int = 2000,
+    max_entries: int = 100000,
+    timeout_seconds: float = 45,
+) -> tuple[list[RemoteEntry], int, str]:
+    """Return a complete bounded listing or fail without any reconciliation."""
+    list_directory = list_directory or propfind
+    root = scan_root_path(base_url, root_path)
+    pending = deque([root])
+    visited = {root}
+    files: dict[str, RemoteEntry] = {}
+    scanned = count = 0
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            while pending:
+                directory = pending.popleft()
+                entries = await list_directory(
+                    base_url=base_url, root_path=directory, username=username,
+                    password=password, trusted_private_network=trusted_private_network,
+                    absolute_path=True, depth="1",
+                )
+                scanned += 1
+                count += len(entries)
+                if count > max_entries:
+                    raise WebDAVError("扫描未完成：目录条目过多，请缩小同步目录；原记录保持不变")
+                for entry in entries:
+                    path = normalized_remote_path(entry.path)
+                    if path == directory:
+                        continue
+                    # Never follow siblings, ancestors, or unexpected deep responses.
+                    if posixpath.dirname(path) != directory:
+                        raise WebDAVError("扫描未完成：目录返回越界条目；原记录保持不变")
+                    if matches_ignore_pattern(path, ignore_patterns):
+                        continue
+                    if entry.is_collection:
+                        if recursive and path not in visited:
+                            visited.add(path)
+                            if len(visited) > max_directories:
+                                raise WebDAVError("扫描未完成：子目录过多，请缩小同步目录；原记录保持不变")
+                            pending.append(path)
+                    else:
+                        files[path] = RemoteEntry(path, False, entry.etag,
+                            entry.last_modified, entry.size, entry.content_type)
+    except TimeoutError as exc:
+        raise WebDAVError("扫描未完成：扫描超时，请缩小同步目录后重试；原记录保持不变") from exc
+    return list(files.values()), scanned, root
 
 
 def webdav_external_identity(base_url: str, remote_path: str) -> str:
@@ -65,12 +154,17 @@ async def propfind(
     trusted_private_network: bool,
     depth: str = "1",
     timeout_seconds: float = 20,
+    absolute_path: bool = False,
 ) -> list[RemoteEntry]:
     safe_base = validate_webdav_url(
         base_url, trusted_private_network=trusted_private_network
     )
     path = "/" + (root_path or "/").strip("/")
-    request_url = urljoin(safe_base, path.lstrip("/"))
+    if absolute_path:
+        parts = urlsplit(safe_base)
+        request_url = f"{parts.scheme}://{parts.netloc}{quote(path, safe='/').rstrip('/')}/"
+    else:
+        request_url = urljoin(safe_base, path.lstrip("/"))
     token = base64.b64encode(f"{username}:{password}".encode()).decode()
     headers = {
         "Authorization": f"Basic {token}",
@@ -89,16 +183,21 @@ async def propfind(
             follow_redirects=False,
             trust_env=False,
         ) as client:
-            response = await client.request(
+            async with client.stream(
                 "PROPFIND", request_url, headers=headers, content=body
-            )
+            ) as response:
+                payload = bytearray()
+                async for chunk in response.aiter_bytes():
+                    payload.extend(chunk)
+                    if len(payload) > 16 * 1024 * 1024:
+                        raise WebDAVError("扫描未完成：单目录响应超过16 MiB，请缩小目录；原记录保持不变")
     except httpx.HTTPError as exc:
         raise WebDAVError(f"无法连接 WebDAV：{type(exc).__name__}") from exc
     if response.status_code not in {200, 207}:
         if response.status_code in {401, 403}:
             raise WebDAVError("WebDAV 认证失败，请检查用户名和密码")
         raise WebDAVError(f"WebDAV 返回 HTTP {response.status_code}")
-    return parse_multistatus(response.content)
+    return parse_multistatus(bytes(payload))
 
 
 async def download_file(
@@ -176,11 +275,23 @@ def parse_multistatus(payload: bytes) -> list[RemoteEntry]:
         raise WebDAVError("WebDAV 返回的目录清单不是有效 XML") from exc
     entries: list[RemoteEntry] = []
     ns = {"d": "DAV:"}
+    if root.tag != "{DAV:}multistatus":
+        raise WebDAVError("扫描未完成：WebDAV 返回的目录清单缺少 multistatus")
     for response in root.findall("d:response", ns):
         href = response.findtext("d:href", default="", namespaces=ns)
-        prop = response.find("d:propstat/d:prop", ns)
+        statuses = [node.text or "" for node in response.findall("d:status", ns)]
+        if any(len(status.split()) < 2 or status.split()[1] != "200" for status in statuses):
+            raise WebDAVError("扫描未完成：WebDAV 目录包含不可读取的条目；原记录保持不变")
+        prop = None
+        for propstat in response.findall("d:propstat", ns):
+            status = propstat.findtext("d:status", default="HTTP/1.1 200 OK", namespaces=ns)
+            candidate = propstat.find("d:prop", ns)
+            if (len(status.split()) >= 2 and status.split()[1] == "200"
+                    and candidate is not None and candidate.find("d:resourcetype", ns) is not None):
+                prop = candidate
+                break
         if not href or prop is None:
-            continue
+            raise WebDAVError("扫描未完成：WebDAV 目录条目不完整；原记录保持不变")
         resource_type = prop.find("d:resourcetype", ns)
         is_collection = (
             resource_type is not None

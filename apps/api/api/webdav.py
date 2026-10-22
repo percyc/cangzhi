@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from fnmatch import fnmatchcase
 from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any, Literal
@@ -29,6 +28,9 @@ from ..services.webdav import (
     WebDAVError,
     download_file,
     propfind,
+    scan_tree,
+    in_scan_scope,
+    matches_ignore_pattern as _matches_ignore_pattern,
     validate_webdav_url,
     webdav_external_identity,
 )
@@ -577,12 +579,15 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
     source.last_error = None
     await db.commit()
     try:
-        remote = await propfind(
+        remote, scanned_directories, scan_root = await scan_tree(
             base_url=source.base_url,
             root_path=source.root_path,
             username=source.username,
             password=decrypt_secret(source.password_cipher),
             trusted_private_network=source.trusted_private_network,
+            recursive=source.recursive,
+            ignore_patterns=source.ignore_patterns or [],
+            list_directory=propfind,
         )
     except (WebDAVError, URLSecurityError) as exc:
         source.sync_status = "failed"
@@ -707,6 +712,10 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
     suspected_missing = confirmed_missing = trashed = 0
     documents_to_trash: list[Document] = []
     for path, entry in existing.items():
+        if not in_scan_scope(path, scan_root, source.recursive, source.ignore_patterns or []):
+            continue
+        if PurePosixPath(path).suffix.lower() not in extensions:
+            continue
         # A file excluded by a changed extension or ignore rule still exists
         # remotely and must never be interpreted as a remote deletion.
         if path in remote_file_paths or entry.state == "ignored":
@@ -760,18 +769,8 @@ async def scan_source(source_id: int, db: AsyncSession = Depends(get_db)):
         "trashed": trashed,
         "restored": restored,
         "eligible_files": len(files),
+        "scanned_directories": scanned_directories,
     }
-
-
-def _matches_ignore_pattern(path: str, patterns: list[str]) -> bool:
-    """Match WebDAV ignore globs against the full path and each path segment."""
-
-    parts = PurePosixPath(path).parts
-    return any(
-        fnmatchcase(path, pattern)
-        or any(fnmatchcase(part, pattern) for part in parts)
-        for pattern in patterns
-    )
 
 
 @router.post("/{source_id}/sync", response_model=dict[str, Any])

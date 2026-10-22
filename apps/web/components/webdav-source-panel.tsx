@@ -195,7 +195,7 @@ export function WebDavSourcePanel() {
       if (kind === 'test') setMessage(`${source.name}：连接正常`);
       if (kind === 'scan')
         setMessage(
-          `${source.name}：可导入 ${String(result.eligible_files ?? 0)} 个，待确认缺失 ${String(result.suspected_missing ?? 0)} 个，已确认缺失 ${String(result.missing ?? 0)} 个，移入回收站 ${String(result.trashed ?? 0)} 个，自动恢复 ${String(result.restored ?? 0)} 个`,
+          `${source.name}：已扫描 ${String(result.scanned_directories ?? 1)} 个目录，可导入 ${String(result.eligible_files ?? 0)} 个，待确认缺失 ${String(result.suspected_missing ?? 0)} 个，已确认缺失 ${String(result.missing ?? 0)} 个，移入回收站 ${String(result.trashed ?? 0)} 个，自动恢复 ${String(result.restored ?? 0)} 个`,
         );
       if (kind === 'sync')
         setMessage(
@@ -531,7 +531,7 @@ function SourceFields({
       </label>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={form.recursive} onChange={(event) => setForm({ ...form, recursive: event.target.checked })} />
-        扫描同步目录下的子目录
+        扫描所有层级的子目录（不勾选则仅扫描当前目录）
       </label>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={form.trusted_private_network} onChange={(event) => setForm({ ...form, trusted_private_network: event.target.checked })} />
