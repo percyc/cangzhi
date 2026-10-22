@@ -253,6 +253,10 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
+- `CZ-B01` 图标发布：Codex，`codex/CZ-B01-brand-icon`，按本轮明确授权
+  合并、部署并同步三远端；拟发布v1.4.2，复用已验证依赖，先备份和镜像验收。
+  业务仅Web变化，API/Worker同步构建标识；无迁移、不重启数据库、不重跑历史资料。
+
 - 2026-10-22：维护者授权按处理可靠性计划实施、验证、合并、推送和部署。
   负责人Codex（OpenCode协作），分支`codex/CZ-S03-webdav-import-browser`。
   先交付WebDAV与指标级统计恢复，再交付共享模型准入和普通任务恢复；
