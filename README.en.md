@@ -59,7 +59,9 @@ boundaries.
 
 ## Version and development status
 
-- **The current release milestone is `v1.3.3`**, fixing the desktop settings sidebar
+- **The current delivery version is `v1.3.4`**, adding compatible WPS Writer upload,
+  parsing, PDF preview and necessary OCR; see [compatibility limits](docs/WPS_COMPATIBILITY.md).
+  `v1.3.3` fixed the desktop settings sidebar
   covering version information and actions in short windows.
   `v1.3.2` added image build identification,
   Web/API version checks, retained document views and responsive tabs, along with
