@@ -18,7 +18,7 @@ const initial = {
   has_ocr_api_key: true, ocr_timeout_seconds: 30, ocr_confidence_threshold: 600,
   ocr_min_chars: 8, ocr_max_external_pages: 20,
 };
-let config = structuredClone(initial), failDiscovery = false, failSave = false;
+let config = structuredClone(initial), failDiscovery = false, failSave = false, failRead = false;
 const requests = [];
 const fixture = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://fixture.test');
@@ -34,6 +34,10 @@ const fixture = http.createServer(async (req, res) => {
   if (route === '/api/system/upload-settings') return json({ max_upload_size_mb: 50 });
   if (route === '/api/embeddings/status') return json({ active_profile: { id: null, status: null, model: null, dim: null, provider: null }, profiles: [] });
   if (route === '/api/settings/ai') {
+    if (req.method === 'GET' && failRead) {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      return json({ detail: '合成配置读取失败' }, 503);
+    }
     if (req.method === 'PATCH') {
       if (failSave) { failSave = false; return json({ detail: '合成保存失败，请重试' }, 503); }
       config.provider = body.provider;
@@ -274,12 +278,86 @@ async function main() {
     assert.equal(patches().at(-1).body.reuse_chat, undefined);
     assert.equal(config.embedding_model, 'independent-again');
 
+    // Settings routes share one navigation instance, not just matching markup.
+    await page.setViewportSize({ width: 1440, height: 800 });
+    const nav = () => page.getByRole('navigation', { name: '设置分类', exact: true });
+    await search().getByRole('searchbox').fill('上传上限');
+    await page.locator('#system-version > summary').click();
+    await page.getByText('服务 API · synthetic', { exact: true }).waitFor();
+    await page.evaluate(() => {
+      window.__settingsRail = document.querySelector('.settings-rail');
+      window.__settingsSearch = document.querySelector('.settings-rail input[type="search"]');
+      window.__settingsVersion = document.querySelector('#system-version');
+    });
+    const versionReads = requests.filter(request => request.path === '/api/system/version').length;
+    const beforeNavigationWrites = writes().length;
+    await search().getByRole('link').first().click();
+    await page.waitForURL('**/settings/uploads');
+    await page.locator('#upload-limit').waitFor();
+    assert.equal(await search().getByRole('searchbox').inputValue(), '上传上限');
+    assert.equal(await page.evaluate(() => window.__settingsRail === document.querySelector('.settings-rail') && window.__settingsSearch === document.querySelector('.settings-rail input[type="search"]') && window.__settingsVersion === document.querySelector('#system-version')), true);
+    assert.equal(await page.locator('#system-version').evaluate(element => element.open), true);
+    assert.equal(requests.filter(request => request.path === '/api/system/version').length, versionReads);
+    await page.locator('#system-version > summary').click();
+    await search().getByRole('searchbox').fill('');
+    await nav().getByRole('link', { name: /数据与备份/ }).scrollIntoViewIfNeeded();
+    const scroll = await page.locator('.settings-rail-links').evaluate(element => element.scrollTop);
+    assert.ok(scroll > 0, 'Exercise actual sidebar scrolling');
+    await nav().getByRole('link', { name: /数据与备份/ }).click();
+    await page.waitForURL('**/settings/data');
+    assert.equal(await page.locator('.settings-rail-links').evaluate(element => element.scrollTop), scroll);
+    const historyLength = await page.evaluate(() => history.length);
+    await nav().getByRole('link', { name: /数据与备份/ }).click();
+    assert.equal(await page.evaluate(() => history.length), historyLength);
+    await page.goBack(); await page.waitForURL('**/settings/uploads');
+    await page.goForward(); await page.waitForURL('**/settings/data');
+    assert.equal(await nav().locator('[aria-current="page"]').getAttribute('href'), '/settings/data');
+    assert.equal(await page.evaluate(() => window.__settingsRail === document.querySelector('.settings-rail')), true);
+    await nav().getByRole('link', { name: /对话模型/ }).click();
+    await page.locator('#openai-model').waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: /OpenAI 兼容 支持 OpenAI/ }).click();
+    await page.locator('#openai-model').fill('navigation-draft');
+    await nav().getByRole('link', { name: /图片文字识别/ }).click();
+    await page.waitForURL('**/settings?section=ocr');
+    await page.locator('#ocr-model').waitFor();
+    // Browser traversal retains the existing global dirty-form confirmation.
+    page.once('dialog', dialog => dialog.accept());
+    await page.goBack();
+    await page.waitForURL('**/settings?section=chat');
+    await page.locator('#openai-model').waitFor();
+    assert.equal(await page.locator('#openai-model').inputValue(), 'navigation-draft');
+    page.once('dialog', dialog => dialog.dismiss());
+    await nav().getByRole('link', { name: /文件上传/ }).click();
+    assert.equal(await page.locator('#openai-model').inputValue(), 'navigation-draft');
+    page.once('dialog', dialog => dialog.accept());
+    await nav().getByRole('link', { name: /文件上传/ }).click();
+    await page.waitForURL('**/settings/uploads');
+    assert.equal(writes().length, beforeNavigationWrites, 'Navigation never saves, tests or builds');
+
+    // A failed or slow config read only affects the right pane. Navigation and
+    // mobile expansion remain usable, without reviving departed form guards.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mobileToggle = page.getByRole('button', { name: '查找或切换设置' });
+    if (await mobileToggle.getAttribute('aria-expanded') === 'false') await mobileToggle.click();
+    await search().getByRole('searchbox').fill('模型');
+    failRead = true;
+    await page.getByLabel('切换设置页面').selectOption('chat');
+    await page.getByText('设置加载中…', { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__settingsRail === document.querySelector('.settings-rail')), true);
+    await page.getByText(/读取设置失败：/).waitFor();
+    assert.equal(await mobileToggle.getAttribute('aria-expanded'), 'true');
+    assert.equal(await search().getByRole('searchbox').inputValue(), '模型');
+    await page.getByLabel('切换设置页面').selectOption('uploads');
+    await page.waitForURL('**/settings/uploads');
+    failRead = false;
+
     assert.equal(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }).includes('synthetic-only')), false);
     assert.deepEqual(errors, []);
-    console.log('PASS guided settings: four steps, skip preservation, discovery/manual input, save failure, independent copy/save/test, invalid source recovery, drafts, collapsible search/keyboard/guards, privacy and 390/1024/1440 layouts');
+    console.log('PASS guided settings: four steps, independent copy/save/test, drafts/guards, persistent navigation/search/scroll/version, history, current-item no-op, slow/failed reads, privacy and 390/1024/1440 layouts');
   } catch (error) { process.stderr.write(log); throw error; }
   finally {
     await browser?.close(); server.kill('SIGTERM');
+    fixture.closeAllConnections();
     await new Promise(resolve => fixture.close(resolve));
   }
 }

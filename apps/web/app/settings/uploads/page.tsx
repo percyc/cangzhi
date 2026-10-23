@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 import { withApiBasePath } from '@/lib/paths';
 import { useUnsavedChanges } from '@/lib/navigation-guard';
 
@@ -61,7 +60,6 @@ export default function UploadSettingsPage() {
     <p className="text-xs font-semibold tracking-widest text-slate-400">系统设置</p>
     <h1 className="mt-2 text-3xl font-semibold text-slate-950">文件上传</h1>
     <p className="mt-2 text-sm text-slate-500">所有工作空间共用，网页上传与外部 API 使用相同限额。</p>
-    <SettingsSectionNav active="uploads" />
     <form onSubmit={save} className="mt-6 space-y-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
       <div>
         <label htmlFor="upload-limit" className="block text-sm font-medium text-slate-800">单个文件大小上限（MiB）</label>

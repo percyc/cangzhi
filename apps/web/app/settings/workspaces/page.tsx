@@ -9,7 +9,6 @@ import {
   useState,
 } from 'react';
 
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 import { workspaceSlug } from '@/lib/usability';
 
 type Workspace = {
@@ -292,7 +291,6 @@ export default function WorkspacesSettingsPage() {
         <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
           工作空间
         </h1>
-        <SettingsSectionNav active="workspaces" />
         <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 p-5 text-sm text-red-800">
           <p>读取工作空间失败：{loadError}</p>
           <button
@@ -339,7 +337,6 @@ export default function WorkspacesSettingsPage() {
       <p className="mt-2 text-sm leading-6 text-slate-500">
         为不同业务或项目建立独立空间；模型渠道共享，知识、笔记、分类和回收站各自隔离。
       </p>
-      <SettingsSectionNav active="workspaces" />
 
       <details className="mt-6 rounded-2xl border border-blue-200 bg-blue-50/50 p-4 text-sm leading-6 text-blue-900/80">
         <summary className="cursor-pointer font-semibold text-blue-900">空间隔离哪些内容？模型是否共享？</summary>

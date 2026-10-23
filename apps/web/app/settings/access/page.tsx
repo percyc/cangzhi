@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 
 type AccessToken = {
   id: number;
@@ -207,7 +206,6 @@ export default function AccessSettingsPage() {
         每个客户端使用独立令牌，可以随时撤销。
       </p>
 
-      <SettingsSectionNav active="access" />
 
       {error && (
         <p className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">

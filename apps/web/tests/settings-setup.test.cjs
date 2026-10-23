@@ -95,7 +95,7 @@ async function renderSettings(overrides = {}, customApi = {}) {
   };
   const Component = load('components/ModelSettingsPage.tsx', {
     react, 'next/link': () => null, 'next/navigation': { useRouter: () => ({ refresh() {} }) },
-    '@/components/SettingsSectionNav': { SettingsSectionNav: () => null },
+    '@/components/SettingsNavigationState': { SettingsNavigationRegistration: () => null },
     '@/lib/navigation-guard': { useUnsavedChanges() {}, confirmNavigation: () => false },
     '@/lib/settings-setup': setup, '@/lib/api': api,
   }).default;

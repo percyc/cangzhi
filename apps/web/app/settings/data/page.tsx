@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 import { withApiBasePath } from '@/lib/paths';
 
 export default function DataSettingsPage() {
@@ -25,7 +24,6 @@ export default function DataSettingsPage() {
       <p className="mt-2 text-sm leading-6 text-slate-500">
         导出、迁移和保护个人知识资产。
       </p>
-      <SettingsSectionNav active="data" />
 
       <div className="mt-6">
         <p className="mt-1 text-sm leading-6 text-slate-500">

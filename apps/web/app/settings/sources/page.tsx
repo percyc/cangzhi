@@ -3,7 +3,6 @@
 import { useState } from 'react';
 
 import { DatabaseSourcePanel } from '@/components/database-source-panel';
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 import { WebDavSourcePanel } from '@/components/webdav-source-panel';
 
 type SourceTab = 'file' | 'database';
@@ -23,7 +22,6 @@ export default function SourcesPage() {
       <p className="mt-2 text-sm leading-6 text-slate-500">
         连接外部文件夹与数据库，并统一管理扫描、同步及知识快照生命周期。
       </p>
-      <SettingsSectionNav active="sources" />
 
       <div
         role="tablist"

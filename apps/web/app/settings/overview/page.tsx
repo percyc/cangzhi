@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 import { withApiBasePath } from '@/lib/paths';
 
 type Metrics = Record<string, number | string | null>;
@@ -136,7 +135,6 @@ export default function OverviewPage() {
     <p className="text-xs font-semibold tracking-widest text-slate-400">系统设置 / 全局监控</p>
     <h1 className="mt-2 text-3xl font-semibold text-slate-950">运行概览</h1>
     <p className="mt-2 text-sm leading-6 text-slate-500">观察容量、知识规模与处理负载。统计覆盖所有工作空间，不随顶部空间切换。</p>
-    <SettingsSectionNav active="overview" />
     <div className="mt-6 space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
         <span>队列约每分钟采集 · 容量与规模约每 15 分钟采集 · 页面只读取快照</span>

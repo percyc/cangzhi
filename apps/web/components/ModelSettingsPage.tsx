@@ -23,10 +23,8 @@ import {
   type EmbeddingCompatibilityResult,
   type EmbeddingStatus,
 } from '@/lib/api';
-import {
-  SettingsSectionNav,
-  type SettingsSection,
-} from '@/components/SettingsSectionNav';
+import { SettingsNavigationRegistration } from '@/components/SettingsNavigationState';
+import type { SettingsSection } from '@/components/SettingsSectionNav';
 
 type Provider = AIConfig['provider'];
 type EmbeddingProvider = AIConfig['embedding_provider'];
@@ -655,7 +653,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
 
   if (loadError) {
     return (
-      <main className="mx-auto max-w-3xl px-6 py-12">
+      <main className="settings-shell py-9">
         <h1 className="text-2xl font-semibold text-slate-900">模型设置</h1>
         <p className="mt-4 rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
           读取设置失败：{loadError}
@@ -666,8 +664,8 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
 
   if (!config) {
     return (
-      <main className="mx-auto max-w-3xl px-6 py-12">
-        <p className="text-sm text-slate-500">设置加载中…</p>
+      <main className="settings-shell py-9" aria-busy="true">
+        <p role="status" className="text-sm text-slate-500">设置加载中…</p>
       </main>
     );
   }
@@ -704,7 +702,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
           </div>
         </section>
       )}
-      <SettingsSectionNav
+      <SettingsNavigationRegistration
         active={guided ? 'setup' : activePanel}
         hints={{
           chat:

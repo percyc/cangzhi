@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 
 type AdminProfile = {
   id: number;
@@ -154,7 +153,6 @@ export default function AccountSettingsPage() {
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">系统设置</p>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">账户与安全</h1>
       <p className="mt-2 text-sm leading-6 text-slate-500">管理唯一管理员账户，以及哪些设备仍保持登录。</p>
-      <SettingsSectionNav active="account" />
 
       {loading && <p className="mt-6 text-sm text-slate-500">正在读取账户…</p>}
       {error && <p role="alert" className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</p>}

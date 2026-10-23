@@ -184,3 +184,58 @@ test('mobile settings tools are collapsed by default, accessible, and remain mou
     toggle.props.onClick();
   }
 });
+
+test('current section is a no-op but modified clicks retain native link behavior', () => {
+  const selected = [];
+  let guards = 0;
+  const Search = () => null;
+  const component = load('components/SettingsSectionNav.tsx', {
+    react: { useState: () => [false, () => {}], useId: () => 'navigation' },
+    'next/link': () => null, 'next/navigation': { useRouter: () => ({ push() { throw new Error('Unexpected navigation'); } }) },
+    '@/lib/usability': ux, '@/components/VersionInfo': () => null, '@/components/SettingsSearch': Search,
+    '@/lib/navigation-guard': { confirmNavigation: () => true },
+  });
+  const nodes = descendants(component.SettingsSectionNav({ active: 'chat', onSelect: id => selected.push(id), beforeNavigate: () => { guards++; return true; } }));
+  const current = nodes.find(node => node.props['aria-current'] === 'page');
+  const click = event(); current.props.onClick(click);
+  assert.equal(click.prevented, true);
+  const modified = { ...event(), ctrlKey: true }; current.props.onClick(modified);
+  assert.equal(modified.prevented, false);
+  assert.equal(nodes.find(node => node.type === Search).props.beforeNavigate({ section: 'chat' }), false);
+  nodes.find(node => node.type === 'select').props.onChange({ target: { value: 'chat' } });
+  assert.equal(guards, 0); assert.deepEqual(selected, []);
+});
+
+test('persistent layout ignores callbacks belonging to a departed route', () => {
+  const Nav = () => null;
+  const Context = { Provider: () => null };
+  let pathname = '/settings/uploads';
+  const staleProps = { active: 'chat', beforeNavigate: () => false };
+  const component = load('components/SettingsLayout.tsx', {
+    react: { useState: () => [{ pathname: '/settings', props: staleProps }, () => {}] },
+    'next/navigation': { usePathname: () => pathname },
+    '@/components/SettingsSectionNav': { SettingsSectionNav: Nav },
+    '@/components/SettingsNavigationState': { SettingsNavigationContext: Context },
+    '@/lib/usability': ux,
+  });
+  let nav = descendants(component.default({ children: 'content' })).find(node => node.type === Nav);
+  assert.equal(nav.props.active, 'uploads'); assert.equal(nav.props.beforeNavigate, undefined);
+  pathname = '/settings';
+  nav = descendants(component.default({ children: 'content' })).find(node => node.type === Nav);
+  assert.equal(nav.props.beforeNavigate, staleProps.beforeNavigate);
+});
+
+test('form navigation registration cleans up without erasing a newer owner', () => {
+  let value = null, cleanup;
+  const publish = next => { value = typeof next === 'function' ? next(value) : next; };
+  const component = load('components/SettingsNavigationState.tsx', {
+    react: { createContext: () => ({}), useContext: () => publish, useLayoutEffect: effect => { cleanup = effect(); } },
+    'next/navigation': { usePathname: () => '/settings' },
+  });
+  component.SettingsNavigationRegistration({ active: 'ocr' });
+  assert.equal(value.props.active, 'ocr');
+  const oldCleanup = cleanup;
+  component.SettingsNavigationRegistration({ active: 'chat' });
+  oldCleanup(); assert.equal(value.props.active, 'chat');
+  cleanup(); assert.equal(value, null);
+});

@@ -13,19 +13,21 @@ export type { SettingsSection } from '@/lib/usability';
 // Retain the exported section contract; grouping is shared with route help/tests.
 const ITEMS = SETTINGS_GROUPS.flatMap((group) => [...group.items]);
 
+export type SettingsSectionNavProps = {
+  active: SettingsSection;
+  hints?: Partial<Record<SettingsSection, string>>;
+  dirty?: Partial<Record<SettingsSection, boolean>>;
+  onSelect?: (section: SettingsSection) => void;
+  beforeNavigate?: (section: SettingsSection) => boolean;
+};
+
 export function SettingsSectionNav({
   active,
   hints = {},
   dirty = {},
   onSelect,
   beforeNavigate,
-}: {
-  active: SettingsSection;
-  hints?: Partial<Record<SettingsSection, string>>;
-  dirty?: Partial<Record<SettingsSection, boolean>>;
-  onSelect?: (section: SettingsSection) => void;
-  beforeNavigate?: (section: SettingsSection) => boolean;
-}) {
+}: SettingsSectionNavProps) {
   const router = useRouter();
   const [expanded, setExpanded] = useState(false);
   const navigationId = useId();
@@ -40,6 +42,7 @@ export function SettingsSectionNav({
       <div id={navigationId} className={`settings-rail-links space-y-3 ${expanded ? 'mt-3' : 'hidden'} lg:mt-0 lg:block`}>
       <SettingsSearch beforeNavigate={(entry) => {
         if (entry.section) {
+          if (entry.section === active) return false;
           if (beforeNavigate && !beforeNavigate(entry.section)) return false;
           onSelect?.(entry.section);
           return true;
@@ -72,6 +75,11 @@ export function SettingsSectionNav({
             href={item.href}
             aria-current={selected ? 'page' : undefined}
             onClick={(event) => {
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+              if (selected) {
+                event.preventDefault();
+                return;
+              }
               if (beforeNavigate && !beforeNavigate(item.id)) {
                 event.preventDefault();
                 return;

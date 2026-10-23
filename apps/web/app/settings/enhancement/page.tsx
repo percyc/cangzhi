@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react';
 
 import { withApiBasePath } from '@/lib/paths';
-import { SettingsSectionNav } from '@/components/SettingsSectionNav';
 
 type EnhancementSettings = {
   enabled: boolean;
@@ -155,7 +154,6 @@ const toggleModule = (module: string) => {
         在工作空间粒度控制可选的章节理解与实体图谱。基础摘要、分类与标签不会因此关闭。
       </p>
 
-      <SettingsSectionNav active="enhancement" />
 
       {loadError ? (
         <p className="mt-6 rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
