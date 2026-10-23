@@ -2676,3 +2676,21 @@
   功能e831ad3已通过174项前端测试、lint/类型检查、27页构建及隔离浏览器验收。
 - 拟同步三应用构建标识并保留回滚镜像，正常停止写入后联合备份；无新增迁移，
   不重跑历史任务。实际部署与发布结果完成后另行追加，未提前声明上线。
+
+### 2026-10-23 CZ-U11 v1.4.3 合并部署与三端同步
+
+- main快进至发布源码a8e91bd（功能e831ad3）。独立干净worktree复用v1.4.2依赖
+  离线构建API/Web/Worker；三应用v1.4.3、同一revision、dirty=false，migrate镜像同步。
+  发布Web镜像174项、lint/TypeScript与27页构建通过；API健康/认证/版本37项、
+  Worker健康/运行配置8项通过。本批无后端业务变更，未重跑后端全量或独立PG专项。
+- 正常停止应用写入后，API/Worker exit 0；Web的npm启动进程响应停止返回exit 1，
+  未强杀写入进程。联合备份backups/cangzhi-20261023-014053的SHA256、pg_restore
+  目录和storage归档检查通过；保留三应用rollback-v1.4.3镜像。迁移检查无待执行项，
+  schema保持0043，no-build/pull never更新三应用；PostgreSQL启动时间未变化。
+- 四服务healthy，API readiness/Worker数据库探针与局域网Web health通过；三应用
+  版本/提交一致。线上设置HTML包含共享布局，未登录配置读取401；完整交互使用此前
+  隔离浏览器验收，不冒充线上登录态验证。文档19/版本21、854completed/2failed及
+  模型配置更新时间不变，没有供应商调用、来源扫描、任务重试或索引重建。
+- annotated tag v1.4.3绑定a8e91bd，main与标签已原子推送Gitea/Gitee/GitHub；
+  未推送功能分支或移动旧标签。本记录作为后补提交继续同步main，不改变运行源码。
+  临时验收容器与干净构建worktree已移除，正式备份和回滚镜像保留。
