@@ -787,7 +787,7 @@ function AskClient() {
                   onClick={() => setMode('deep')}
                   className="font-medium text-indigo-700 hover:underline"
                 >
-                  跨表或多步计算改用深度分析
+                  需要多步查证？切换深度分析
                 </button>
               )}
             </div>
@@ -841,7 +841,7 @@ function AskClient() {
           <p className="mt-2 text-center text-[10px] leading-4 text-slate-400 sm:text-[11px]">
             <span className="hidden sm:inline">Enter 发送 · Shift+Enter 换行 · </span>{mode === 'deep'
               ? '每次提问独立检索，不读取此前问答 · 深度分析只在持续获得新证据时继续调用工具'
-              : '每次提问独立检索，不读取此前问答 · 请核对引用原文'}
+              : '每次提问独立检索，不读取此前问答 · 快速问答只做有界检索与计算，请核对引用'}
           </p>
         </footer>
       </section>
@@ -876,7 +876,7 @@ function WelcomeState({
       </p>
       <details className="mt-4 w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left text-xs leading-6 text-slate-600">
         <summary className="cursor-pointer font-medium text-slate-700">如何选择问答模式与范围？</summary>
-        <p className="mt-2">顶栏工作空间决定可用资料；知识范围与筛选进一步缩小范围。快速问答适合单个问题，深度分析适合多步查证或数据计算，可能调用模型多次。</p>
+        <p className="mt-2">顶栏工作空间决定可用资料；知识范围与筛选进一步缩小范围。快速问答支持单次检索、精确计算和有限纠错；复杂问题可主动切换深度分析，多步查证可能调用模型多次。系统不会自动将快速问答升级为深度分析。</p>
         <p>完成后点击引用核对原文。每次提问独立检索，问答记录不会自动成为模型记忆。</p>
       </details>
       <div className="mt-7 grid w-full gap-2 sm:grid-cols-3">
@@ -1412,6 +1412,14 @@ function DatasetResultPreview({
   );
   const aggregate = result.aggregate ?? {};
   const aggregateValue = aggregate.value;
+  const measureContext = aggregate.measure_context as {
+    state?: string;
+    columns?: { column: string; unit?: string; state?: string }[];
+  } | undefined;
+  const verifiedUnits = measureContext?.columns
+    ?.filter((item) => item.state === 'known' && item.unit)
+    .map((item) => `${item.column}：${item.unit}`)
+    .join(' · ');
   const metricLabels: Record<string, string> = {
     rows: '明细',
     count: '数量',
@@ -1445,6 +1453,17 @@ function DatasetResultPreview({
             </Link>
           )}
         </div>
+        {measureContext && (
+          <p className="mt-2 text-xs text-slate-600">
+            {measureContext.state === 'known' && verifiedUnits
+              ? `已核验 ${verifiedUnits}`
+              : measureContext.state === 'grouped'
+                ? '单位或币种已分别分组，请按各组口径读取结果。'
+                : measureContext.state === 'unknown'
+                  ? '单位未能完整确认，请核对原始资料。'
+                  : ''}
+          </p>
+        )}
         {rows.length > 0 && columns.length > 0 && (
           <div className="mt-3 max-h-72 overflow-auto rounded-lg border border-slate-200">
             <table className="min-w-full text-left text-xs">

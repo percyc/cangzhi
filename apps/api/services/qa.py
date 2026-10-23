@@ -108,6 +108,8 @@ _QUESTION_GRAMS = {
 _DATASET_AGGREGATE_NOTE = (
     "aggregate 是系统在上述筛选条件命中的数据行上即时计算得到的结果，"
     "不是原表中已存在的汇总行；回答时请说明筛选范围与命中行数。"
+    "若提供 measure_context，known 的单位来自命中行核验；grouped 按各组单位分别回答，"
+    "不得跨单位再合计；unknown 表示单位未完整确认，不能用样例补全。"
     "若数据集未提供单位，请直接给出数值并注明单位未标注，不要臆造单位。"
 )
 
@@ -547,6 +549,40 @@ class QAService:
                 ) from exc
             structured_result = None
         if structured_result is not None:
+            if structured_result.measure_context.get("state") == "blocked":
+                # The one permitted refinement already ran and is still mixed.
+                # Asking the model to phrase this number would only dress up an
+                # unsafe total, so stop here and tell the user what to fix.
+                return AskResult(
+                    question=question,
+                    answer=(
+                        "命中范围内的单位或币种不唯一、存在缺失或无法完整核验，"
+                        "无法给出可靠的合计。请补充更明确的筛选条件"
+                        "（例如限定某个单位或币种），或改用深度分析按单位分组核对。"
+                    ),
+                    insufficient_evidence=True,
+                    citations=[],
+                    evidence=[],
+                    provider=self._provider.name if self._provider else "",
+                    model=_model_name(self._provider),
+                    retrieval={
+                        **retrieval,
+                        "mode": "structured_table",
+                        "structured_table": {
+                            "document_id": structured_result.dataset.document_id,
+                            "dataset_id": structured_result.dataset.dataset_id,
+                            "dataset_name": structured_result.dataset.title,
+                            "matched_rows": structured_result.matched_row_count,
+                            "metric": structured_result.plan.metric,
+                            "metric_column": structured_result.plan.metric_column,
+                            "measure_context": dict(
+                                structured_result.measure_context
+                            ),
+                            "withheld": True,
+                            "warnings": list(structured_result.warnings),
+                        },
+                    },
+                )
             structured_evidence = await _structured_result_to_evidence(
                 db, structured_result
             )
@@ -581,6 +617,7 @@ class QAService:
                         "source_rows": list(structured_result.source_rows),
                         "aggregate": dict(structured_evidence.aggregate),
                         "contributions": list(structured_evidence.contributions),
+                        "measure_context": dict(structured_result.measure_context),
                         "warnings": list(structured_result.warnings),
                     },
                 }
@@ -1278,7 +1315,7 @@ async def _structured_result_to_evidence(
     if artifact is not None:
         artifact_version = artifact.version_number
     contributions = _structured_contributions(result)
-    aggregate = _structured_aggregate(result)
+    aggregate = _measure_blocked_aggregate(result) or _structured_aggregate(result)
     return Evidence(
         id=1,
         evidence_type="dataset",
@@ -1331,6 +1368,15 @@ async def _structured_result_to_evidence(
 def _structured_aggregate(result: TableQueryResult) -> dict:
     """Return the top-level aggregate value(s) the model can quote safely."""
 
+    aggregate = _structured_aggregate_value(result)
+    if result.measure_context:
+        aggregate["measure_context"] = dict(result.measure_context)
+    return aggregate
+
+
+def _structured_aggregate_value(result: TableQueryResult) -> dict:
+    """Return the aggregate body without the unit verdict."""
+
     if result.plan.metric == "rows":
         return {
             "kind": "rows",
@@ -1363,6 +1409,25 @@ def _structured_aggregate(result: TableQueryResult) -> dict:
         "kind": result.plan.metric,
         "value": result.rows[0]["metric"] if result.rows else None,
         "metric_column": result.plan.metric_column,
+        "total": result.matched_row_count,
+    }
+
+
+def _measure_blocked_aggregate(result: TableQueryResult) -> dict | None:
+    """Return a unit-free aggregate when the unit check blocked the number.
+
+    ``execute_query_plan``/``_execute_dataset_plan`` already withhold the mixed
+    aggregate rows, but the aggregate body must not reintroduce a number
+    either. Only the match count survives, because it is unit-independent.
+    """
+
+    if result.measure_context.get("state") != "blocked":
+        return None
+    return {
+        "kind": result.plan.metric,
+        "metric_column": result.plan.metric_column,
+        "withheld": True,
+        "reason": result.measure_context.get("reason", "单位或币种不唯一"),
         "total": result.matched_row_count,
     }
 

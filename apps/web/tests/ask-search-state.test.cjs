@@ -350,6 +350,16 @@ test('quick ask uses the streaming endpoint and saves the streamed answer', asyn
   // Quick progress never renders the deep tool-exploration panel.
   assert.equal(nodes(h.tree).some(node => node.props.analysis), false);
 });
+
+test('quick mode explains its bounded scope without automatically enabling deep mode', async () => {
+  const h = harness('ask', askFetcher(() => null));
+  await h.flush();
+  assert.match(text(h.tree), /快速问答只做有界检索与计算/);
+  assert.equal(h.requests.some(request => request.url === '/api/v1/knowledge/ask/stream'), false);
+  h.click('深度分析'); await h.flush();
+  assert.doesNotMatch(text(h.tree), /快速问答只做有界检索与计算/);
+  assert.match(text(h.tree), /持续获得新证据/);
+});
 test('quick mode streams stage progress on the loading card without a deep tool panel', async () => {
   const stream = streamResponse();
   const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve({ ok: true, body: stream.body }) : null));

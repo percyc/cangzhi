@@ -20,6 +20,12 @@ from ..ai import AIProvider, AIProviderError
 from ..models.datasets import DatasetArtifact, DatasetField, KnowledgeDataset
 from ..models.table_rows import StructuredTableRow
 from ..parsers.base import StructuredContent
+from .measurement_context import (
+    MAX_SAMPLE_VALUES,
+    ColumnStats,
+    evaluate_measure_context,
+    select_context_candidates,
+)
 
 _ROW_RE = re.compile(r"^行\s+(\d+)｜(.*)$")
 _ORIGINAL_VALUE_RE = re.compile(r"（原始值：([^）]+)）$")
@@ -142,6 +148,10 @@ class TableQueryResult:
     matched_row_count: int
     summary: str
     warnings: list[str] = field(default_factory=list)
+    #: Verified unit/currency context for the matched rows (ADR-038). Empty
+    #: when the caller did not ask for it, so the default public behaviour is
+    #: unchanged.
+    measure_context: dict[str, Any] = field(default_factory=dict)
 
 
 def is_structured_table_question(question: str) -> bool:
@@ -691,14 +701,73 @@ def _aggregate(
     return float(value) if value != value.to_integral_value() else int(value), warnings
 
 
+def _row_measure_context(
+    *,
+    plan: TableQueryPlan,
+    filtered: Sequence[StructuredTableRow],
+    columns: Sequence[str],
+) -> dict[str, Any]:
+    """Verify unit/currency columns over the already-filtered rows.
+
+    Mirrors the DuckDB pushdown exactly: complete distinct counts and blank
+    counts over the matched rows, with a bounded sample of example values.
+    This is the compatibility path for datasets whose columnar artifact is not
+    built, so the two backends must reach the same verdict for the same data.
+    """
+
+    candidates, truncated = select_context_candidates(columns)
+    stats: dict[str, ColumnStats] = {}
+    for column in candidates:
+        distinct: set[str] = set()
+        blank = 0
+        samples: list[str] = []
+        for row in filtered:
+            value = row.values.get(column)
+            text = str(value).strip() if value is not None else ""
+            if not text:
+                blank += 1
+                continue
+            distinct.add(text)
+            if len(samples) < MAX_SAMPLE_VALUES and text not in samples:
+                samples.append(text)
+        stats[column] = ColumnStats(
+            column=column,
+            matched_row_count=len(filtered),
+            distinct_count=len(distinct),
+            blank_count=blank,
+            samples=tuple(samples),
+        )
+    return evaluate_measure_context(
+        metric=plan.metric,
+        matched_row_count=len(filtered),
+        group_by=plan.group_by,
+        stats_by_column=stats,
+        column_order=candidates,
+        candidates_truncated=truncated,
+    ).to_dict()
+
+
 def execute_query_plan(
     dataset: TableDataset,
     rows: Sequence[StructuredTableRow],
     plan: TableQueryPlan,
+    *,
+    include_measure_context: bool = False,
 ) -> TableQueryResult:
     filtered = [
         row for row in rows if all(_matches(row.values, item) for item in plan.filters)
     ]
+    measure_context = (
+        _row_measure_context(plan=plan, filtered=filtered, columns=dataset.columns)
+        if include_measure_context
+        else {}
+    )
+    # A blocked context means the aggregate mixes units, so the number itself
+    # must not reach the model. Row listings keep their rows: each row shows
+    # its own unit cell and the truncated/hit counters stay intact.
+    unsafe_aggregate = bool(measure_context.get("state") == "blocked") and (
+        plan.metric in {"sum", "avg", "min", "max"}
+    )
     if plan.metric == "rows":
         detail_rows = [
             {"row_number": row.row_number, **dict(row.values or {})} for row in filtered
@@ -722,6 +791,7 @@ def execute_query_plan(
                 ),
                 "筛选后行数": len(filtered),
                 "返回明细": detail_rows,
+                "单位上下文": measure_context or None,
                 "提示": warnings,
             },
             ensure_ascii=False,
@@ -737,6 +807,7 @@ def execute_query_plan(
             matched_row_count=len(filtered),
             summary=summary,
             warnings=warnings,
+            measure_context=measure_context,
         )
     groups: dict[tuple[Any, ...], list[StructuredTableRow]] = defaultdict(list)
     if plan.group_by:
@@ -773,6 +844,14 @@ def execute_query_plan(
         reverse=plan.sort_order == "desc",
     )
     result_rows = result_rows[: plan.limit]
+    if unsafe_aggregate:
+        # Mixed units or partially filled unit columns: the summed value is
+        # arithmetically real but not comparable, so it is withheld while the
+        # matched count, the warnings and the unit diagnosis stay available.
+        result_rows = []
+        warnings.append(
+            "命中范围内的单位/币种不唯一或存在缺失，本次合计不予提供"
+        )
     summary = json.dumps(
         {
             "数据集": (
@@ -783,6 +862,7 @@ def execute_query_plan(
             "统计列": plan.metric_column,
             "分组列": list(plan.group_by),
             "计算结果": result_rows,
+            "单位上下文": measure_context or None,
             "提示": sorted(set(warnings)),
         },
         ensure_ascii=False,
@@ -798,6 +878,7 @@ def execute_query_plan(
         matched_row_count=len(filtered),
         summary=summary,
         warnings=sorted(set(warnings)),
+        measure_context=measure_context,
     )
 
 
@@ -1127,6 +1208,8 @@ async def _execute_dataset_plan(
     db: AsyncSession,
     dataset: TableDataset,
     plan: TableQueryPlan,
+    *,
+    include_measure_context: bool = False,
 ) -> TableQueryResult:
     """Prefer the columnar engine and preserve the proven row fallback."""
 
@@ -1146,13 +1229,31 @@ async def _execute_dataset_plan(
             "limit": plan.limit,
         }
         try:
-            result = await execute_dataset_query(db, dataset.dataset_id, payload)
+            result = await execute_dataset_query(
+                db,
+                dataset.dataset_id,
+                payload,
+                include_measure_context=include_measure_context,
+            )
             rows = result["rows"]
             warnings = (
                 [f"结果共 {result['matched_row_count']} 行，仅返回前 {plan.limit} 行"]
                 if result.get("truncated")
                 else []
             )
+            measure_context = (
+                dict(result.get("measure_context") or {})
+                if include_measure_context
+                else {}
+            )
+            unsafe_aggregate = measure_context.get("state") == "blocked" and (
+                plan.metric in {"sum", "avg", "min", "max"}
+            )
+            if unsafe_aggregate:
+                rows = []
+                warnings.append(
+                    "命中范围内的单位/币种不唯一或存在缺失，本次合计不予提供"
+                )
             summary = json.dumps(
                 {
                     "数据集": f"{dataset.title} / {dataset.sheet_name} / 区域 {dataset.region_index}",
@@ -1162,6 +1263,7 @@ async def _execute_dataset_plan(
                     "统计列": plan.metric_column,
                     "分组列": list(plan.group_by),
                     "计算结果": rows,
+                    "单位上下文": measure_context or None,
                     "提示": warnings,
                 },
                 ensure_ascii=False,
@@ -1177,6 +1279,7 @@ async def _execute_dataset_plan(
                 matched_row_count=result["matched_row_count"],
                 summary=summary,
                 warnings=warnings,
+                measure_context=measure_context,
             )
         except DatasetExecutionError as exc:
             if exc.code not in {"artifact_unavailable", "artifact_missing"}:
@@ -1186,7 +1289,12 @@ async def _execute_dataset_plan(
             "artifact_unavailable",
             "大型数据集列式产物尚未就绪，无法安全执行不完整查询",
         )
-    return execute_query_plan(dataset, dataset.records, plan)
+    return execute_query_plan(
+        dataset,
+        dataset.records,
+        plan,
+        include_measure_context=include_measure_context,
+    )
 
 
 _PLAN_SYSTEM = """你是藏知的表格查询规划器。
@@ -1249,7 +1357,9 @@ async def try_structured_table_query(
                 metric="rows",
                 limit=MAX_RESULT_ROWS,
             )
-            return await _execute_dataset_plan(db, dataset, plan)
+            return await _execute_dataset_plan(
+                db, dataset, plan, include_measure_context=True
+            )
     if _COUNT_INTENT_RE.search(question):
         matched_datasets = [
             dataset
@@ -1274,7 +1384,9 @@ async def try_structured_table_query(
                 ),
                 metric="count",
             )
-            return await _execute_dataset_plan(db, dataset, plan)
+            return await _execute_dataset_plan(
+                db, dataset, plan, include_measure_context=True
+            )
     prompt = json.dumps(
         {
             "问题": question,
@@ -1315,13 +1427,19 @@ async def try_structured_table_query(
         for item in datasets
         if item.key == (plan.document_id, plan.sheet_name, plan.region_index)
     )
-    result = await _execute_dataset_plan(db, dataset, plan)
+    result = await _execute_dataset_plan(
+        db, dataset, plan, include_measure_context=True
+    )
     ambiguous_truncation = (
         plan.metric == "rows"
         and result.matched_row_count > len(result.rows)
         and not _DETAIL_INTENT_RE.search(question)
     )
-    if result.matched_row_count > 0 and not ambiguous_truncation:
+    # A mixed-unit aggregate is as unusable as an empty one: both mean the
+    # executed plan does not answer the question, so both earn the single
+    # refinement attempt below rather than a confident wrong number.
+    unit_conflict = result.measure_context.get("state") == "blocked"
+    if result.matched_row_count > 0 and not ambiguous_truncation and not unit_conflict:
         return result
 
     feedback = {
@@ -1348,9 +1466,19 @@ async def try_structured_table_query(
             "不要从零行或任意第一行作答。请重新核对筛选粒度。"
             "若目标是层级路径中的父级、父级自身无记录且指标可加总，"
             "使用 direct_child_of 选择直属子级并 sum 数值列；"
-            "若不能安全推导则返回 relevant=false。"
+            + (
+                "命中范围内单位/币种不唯一或部分缺失，合计已不予提供。"
+                "保持原问题范围不变，把单位列加入 group_by 按单位分组分别统计；"
+                "不得为了得到单一单位而丢弃原范围内的记录；"
+                "不要臆造单位，也不要假设换算关系。"
+                if unit_conflict
+                else ""
+            )
+            + "若不能安全推导则返回 relevant=false。"
         ),
     }
+    if unit_conflict:
+        feedback["单位诊断"] = result.measure_context
     try:
         raw_refined = await asyncio.to_thread(
             provider.generate_json,
@@ -1372,4 +1500,18 @@ async def try_structured_table_query(
             refined_plan.region_index,
         )
     )
-    return await _execute_dataset_plan(db, refined_dataset, refined_plan)
+    if unit_conflict and (
+        refined_dataset.key != dataset.key
+        or refined_plan.filters != plan.filters
+        or refined_plan.metric != plan.metric
+        or refined_plan.metric_column != plan.metric_column
+        or not set(plan.group_by).issubset(refined_plan.group_by)
+    ):
+        # Unit diagnostics must not silently narrow or change the question.
+        return result
+    # Exactly one refinement attempt: whatever this returns is final, blocked
+    # or not. A still-blocked result stays blocked so the QA layer can report
+    # insufficient evidence instead of passing a mixed-unit number to the model.
+    return await _execute_dataset_plan(
+        db, refined_dataset, refined_plan, include_measure_context=True
+    )

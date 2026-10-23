@@ -1174,7 +1174,6 @@ def test_quick_table_discovery_merges_ranked_and_catalog_candidates(qa_db, monke
 
     async def table_query(_db, *, provider, question, document_ids, force=False):
         captured["document_ids"] = document_ids
-        return None
 
     async def broad_candidates(*_args, **_kwargs):
         return [177]
@@ -1203,6 +1202,42 @@ def test_quick_table_discovery_merges_ranked_and_catalog_candidates(qa_db, monke
 
     asyncio.run(_run())
     assert captured["document_ids"] == [176, 177]
+
+
+def test_quick_unit_conflict_does_not_send_unsafe_total_to_model(qa_db, monkeypatch):
+    import apps.api.services.qa as module
+    from apps.api.services.structured_table import (
+        TableDataset,
+        TableQueryPlan,
+        TableQueryResult,
+    )
+
+    async def collect(*args, **kwargs):
+        return [], {"mode": "hybrid"}
+
+    async def candidates(*args, **kwargs):
+        return [1]
+
+    async def query(*args, **kwargs):
+        return TableQueryResult(
+            dataset=TableDataset(document_id=1, document_version_id=1, title="合成数据", sheet_name="data", region_index=1, columns=("值", "币种"), row_count=2),
+            plan=TableQueryPlan(document_id=1, sheet_name="data", region_index=1, metric="sum", metric_column="值"),
+            rows=[], source_rows=[1, 2], source_row_start=1, source_row_end=2,
+            matched_row_count=2, summary="blocked", measure_context={"state": "blocked"},
+        )
+
+    monkeypatch.setattr(QAService, "collect_evidence", collect)
+    monkeypatch.setattr(module, "candidate_dataset_document_ids", candidates)
+    monkeypatch.setattr(module, "try_structured_table_query", query)
+    provider = StubProvider()  # No queued answer: must return before calling it.
+    async def run():
+        async with qa_db() as session:
+            return await QAService(provider).ask(session, AskRequest(question="金额合计"))
+    result = asyncio.run(run())
+    assert result.insufficient_evidence
+    assert result.retrieval["structured_table"]["withheld"]
+    assert not result.evidence
+    assert "无法给出可靠" in result.answer
 
 
 def test_deep_table_discovery_keeps_connector_scope(qa_db, monkeypatch):

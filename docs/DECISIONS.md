@@ -1,5 +1,7 @@
 # 藏知关键技术决策
 
+- [ADR-038：快速问答的计算上下文与有界纠错](ADR-038-quick-answer-measure-context.md)
+
 - [ADR-037：交互请求优先与模型故障隔离](ADR-037-interactive-model-priority.md)
 
 - [ADR-036：引导配置、连接复用与设置搜索](ADR-036-guided-settings.md)

@@ -32,6 +32,12 @@ from .dataset_freshness import (
     get_datasets_freshness,
     schedule_dataset_refresh,
 )
+from .measurement_context import (
+    MAX_SAMPLE_VALUES,
+    ColumnStats,
+    evaluate_measure_context,
+    select_context_candidates,
+)
 from .scope_keys import DocumentSelection, candidate_condition
 
 MAX_PREVIEW_ROWS = 200
@@ -714,8 +720,80 @@ def _where_sql(query: SafeDatasetQuery, types: dict[str, str]) -> tuple[str, lis
     return (" AND ".join(clauses) if clauses else "TRUE"), parameters
 
 
+def _measure_context_sql(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    source: str,
+    base_parameters: Sequence[Any],
+    where: str,
+    matched_row_count: int,
+    columns: Sequence[str],
+    metric: str,
+    group_by: Sequence[str],
+) -> dict[str, Any]:
+    """Verify unit/currency columns over exactly the matched rows.
+
+    Runs inside the caller's existing connection, on the same Parquet snapshot
+    and under the same query timeout, without loading the full table into
+    Python. Distinct counts are complete over the matched
+    rows; the ``LIMIT`` only bounds the example values, never the verdict, so a
+    truncated sample can never masquerade as a single confirmed unit.
+    """
+
+    candidates, truncated = select_context_candidates(columns)
+    context = evaluate_measure_context(
+        metric=metric,
+        matched_row_count=matched_row_count,
+        group_by=group_by,
+        candidates_truncated=truncated,
+        column_order=candidates,
+        stats_by_column={},
+    )
+    if not candidates or metric not in {"sum", "avg", "min", "max"} or matched_row_count <= 0:
+        # Counting metrics and empty result sets need no column statistics;
+        # unknown-by-absence must not be re-labelled as unknown-by-blank.
+        return context.to_dict()
+    stats: dict[str, ColumnStats] = {}
+    for column in candidates:
+        quoted = _quote_identifier(column)
+        row = connection.execute(
+            f"SELECT COUNT(DISTINCT NULLIF(trim({quoted}), '')), "
+            f"COUNT(*) FILTER (WHERE {quoted} IS NULL OR trim({quoted}) = '') "
+            f"FROM (SELECT {quoted} FROM {source} WHERE {where}) AS _measure_ctx",
+            list(base_parameters),
+        ).fetchone()
+        samples = tuple(
+            str(item[0])
+            for item in connection.execute(
+                f"SELECT DISTINCT left(trim({quoted}), 41) AS unit_value FROM {source} WHERE {where} "
+                f"AND {quoted} IS NOT NULL AND trim({quoted}) <> '' "
+                f"ORDER BY unit_value LIMIT ?",
+                [*base_parameters, MAX_SAMPLE_VALUES],
+            ).fetchall()
+        )
+        stats[column] = ColumnStats(
+            column=column,
+            matched_row_count=matched_row_count,
+            distinct_count=int(row[0] or 0),
+            blank_count=int(row[1] or 0),
+            samples=samples,
+        )
+    return evaluate_measure_context(
+        metric=metric,
+        matched_row_count=matched_row_count,
+        group_by=group_by,
+        stats_by_column=stats,
+        column_order=candidates,
+        candidates_truncated=truncated,
+    ).to_dict()
+
+
 def _execute_parquet_query(
-    path: Path, query: SafeDatasetQuery, fields: Sequence[DatasetField]
+    path: Path,
+    query: SafeDatasetQuery,
+    fields: Sequence[DatasetField],
+    *,
+    include_measure_context: bool = False,
 ) -> dict[str, Any]:
     names = [field.name for field in fields]
     types = {field.name: field.inferred_type for field in fields}
@@ -792,7 +870,21 @@ def _execute_parquet_query(
         source_rows = [
             int(row["row_number"]) for row in rows if "row_number" in row
         ] or reference_rows
-        return {
+        measure_context = (
+            _measure_context_sql(
+                connection,
+                source=source,
+                base_parameters=base_parameters,
+                where=where,
+                matched_row_count=matched,
+                columns=names,
+                metric=query.metric,
+                group_by=query.group_by,
+            )
+            if include_measure_context
+            else None
+        )
+        payload: dict[str, Any] = {
             "backend": "duckdb",
             "rows": rows,
             "matched_row_count": matched,
@@ -807,6 +899,9 @@ def _execute_parquet_query(
             if query.metric == "rows"
             else False,
         }
+        if measure_context is not None:
+            payload["measure_context"] = measure_context
+        return payload
     finally:
         timeout.cancel()
         connection.close()
@@ -819,7 +914,14 @@ async def execute_dataset_query(
     *,
     storage_root: str | Path | None = None,
     document_boundary: DocumentSelection | None = None,
+    include_measure_context: bool = False,
 ) -> dict[str, Any]:
+    """Execute a validated plan over the dataset's versioned snapshot.
+
+    ``include_measure_context`` is an internal option for quick answers
+    (ADR-038). It only *adds* a ``measure_context`` key computed from the same
+    matched rows; the default keeps the public contract byte-identical.
+    """
     dataset = await get_visible_dataset(
         db, dataset_id, document_boundary=document_boundary
     )
@@ -905,7 +1007,12 @@ async def execute_dataset_query(
             sort_order=query.sort_order,
             limit=min(query.limit + query.offset, 50),
         )
-        fallback = execute_query_plan(fallback_dataset, records, fallback_plan)
+        fallback = execute_query_plan(
+            fallback_dataset,
+            records,
+            fallback_plan,
+            include_measure_context=include_measure_context,
+        )
         rows = fallback.rows[query.offset : query.offset + query.limit]
         if query.metric == "rows" and query.columns:
             rows = [
@@ -937,12 +1044,20 @@ async def execute_dataset_query(
             ),
         }
         await _finalize_query_freshness(db, dataset, freshness, payload)
+        if include_measure_context:
+            payload["measure_context"] = fallback.measure_context
         payload["query_hints"] = _query_hints(query, fields, payload)
         return payload
     path = _artifact_path(artifact, storage_root)
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(_execute_parquet_query, path, query, fields),
+            asyncio.to_thread(
+                _execute_parquet_query,
+                path,
+                query,
+                fields,
+                include_measure_context=include_measure_context,
+            ),
             timeout=float(settings.dataset_query_timeout_seconds),
         )
     except TimeoutError as exc:

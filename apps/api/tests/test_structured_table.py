@@ -510,7 +510,8 @@ def test_forced_semantic_query_refines_empty_parent_lookup_to_direct_children(
     async def load_datasets(_db, _document_ids, *, question):
         return [dataset]
 
-    async def execute_plan(_db, selected_dataset, plan):
+    async def execute_plan(_db, selected_dataset, plan, *, include_measure_context=False):
+        assert include_measure_context
         if plan.filters[0].operator == "eq":
             return TableQueryResult(
                 dataset=selected_dataset,
