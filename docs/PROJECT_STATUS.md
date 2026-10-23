@@ -275,6 +275,10 @@ Parquet/DuckDB 执行后端、文档 Scope Key 与短期知识探索凭证），
 
 ## 3. 进行中任务
 
+- `CZ-U12` 问答请求契约修复：Codex，`codex/CZ-U12-ask-request-contract`。
+  修正网页document_selection请求与422提示，验证快速/深度及全库/指定资料，
+  按维护者本轮授权合并、推送和部署；不放宽公共API或实际调用模型。
+
 - 2026-10-22：维护者授权按处理可靠性计划实施、验证、合并、推送和部署。
   负责人Codex（OpenCode协作），分支`codex/CZ-S03-webdav-import-browser`。
   先交付WebDAV与指标级统计恢复，再交付共享模型准入和普通任务恢复；

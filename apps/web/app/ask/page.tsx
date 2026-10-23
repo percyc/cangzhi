@@ -6,7 +6,7 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
-import { askPreferencesKey, validateAskPreferences } from '@/lib/ask-search-state';
+import { askPreferencesKey, validateAskPreferences, askRequestError } from '@/lib/ask-search-state';
 import { useUnsavedChanges } from '@/lib/navigation-guard';
 import {
   EvidenceDrawer,
@@ -549,7 +549,7 @@ function AskClient() {
         tag_ids: tagIds,
         source_types: sourceTypes,
         connector_ids: connectorIds,
-        document_ids: documentIds,
+        ...(documentIds.length ? { document_selection: { document_ids: documentIds } } : {}),
         conversation_id: targetConversationId,
         context_label: contextLabel,
       };
@@ -566,12 +566,7 @@ function AskClient() {
       );
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        const detail = body?.detail;
-        throw new Error(
-          typeof detail === 'object'
-            ? (detail.message ?? '问答请求失败')
-            : (detail ?? '问答请求失败'),
-        );
+        throw new Error(askRequestError(body?.detail, response.status));
       }
       const body =
         mode === 'deep'

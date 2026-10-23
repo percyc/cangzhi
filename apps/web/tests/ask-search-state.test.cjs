@@ -276,7 +276,8 @@ test('single-document asks isolate and restore their own draft after refresh/log
   assert.equal(nodes(returned.tree).find(node => node.type === 'textarea').props.value, 'document-specific draft');
   returned.submit(); await returned.flush();
   const request = JSON.parse(returned.requests.find(item => item.url === '/api/v1/knowledge/ask').body);
-  assert.deepEqual(request.document_ids, [20]); assert.deepEqual(request.category_ids, []);
+  assert.deepEqual(request.document_selection, { document_ids: [20] });
+  assert.equal(Object.hasOwn(request, 'document_ids'), false); assert.deepEqual(request.category_ids, []);
   assert.equal(JSON.parse(storage.get(normalKey)).question, 'workspace draft');
   assert.equal(helpers.askPreferencesKey('cangzhi_workspace=test-space', [21, 20, 21]), helpers.askPreferencesKey('cangzhi_workspace=test-space', [20, 21]));
 });
@@ -284,6 +285,32 @@ test('invalid document selection never silently sends an unrestricted ask', asyn
   const h = harness('ask', askFetcher(() => null), 'document_ids=bad&q=question'); await h.flush();
   assert.equal(h.button('发送').props.disabled, true); h.submit(); await h.flush();
   assert.equal(h.requests.some(item => item.url === '/api/v1/knowledge/ask'), false);
+});
+
+for (const mode of ['quick', 'deep']) for (const restricted of [false, true]) {
+  test(`${mode} ask serializes ${restricted ? 'selected documents' : 'whole knowledge'} using the v1 contract`, async () => {
+    const endpoint = mode === 'deep' ? '/api/v1/knowledge/ask/stream' : '/api/v1/knowledge/ask';
+    const h = harness('ask', askFetcher(url => url === endpoint ? Promise.resolve({ ok: false, status: 422, json: async () => ({ detail: [{ loc: ['body', 'question'], type: 'string_too_long', input: 'private input' }] }) }) : null), restricted ? 'document_ids=20,21' : '');
+    await h.flush(); if (mode === 'deep') { h.click('深度分析'); await h.flush(); }
+    h.type('合成问题'); await h.flush(); h.submit(); await h.flush();
+    const request = JSON.parse(h.requests.find(item => item.url === endpoint).body);
+    assert.equal(Object.hasOwn(request, 'document_ids'), false);
+    assert.equal(request.mode, mode);
+    if (restricted) assert.deepEqual(request.document_selection, { document_ids: [20, 21] });
+    else assert.equal(Object.hasOwn(request, 'document_selection'), false, 'Empty selection must be omitted, not sent as an empty object');
+    assert.match(text(h.tree), /问题：内容超过长度限制/);
+    assert.equal(text(h.tree).includes('private input'), false);
+    assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, '合成问题');
+  });
+}
+
+test('ask error handling tolerates null, malformed details and does not echo validation input', () => {
+  assert.match(helpers.askRequestError(null, 502), /HTTP 502/);
+  assert.match(helpers.askRequestError(undefined, 401), /登录已失效/);
+  assert.match(helpers.askRequestError({}, 403), /权限/);
+  assert.match(helpers.askRequestError([{ loc: ['body', 'document_ids'], type: 'extra_forbidden', input: 'secret' }], 422), /接口不支持的字段/);
+  assert.equal(helpers.askRequestError({ message: '模型不可用' }, 502), '模型不可用');
+  assert.match(helpers.askRequestError([null, {}], 422), /参数校验失败/);
 });
 test('workbench area changes and evidence collapse preserve input and selected citation without dialogs', async () => {
   const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask' ? Promise.resolve(json(answer('answer'))) : null));

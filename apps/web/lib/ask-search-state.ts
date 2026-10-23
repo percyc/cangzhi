@@ -1,4 +1,25 @@
 // UI state only: retrieval and authorization remain owned by the API.
+export function askRequestError(detail: unknown, status: number): string {
+  if (Array.isArray(detail)) {
+    const fields: Record<string, string> = { question: '问题', mode: '问答模式', document_selection: '指定资料', document_ids: '文档范围', scope_slug: '知识范围', conversation_id: '问答记录', context_label: '范围说明' };
+    const issues = detail.slice(0, 3).map(item => {
+      if (!item || typeof item !== 'object') return '请求格式不正确';
+      const field = Array.isArray(item.loc) ? item.loc.find((part: unknown) => typeof part === 'string' && fields[part]) : undefined;
+      const label = field ? fields[field] : '请求参数';
+      const reason = item.type === 'extra_forbidden' ? '包含接口不支持的字段，请刷新页面后重试'
+        : item.type === 'string_too_long' ? '内容超过长度限制'
+        : item.type === 'missing' ? '缺少必填内容' : '格式或取值不正确';
+      return `${label}：${reason}`;
+    });
+    return `问答参数校验失败：${issues.join('；') || '请求格式不正确'}`;
+  }
+  if (typeof detail === 'string' && detail.trim()) return detail.slice(0, 512);
+  if (detail && typeof detail === 'object' && 'message' in detail && typeof detail.message === 'string') return detail.message.slice(0, 512);
+  return status === 401 ? '登录已失效，请重新登录后重试'
+    : status === 403 ? '没有此知识范围的问答权限'
+    : `问答请求失败（HTTP ${status}），请稍后重试`;
+}
+
 export function askPreferencesKey(cookie: string, documentIds: readonly number[] = []): string {
   const raw = cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith('cangzhi_workspace='))?.slice('cangzhi_workspace='.length);
   let workspace = 'default';

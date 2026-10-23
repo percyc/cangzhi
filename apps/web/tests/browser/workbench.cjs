@@ -55,7 +55,8 @@ const fixture = http.createServer(async (req, res) => {
   if (route === '/api/ask/conversations') return json(req.method === 'POST' ? { id: 1, title: '合成测试问答', turn_count: 0 } : { items: [] });
   if (route === '/api/v1/knowledge/ask') {
     askRequests++;
-    assert.deepEqual(body.document_ids, [21]);
+    assert.equal(Object.hasOwn(body, 'document_ids'), false);
+    assert.deepEqual(body.document_selection, { document_ids: [21] });
     return json({ question: body.question, answer: '这是有据可查的演示回答。[1]', insufficient_evidence: false, citations: [citation], evidence: [citation], provider: 'fixture', model: 'none', history: { conversation_id: 1, turn_id: 1 } });
   }
   return json({ detail: `Unmocked route: ${route}` }, 404);
