@@ -221,6 +221,23 @@ def _format_evidence(evidence: Sequence[dict]) -> str:
         else:
             heading_label = str(heading)
         snippet = (item.get("snippet") or "").strip()
+        # A computed number is not usable evidence without its executed
+        # filters and completeness. Only render the service's explicit
+        # dataset context; never serialize arbitrary evidence metadata.
+        if item.get("dataset_id") is not None:
+            context = {
+                key: item[key]
+                for key in (
+                    "dataset_id", "artifact_version", "sheet_name", "region_index",
+                    "query_plan", "aggregate", "match_rows", "truncated", "aggregate_note",
+                )
+                if key in item
+            }
+            snippet = (
+                "数据集执行上下文："
+                + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+                + "\n" + snippet
+            )
         prefix_parts = [f"[{cid}]"]
         if title:
             prefix_parts.append(f"《{title}》")

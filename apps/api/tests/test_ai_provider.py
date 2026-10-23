@@ -162,6 +162,36 @@ def test_format_evidence_includes_id_marker_and_metadata():
     assert "片段一" in rendered
 
 
+def test_format_evidence_preserves_executed_dataset_context_only():
+    rendered = _format_evidence([{
+        "id": 2, "snippet": "计算结果：42", "dataset_id": 7,
+        "query_plan": {"filters": [{"column": "部门", "operator": "eq", "value": "研发"}], "metric": "sum"},
+        "aggregate": {"value": 42}, "match_rows": 3, "truncated": True,
+        "aggregate_note": "筛选后计算，单位未标注", "source_rows": [999999],
+        "contributions": [{"private": "omit-this"}], "credential": "not-for-model",
+    }])
+    assert '"column":"部门"' in rendered
+    assert '"value":"研发"' in rendered
+    assert '"match_rows":3' in rendered
+    assert '"truncated":true' in rendered
+    assert '"value":42' in rendered
+    assert "单位未标注" in rendered
+    assert "999999" not in rendered
+    assert "omit-this" not in rendered
+    assert "not-for-model" not in rendered
+
+
+def test_format_document_evidence_does_not_render_dataset_metadata():
+    rendered = _format_evidence([{
+        "id": 1, "snippet": "正文", "query_plan": {"unexpected": "ignored"},
+        "aggregate": {"value": 999999},
+    }])
+    assert "正文" in rendered
+    assert "执行上下文" not in rendered
+    assert "ignored" not in rendered
+    assert "999999" not in rendered
+
+
 # --- Provider HTTP plumbing ----------------------------------------------
 
 

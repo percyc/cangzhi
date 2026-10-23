@@ -20,6 +20,7 @@ from apps.api.ai import AIProvider, AIProviderError, AnswerResult
 from apps.api.core.db import Base, get_db
 from apps.api.main import app
 from apps.api.models.chunks import DocumentChunk
+from apps.api.models.datasets import DatasetField, KnowledgeDataset
 from apps.api.models.documents import Document, DocumentSourceType, DocumentVersion
 from apps.api.models.table_rows import StructuredTableRow
 from apps.api.models.taxonomy import (
@@ -2013,6 +2014,294 @@ def test_qa_service_logs_only_static_category_on_provider_failure(qa_db, caplog)
     # The secret text must never appear in the log.
     assert "secret.example.com" not in message
     assert "sk-LEAK-ME" not in message
+
+
+# --- dataset evidence reaches the provider with its computation scope -----
+
+
+def _dataset_evidence(**overrides) -> Evidence:
+    """Build a dataset Evidence without hard-coding any real-world domain."""
+
+    base: dict = {
+        "id": 1,
+        "evidence_type": "dataset",
+        "document_id": 11,
+        "document_version_id": 12,
+        "chunk_id": 13,
+        "title": "结构化数据",
+        "heading_path": ["明细"],
+        "page": None,
+        "paragraph_index": None,
+        "source_start": None,
+        "source_end": None,
+        "snippet": "精确查询结果",
+        "score": 1.0,
+        "dataset_id": 21,
+        "artifact_version": 3,
+        "sheet_name": "明细",
+        "region_index": 1,
+        "columns": ["维度列", "指标列"],
+        "table_location": {
+            "sheet_name": "明细",
+            "region_index": 1,
+            "row_start": 2,
+            "row_end": 4,
+            "column_names": ["维度列", "指标列"],
+        },
+        "source_rows": [2, 3, 4],
+        "contributions": [{"维度列": "样例", "metric": 7}],
+        "match_rows": 3,
+    }
+    base.update(overrides)
+    return Evidence(**base)
+
+
+def test_dataset_evidence_provider_payload_carries_query_scope():
+    """An executed dataset result must not reach the model as a bare snippet.
+
+    Without the plan/aggregate/match context the model has no way to know
+    which rows the number was computed over, and answers drift into
+    claims about the whole table.
+    """
+
+    payload = _dataset_evidence(
+        query_plan={
+            "filters": [{"column": "维度列", "operator": "eq", "value": "样例"}],
+            "group_by": [],
+            "metric": "sum",
+            "metric_column": "指标列",
+        },
+        aggregate={"kind": "sum", "value": 7, "metric_column": "指标列", "total": 3},
+        truncated=False,
+    ).to_provider_dict()
+
+    assert payload["dataset_id"] == 21
+    assert payload["artifact_version"] == 3
+    assert payload["sheet_name"] == "明细"
+    assert payload["region_index"] == 1
+    assert payload["query_plan"]["metric"] == "sum"
+    assert payload["query_plan"]["filters"][0]["column"] == "维度列"
+    assert payload["aggregate"]["value"] == 7
+    assert payload["match_rows"] == 3
+    assert payload["truncated"] is False
+    assert payload["table_location"]["row_start"] == 2
+    # The contributing row list and the readable contributions stay in the
+    # citation DTO only; sending them would bloat the prompt and invite the
+    # model to present raw rows as if they were the answer.
+    assert "source_rows" not in payload
+    assert "contributions" not in payload
+
+
+def test_dataset_evidence_provider_payload_marks_truncated_result():
+    payload = _dataset_evidence(
+        query_plan={"filters": [], "metric": "rows"},
+        aggregate={"kind": "rows", "returned": 2, "total": 5},
+        match_rows=5,
+        truncated=True,
+    ).to_provider_dict()
+
+    assert payload["truncated"] is True
+    assert payload["match_rows"] == 5
+    assert payload["aggregate"]["returned"] == 2
+
+
+def test_dataset_evidence_provider_payload_carries_generic_aggregate_note():
+    payload = _dataset_evidence(
+        query_plan={"filters": [], "metric": "sum"},
+        aggregate={"kind": "sum", "value": 7, "metric_column": "指标列"},
+    ).to_provider_dict()
+
+    note = payload["aggregate_note"]
+    assert "筛选条件" in note
+    assert "汇总行" in note
+    assert "不要臆造单位" in note
+
+
+def test_non_dataset_evidence_provider_payload_stays_unchanged():
+    """Prose / PDF / plain table evidence must not grow dataset keys."""
+
+    prose = Evidence(
+        id=2,
+        document_id=1,
+        document_version_id=1,
+        chunk_id=1,
+        title="说明",
+        heading_path=["小节"],
+        page=None,
+        paragraph_index=None,
+        source_start=None,
+        source_end=None,
+        snippet="正文片段",
+        score=0.5,
+        evidence_type="document",
+    ).to_provider_dict()
+    assert set(prose) == {"id", "title", "heading_path", "snippet", "evidence_type"}
+
+    plain_table = Evidence(
+        id=3,
+        document_id=1,
+        document_version_id=1,
+        chunk_id=2,
+        title="表格说明",
+        heading_path=["小节"],
+        page=None,
+        paragraph_index=None,
+        source_start=None,
+        source_end=None,
+        snippet="表格片段",
+        score=0.5,
+        evidence_type="dataset",
+        table_location={"sheet_name": "Sheet", "region_index": 1},
+    ).to_provider_dict()
+    assert "query_plan" not in plain_table
+    assert "aggregate" not in plain_table
+    assert "match_rows" not in plain_table
+    assert "truncated" not in plain_table
+    assert plain_table["table_location"] == {"sheet_name": "Sheet", "region_index": 1}
+
+
+def test_qa_service_sends_executed_dataset_scope_to_provider(qa_db):
+    """End-to-end: the executed plan/aggregate reaches ``answer_question``."""
+
+    async def _run():
+        async with qa_db() as session:
+            document = Document(title="聚合底表", source_type=DocumentSourceType.file)
+            session.add(document)
+            await session.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="dataset-scope-payload",
+                processing_status="ready",
+            )
+            session.add(version)
+            await session.flush()
+            document.current_version_id = version.id
+            dataset = KnowledgeDataset(
+                document_id=document.id,
+                document_version_id=version.id,
+                name="聚合底表",
+                sheet_name="明细",
+                region_index=1,
+                status="ready",
+                row_count=2,
+                column_count=2,
+                profile={},
+            )
+            session.add(dataset)
+            await session.flush()
+            session.add_all(
+                [
+                    DatasetField(
+                        dataset_id=dataset.id,
+                        position=0,
+                        name="维度列",
+                        inferred_type="text",
+                        sample_values=["甲"],
+                    ),
+                    DatasetField(
+                        dataset_id=dataset.id,
+                        position=1,
+                        name="指标列",
+                        inferred_type="number",
+                    ),
+                ]
+            )
+            session.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id="dataset-scope-child",
+                    role="child",
+                    chunk_type="table",
+                    order_index=0,
+                    content="行 2｜维度列=甲｜指标列=5\n行 3｜维度列=甲｜指标列=9",
+                    search_text="聚合底表 甲 指标列 5 9",
+                    content_hash="dataset-scope-chunk",
+                    heading_path=["明细"],
+                    char_count=40,
+                    token_estimate=20,
+                    extra={
+                        "sheet_name": "明细",
+                        "region_index": 1,
+                        "row_start": 2,
+                        "row_end": 3,
+                        "column_names": ["维度列", "指标列"],
+                    },
+                    is_current=True,
+                )
+            )
+            session.add_all(
+                [
+                    StructuredTableRow(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        dataset_id=dataset.id,
+                        sheet_name="明细",
+                        region_index=1,
+                        row_number=2,
+                        values={"维度列": "甲", "指标列": "5"},
+                    ),
+                    StructuredTableRow(
+                        document_id=document.id,
+                        document_version_id=version.id,
+                        dataset_id=dataset.id,
+                        sheet_name="明细",
+                        region_index=1,
+                        row_number=3,
+                        values={"维度列": "甲", "指标列": "9"},
+                    ),
+                ]
+            )
+            await session.commit()
+            document_id = document.id
+
+        provider = StubProvider()
+        provider.json_responses.append(
+            {
+                "relevant": True,
+                "document_id": document_id,
+                "sheet_name": "明细",
+                "region_index": 1,
+                "filters": [{"column": "维度列", "operator": "eq", "value": "甲"}],
+                "group_by": [],
+                "metric": "sum",
+                "metric_column": "指标列",
+                "sort_by": "metric",
+                "sort_order": "desc",
+                "limit": 10,
+            }
+        )
+        provider.queue(
+            AnswerResult(
+                answer="命中 2 行的指标列合计为 14。",
+                citation_ids=[1],
+                insufficient_evidence=False,
+            )
+        )
+        async with qa_db() as session:
+            await QAService(provider).ask(
+                session,
+                AskRequest(question="维度列为甲的行合计是多少？", document_ids=[document_id]),
+            )
+        return provider
+
+    provider = asyncio.run(_run())
+    payload = provider.calls[0]["evidence"][0]
+    # The executed plan, aggregate and match counter now reach the model, so
+    # the answer can state the scope instead of implying a whole-table figure.
+    assert payload["query_plan"]["filters"][0]["column"] == "维度列"
+    assert payload["aggregate"]["total"] == 2
+    assert payload["match_rows"] == 2
+    # The truncation flag travels as computed, so the model can qualify a
+    # partial listing instead of presenting it as exhaustive.
+    assert isinstance(payload["truncated"], bool)
+    assert payload["sheet_name"] == "明细"
+    assert payload["columns"] == ["维度列", "指标列"]
+    assert payload["aggregate_note"]
+    # The contributing row list stays out of the prompt.
+    assert "source_rows" not in payload
+    assert "contributions" not in payload
 
 
 # Import the module-level symbol used by the override helpers.

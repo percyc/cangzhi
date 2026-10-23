@@ -102,6 +102,16 @@ _QUESTION_GRAMS = {
 }
 
 
+# Sent with every executed dataset evidence item. It is intentionally
+# domain-neutral: no region, period or unit is assumed, because the
+# executed plan is the only authority on which rows the number covers.
+_DATASET_AGGREGATE_NOTE = (
+    "aggregate 是系统在上述筛选条件命中的数据行上即时计算得到的结果，"
+    "不是原表中已存在的汇总行；回答时请说明筛选范围与命中行数。"
+    "若数据集未提供单位，请直接给出数值并注明单位未标注，不要臆造单位。"
+)
+
+
 def _contains_cjk(value: str) -> bool:
     return bool(_CJK_RE.search(value))
 
@@ -199,6 +209,12 @@ class Evidence:
       aggregate value lives in ``aggregate``; ``match_rows`` is the
       matched row count; ``contributions`` is the human-readable list
       of source rows used to compute it.
+
+    Only the citation DTO exposes ``source_rows``/``contributions``.
+    The provider payload deliberately carries the plan, aggregate and
+    match counters without those two unbounded lists, because the model
+    needs to know the scope of the computation but must not receive the
+    contributing rows themselves.
     """
 
     id: int
@@ -243,7 +259,42 @@ class Evidence:
             payload["evidence_type"] = self.evidence_type
         if self.table_location:
             payload["table_location"] = dict(self.table_location)
+        # Only an executed dataset result carries the plan/aggregate pair.
+        # A spreadsheet chunk that was merely retrieved has no query_plan
+        # and must not grow extra keys, so the model cannot confuse a raw
+        # excerpt with a computed figure.
+        if self.dataset_id is not None:
+            payload.update(self._dataset_provider_context())
         return payload
+
+    def _dataset_provider_context(self) -> dict:
+        """Return the auditable computation context for one dataset result.
+
+        The summary snippet alone does not tell the model which rows the
+        number was computed over, so the answer can silently drift into a
+        claim about the whole table. We therefore pass the executed plan,
+        the aggregate value and the match/truncation counters.
+
+        What is deliberately *not* passed: ``source_rows`` (unbounded row
+        identity list), ``contributions`` (already summarised in the
+        snippet) and any credential material. ``table_location`` remains
+        the only locator, and it stays additive so the payload shape of
+        ordinary document evidence is untouched.
+        """
+
+        context: dict = {
+            "dataset_id": self.dataset_id,
+            "artifact_version": self.artifact_version,
+            "sheet_name": self.sheet_name,
+            "region_index": self.region_index,
+            "columns": list(self.columns),
+            "query_plan": dict(self.query_plan),
+            "aggregate": dict(self.aggregate),
+            "match_rows": self.match_rows,
+            "truncated": self.truncated,
+            "aggregate_note": _DATASET_AGGREGATE_NOTE,
+        }
+        return context
 
     def to_citation(self) -> dict:
         payload: dict = {
