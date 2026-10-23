@@ -30,5 +30,8 @@ class ModelAdmissionLease(Base):
     owner_token = Column(String(64), nullable=False, unique=True)
     kind = Column(String(16), nullable=False)
     purpose = Column(String(16), nullable=False)
+    # Opaque digest of (purpose, endpoint, model, credential). Never a raw URL,
+    # key or model name; NULL for callers that do not opt into scoped isolation.
+    failure_scope = Column(String(64), nullable=True)
     lease_until = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

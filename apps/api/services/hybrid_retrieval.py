@@ -204,18 +204,19 @@ async def _request_query_embedding(
     else:
         url = f"{base_url}/api/embed"
         body = {"model": model, "input": text}
-    pool_id = admission.channel_pool_id(admission.EMBEDDING)
     async with admission.async_channel(
-        admission.EMBEDDING, hard_lifetime_seconds=timeout_seconds
+        admission.EMBEDDING, hard_lifetime_seconds=timeout_seconds,
+        failure_scope=admission.failure_scope(
+            admission.EMBEDDING, url, model, headers.get("Authorization", "")
+        ),
     ) as channel:
         async with httpx.AsyncClient(
             timeout=timeout_seconds,
             trust_env=False,
         ) as client:
             response = await channel.run(client.post(url, headers=headers, json=body))
+        channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
     if response.status_code >= 400:
-        admission.apply_response_cooldown(pool_id, response.status_code,
-                                          admission.parse_retry_after(response.headers))
         raise ValueError(f"向量服务返回 HTTP {response.status_code}")
     try:
         payload = response.json()

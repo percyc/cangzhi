@@ -23,15 +23,33 @@ Design invariants (ADR-034):
     budget safely and defer without charging a retry count.
   * No layered retries: the bounded acquire and the 429 cooldown are typed
     delays; this module never retries the HTTP request.
+
+Failure isolation (ADR-034 follow-up, 0044):
+
+  A single shared pool means one upstream speaks for the whole product, but a
+  5xx from *one* model/credential must not freeze every other foreground ask.
+  Cooldowns are therefore routed in two tiers:
+
+    * ``429`` stays **global** and conservative: the upstream itself is asking
+      us to back off, and we have no evidence about which model is at fault.
+    * ``401/403/5xx`` become **scoped** when the call site supplies an opaque
+      ``failure_scope``. Without a scope a 5xx keeps the historical global
+      behaviour (documented compatibility, not an oversight).
+
+  A scope is an irreversible one-way digest of
+  ``(purpose, endpoint, model, credential)``. Raw values are never stored, so
+  the circuit state cannot leak a channel address or key.
 """
 
 from __future__ import annotations
 
 import asyncio
 import email.utils
+import hashlib
 import json
 import logging
 import math
+import re
 import sys
 import threading
 import time
@@ -60,6 +78,69 @@ BACKGROUND = "background"
 
 # Default single shared pool id.
 DEFAULT_POOL = "model"
+
+# Reserved prefix for the scoped circuit-breaker rows that reuse the
+# ``model_admission_pools`` table.  A scope pool never counts toward the real
+# pool's capacity: a scoped probe is taken *in addition to* the shared lease.
+SCOPE_POOL_PREFIX = "scope:"
+
+# Scope digests are fixed-length hex so they can be validated before touching
+# SQL (defence against an injected value reaching a query parameter).  56 hex
+# chars keeps ``scope:`` + digest (62) inside the VARCHAR(64) ``pool_id``.
+_SCOPE_RE = re.compile(r"^[0-9a-f]{56}$")
+_SCOPE_HEX_CHARS = 56
+
+
+def _scope_part(value: object) -> str:
+    """Render one scope component losslessly; never log the result.
+
+    Model names and credentials are **case sensitive**, so no lowercasing or
+    stripping is applied here: ``sk-AbC`` and ``sk-abc`` are different keys and
+    must never share a circuit.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    if isinstance(value, str):
+        return value
+    # Non-string inputs (e.g. an int model id) are stringified so the digest
+    # stays deterministic across processes.
+    return str(value)
+
+
+def failure_scope(purpose: str, endpoint: str, model: str, credential: str = "") -> str:
+    """Return an opaque, stable failure-isolation scope for one channel.
+
+    The result is a 56-char lowercase hex SHA-256 digest over the canonical
+    JSON array ``[purpose, endpoint, model, credential]``.  A JSON array (not a
+    delimiter join) is used so no combination of component values can collide by
+    shifting content across the separator, and no component is normalised:
+    model identifiers and API keys stay case sensitive.
+
+    The digest is safe to persist and to log - it cannot be reversed into the
+    channel URL, model name or key, and it is identical in every process, so
+    two workers isolate the *same* channel together.
+
+    Callers pass the real values here only; the digest is what leaves this
+    function.  An empty endpoint and empty credential are still hashed, so a
+    missing credential never collapses into a shared, easily-tripped scope.
+    """
+    canonical = json.dumps(
+        [_scope_part(purpose), _scope_part(endpoint), _scope_part(model), _scope_part(credential)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:_SCOPE_HEX_CHARS]
+
+
+def is_failure_scope(value: object) -> bool:
+    """Validate a caller-supplied scope before it is used in a query."""
+    return isinstance(value, str) and bool(_SCOPE_RE.match(value))
+
+
+def _scope_pool_id(scope: str) -> str:
+    return f"{SCOPE_POOL_PREFIX}{scope}"
 
 
 def _now() -> datetime:
@@ -97,6 +178,30 @@ class AdmissionDeadlineError(AdmissionError):
 
 
 @dataclass(frozen=True)
+class Probe:
+    """One half-open probe this process owns.
+
+    ``expected_until`` is the CAS token identifying the circuit generation the
+    probe belongs to: a success may close the circuit only while the row still
+    carries that marker, so a newer failure is never erased by a late success.
+    """
+
+    pool_id: str
+    token: str
+    expected_until: datetime | None
+
+
+@dataclass(frozen=True)
+class HeldLease:
+    """Backend-internal acquire result: the real lease plus any probe claims."""
+
+    token: str
+    scope: str | None
+    probes: tuple[Probe, ...]
+    until: datetime
+
+
+@dataclass(frozen=True)
 class Lease:
     """One held slot; ``owner_token`` uniquely identifies it for CAS release."""
 
@@ -105,6 +210,8 @@ class Lease:
     kind: str
     purpose: str
     lease_until: datetime
+    failure_scope: str | None = None
+    probes: tuple[Probe, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +237,9 @@ class _Config:
                 parsed = {}
             if isinstance(parsed, dict):
                 for purpose, pid in parsed.items():
-                    if purpose in _PURPOSES and isinstance(pid, str) and 0 < len(pid.strip()) <= 64:
+                    if (purpose in _PURPOSES and isinstance(pid, str)
+                            and 0 < len(pid.strip()) <= 64
+                            and not pid.strip().startswith(SCOPE_POOL_PREFIX)):
                         self.pool_map[purpose] = pid.strip()
 
 
@@ -196,6 +305,7 @@ class AdmissionBackend:
         lease_ttl_seconds: float,
         acquire_timeout_seconds: float,
         now: datetime | None = None,
+        failure_scope: str | None = None,
     ) -> Lease:
         raise NotImplementedError
 
@@ -207,6 +317,27 @@ class AdmissionBackend:
         raise NotImplementedError
 
     def cooldown_remaining(self, pool_id: str) -> float:
+        raise NotImplementedError
+
+    # -- failure isolation -------------------------------------------------
+
+    def apply_scope_cooldown(self, pool_id: str, scope: str, cooldown_seconds: float,
+                             retry_after: float | None = None) -> None:
+        """Open (or extend) the circuit for one opaque channel scope."""
+        raise NotImplementedError
+
+    def clear_probe_circuit(self, probe: "Probe") -> bool:
+        """Close the circuit a probe belongs to, only while that probe is valid.
+
+        Ownership is proved by the probe's own ``owner_token`` still being held
+        and unexpired, not merely by a cooldown timestamp.  That closes two
+        holes at once: a late success from a request that predates the failure
+        cannot clear anything, and an expired probe cannot clear the *newer*
+        generation's circuit.  Returns whether the circuit was actually cleared.
+        """
+        raise NotImplementedError
+
+    def scope_cooldown_remaining(self, pool_id: str, scope: str) -> float:
         raise NotImplementedError
 
 
@@ -243,6 +374,107 @@ class PostgresAdmissionBackend(AdmissionBackend):
             {"pid": pool_id, "cap": cap, "bg": bg, "ocr": ocr},
         )
 
+    def _ensure_scope_pool(self, conn, scope: str) -> None:
+        """Create the scope's circuit row if absent.
+
+        A scope row is a ``model_admission_pools`` row with the reserved
+        ``scope:`` prefix.  Its capacity is 1 because it only ever represents
+        a single in-flight probe, never real quota, so operators can exclude
+        these rows from capacity reporting with a prefix filter.
+        """
+        sid = _scope_pool_id(scope)
+        conn.execute(
+            text(
+                "INSERT INTO model_admission_pools "
+                "(pool_id, capacity, background_capacity, ocr_sublimit, cooldown_until, cooldown_retry_after) "
+                "VALUES (:sid, 1, 1, 1, NULL, NULL) "
+                "ON CONFLICT (pool_id) DO NOTHING"
+            ),
+            {"sid": sid},
+        )
+
+    def _claim_probe(
+        self,
+        conn,
+        circuit_pool_id: str,
+        *,
+        scope: str | None,
+        lease_ttl_seconds: float,
+    ) -> tuple[str, str, float | None, datetime | None]:
+        """Decide whether this caller may run the single half-open probe.
+
+        ``circuit_pool_id`` is either the real shared pool (global 429) or a
+        ``scope:`` row.  The circuit row is locked ``FOR UPDATE``, so across
+        processes exactly one caller observes the elapsed cooldown and takes the
+        probe.
+
+        The probe is a *lease* row on the circuit pool with ``kind='probe'`` and
+        the **full** request TTL (never a shortened cap, so a 600 s request
+        cannot be cut short), giving a crashed prober a finite, self-healing
+        reservation instead of a permanently open circuit.
+
+        ``cooldown_until`` is deliberately **not** advanced here.  Leaving the
+        elapsed timestamp in place is what makes the CAS correct: a newer
+        failure rewrites it to a *future* value, so a later success - whose
+        expected value is the old elapsed one - no longer matches and cannot
+        erase the newer failure.
+
+        Returns ``(status, probe_token, retry_after, expected_until)``:
+
+        * ``("probe", token, retry_after, elapsed_until)`` - this caller owns
+          the probe; ``elapsed_until`` is the CAS token for a later success.
+        * ``("cooling", "", retry_after, None)`` - still cooling, or another
+          process currently holds the single probe.
+        * ``("closed", "", None, None)`` - the circuit is already clear.
+        """
+        row = conn.execute(
+            text(
+                "SELECT cooldown_until, cooldown_retry_after FROM model_admission_pools "
+                "WHERE pool_id = :cid FOR UPDATE"
+            ),
+            {"cid": circuit_pool_id},
+        ).mappings().one_or_none()
+        if row is None:
+            return "closed", "", None, None
+        db_now = self._db_now(conn)
+        conn.execute(
+            text("DELETE FROM model_admission_leases WHERE pool_id = :cid "
+                 "AND kind = 'probe' AND lease_until <= :ts"),
+            {"cid": circuit_pool_id, "ts": db_now},
+        )
+        until = row["cooldown_until"]
+        if until is None:
+            return "closed", "", None, None
+        retry_after = float(row["cooldown_retry_after"]) if row["cooldown_retry_after"] else None
+        if until > db_now:
+            return "cooling", "", retry_after, None
+        # Elapsed -> half-open. At most one probe may be in flight, so an
+        # existing live probe lease makes every other caller back off.
+        live_probe = conn.execute(
+            text(
+                "SELECT 1 FROM model_admission_leases WHERE pool_id = :cid "
+                "AND kind = 'probe' AND lease_until > :ts LIMIT 1"
+            ),
+            {"cid": circuit_pool_id, "ts": db_now},
+        ).first()
+        if live_probe is not None:
+            return "cooling", "", retry_after, None
+        probe_token = uuid.uuid4().hex
+        conn.execute(
+            text(
+                "INSERT INTO model_admission_leases "
+                "(pool_id, owner_token, kind, purpose, failure_scope, lease_until) "
+                "VALUES (:cid, :token, 'probe', 'probe', :scope, :until)"
+            ),
+            {
+                "cid": circuit_pool_id,
+                "token": probe_token,
+                "scope": scope,
+                "until": db_now + timedelta(seconds=float(lease_ttl_seconds)),
+            },
+        )
+        return "probe", probe_token, retry_after, until
+
     def _set_timeout(self, conn) -> None:
         # Bound the connect/statement/lock-wait window inside any PG transaction
         # so a stuck coordinator cannot stall an admission call indefinitely.
@@ -251,12 +483,16 @@ class PostgresAdmissionBackend(AdmissionBackend):
             conn.execute(text("SET LOCAL lock_timeout = 1000"))
 
     def _try_acquire(self, *, pool_id: str, kind: str, purpose: str,
-                     lease_ttl_seconds: float) -> tuple[str, Any, datetime | None]:
+                     lease_ttl_seconds: float,
+                     failure_scope: str | None = None) -> tuple[str, Any, datetime | None]:
         token = uuid.uuid4().hex
         ttl = float(lease_ttl_seconds)
+        scope = failure_scope if is_failure_scope(failure_scope) else None
         with self._engine.begin() as conn:
             self._set_timeout(conn)
             self._ensure_pool(conn, pool_id)
+            if scope:
+                self._ensure_scope_pool(conn, scope)
             pool = conn.execute(
                 text(
                     "SELECT capacity, background_capacity, ocr_sublimit, cooldown_until, "
@@ -267,16 +503,37 @@ class PostgresAdmissionBackend(AdmissionBackend):
             if pool is None:
                 return "unavailable", None, None
             db_now = self._db_now(conn)
-            if pool["cooldown_until"] is not None and pool["cooldown_until"] > db_now:
-                return "cooldown", pool["cooldown_retry_after"], db_now
+
+            # Gate 1: the global shared-pool circuit. A 429 is the upstream
+            # asking us to back off, so it stays conservative and global - but
+            # once the cooldown has elapsed exactly one caller may probe.
+            probes: list[Probe] = []
+            for circuit in ([pool_id] + ([_scope_pool_id(scope)] if scope else [])):
+                status, probe_token, retry_after, expected = self._claim_probe(
+                    conn, circuit, scope=scope if circuit != pool_id else None,
+                    lease_ttl_seconds=ttl,
+                )
+                if status == "cooling":
+                    # Returning from inside ``begin`` COMMITS, it does not roll
+                    # back, so any probe already taken in this transaction must
+                    # be released explicitly before we return.
+                    self._abandon_probes(conn, probes)
+                    return ("cooldown" if circuit == pool_id else "scope_cooldown",
+                            retry_after, expected)
+                if status == "probe":
+                    probes.append(Probe(circuit, probe_token, expected))
+
             # Reap expired leases for this pool inside the same transaction.
             conn.execute(
                 text("DELETE FROM model_admission_leases WHERE pool_id = :pid AND lease_until <= :ts"),
                 {"pid": pool_id, "ts": db_now},
             )
+            # Probe leases (``kind='probe'``) never count toward quota: they
+            # ride on the real slot below. A pool of capacity 1 must still be
+            # able to half-open recover.
             total = conn.execute(
                 text("SELECT COUNT(*) FROM model_admission_leases "
-                     "WHERE pool_id = :pid AND lease_until > :ts"),
+                     "WHERE pool_id = :pid AND kind <> 'probe' AND lease_until > :ts"),
                 {"pid": pool_id, "ts": db_now},
             ).scalar_one()
             bg = conn.execute(
@@ -292,16 +549,43 @@ class PostgresAdmissionBackend(AdmissionBackend):
                     {"pid": pool_id, "ts": db_now},
                 ).scalar_one()
             cap, bg_cap, ocr_cap = pool["capacity"], pool["background_capacity"], pool["ocr_sublimit"]
-            if total >= cap or (kind == BACKGROUND and bg >= bg_cap) or (purpose == OCR and ocr >= ocr_cap):
+            # Background work must never be able to consume the last slot of a
+            # pool, so an interactive foreground call always keeps one free.
+            # With capacity 1 there is nothing to reserve: background work is
+            # still allowed while the pool is empty (no fairness or preemption
+            # is promised in that configuration).
+            bg_effective = min(bg_cap, max(0, cap - 1)) if cap > 1 else bg_cap
+            if total >= cap or (kind == BACKGROUND and bg >= bg_effective) or (
+                purpose == OCR and ocr >= ocr_cap
+            ):
+                self._abandon_probes(conn, probes)
                 return "busy", None, db_now
             until = db_now + timedelta(seconds=ttl)
             conn.execute(
                 text("INSERT INTO model_admission_leases "
-                     "(pool_id, owner_token, kind, purpose, lease_until) "
-                     "VALUES (:pid, :token, :kind, :purpose, :until)"),
-                {"pid": pool_id, "token": token, "kind": kind, "purpose": purpose, "until": until},
+                     "(pool_id, owner_token, kind, purpose, failure_scope, lease_until) "
+                     "VALUES (:pid, :token, :kind, :purpose, :scope, :until)"),
+                {"pid": pool_id, "token": token, "kind": kind, "purpose": purpose,
+                 "scope": scope, "until": until},
             )
-            return "ok", token, until
+            return "ok", HeldLease(token=token, scope=scope, probes=tuple(probes), until=until), until
+
+    @staticmethod
+    def _abandon_probes(conn, probes: list["Probe"]) -> None:
+        """Drop probe leases taken earlier in this transaction.
+
+        If the real slot turns out to be busy, the half-open probe must not be
+        consumed: the circuit stays in its observed (elapsed) state so the next
+        caller can take it instead of burning the single probe on a request
+        that never left the process.  Deleting by owner token only ever touches
+        this caller's own probe.
+        """
+        for probe in probes:
+            conn.execute(
+                text("DELETE FROM model_admission_leases WHERE pool_id = :cid "
+                     "AND owner_token = :token"),
+                {"cid": probe.pool_id, "token": probe.token},
+            )
 
     def _db_now(self, conn) -> datetime:
         if self._is_pg():
@@ -311,12 +595,14 @@ class PostgresAdmissionBackend(AdmissionBackend):
     def _is_pg(self) -> bool:
         return self._engine.dialect.name == "postgresql"
 
-    def acquire(self, pool_id, kind, purpose, *, lease_ttl_seconds, acquire_timeout_seconds, now=None):
+    def acquire(self, pool_id, kind, purpose, *, lease_ttl_seconds, acquire_timeout_seconds,
+                now=None, failure_scope=None):
         deadline_mono = time.monotonic() + acquire_timeout_seconds
         while True:
             try:
                 status, payload, until = self._try_acquire(
-                    pool_id=pool_id, kind=kind, purpose=purpose, lease_ttl_seconds=lease_ttl_seconds
+                    pool_id=pool_id, kind=kind, purpose=purpose,
+                    lease_ttl_seconds=lease_ttl_seconds, failure_scope=failure_scope,
                 )
             except AdmissionError:
                 raise
@@ -324,12 +610,17 @@ class PostgresAdmissionBackend(AdmissionBackend):
                 logger.warning("model_admission_db_unavailable pool=%s err=%s", pool_id, type(exc).__name__)
                 raise AdmissionUnavailableError("模型准入数据库不可用") from exc
             if status == "ok":
-                return Lease(pool_id=pool_id, owner_token=payload, kind=kind,
-                             purpose=purpose, lease_until=until or (_now() + timedelta(seconds=lease_ttl_seconds)))
-            if status == "cooldown":
+                held: HeldLease = payload
+                return Lease(pool_id=pool_id, owner_token=held.token, kind=kind,
+                             purpose=purpose,
+                             lease_until=until or (_now() + timedelta(seconds=lease_ttl_seconds)),
+                             failure_scope=held.scope, probes=held.probes)
+            if status in ("cooldown", "scope_cooldown"):
                 retry_after = float(payload) if payload else None
-                raise AdmissionCooldownError(retry_after=retry_after or None,
-                                             message="渠道正在临时冷却，请稍后再试")
+                raise AdmissionCooldownError(
+                    retry_after=retry_after or None,
+                    message="渠道正在临时冷却，请稍后再试",
+                )
             if status == "unavailable":
                 raise AdmissionUnavailableError("模型准入表不可用")
             if time.monotonic() >= deadline_mono:
@@ -337,6 +628,12 @@ class PostgresAdmissionBackend(AdmissionBackend):
             time.sleep(_config().acquire_poll)
 
     def release(self, lease: Lease) -> bool:
+        """Release the caller's real slot and any probe it still owns.
+
+        Both deletes are scoped by the caller's own ``owner_token``, so this
+        can never remove a successor's lease.  Probe rows are removed with the
+        real slot: a completed request no longer needs the circuit reserved.
+        """
         if lease is None:
             return True
         with self._engine.begin() as conn:
@@ -345,20 +642,46 @@ class PostgresAdmissionBackend(AdmissionBackend):
                 text("DELETE FROM model_admission_leases WHERE pool_id = :pid AND owner_token = :token"),
                 {"pid": lease.pool_id, "token": lease.owner_token},
             )
+            for probe in lease.probes:
+                conn.execute(
+                    text("DELETE FROM model_admission_leases WHERE pool_id = :pid AND owner_token = :token"),
+                    {"pid": probe.pool_id, "token": probe.token},
+                )
             return (result.rowcount or 0) > 0
 
     def apply_cooldown(self, pool_id: str, cooldown_seconds: float,
                        retry_after: float | None = None) -> None:
+        self._apply_circuit(pool_id, cooldown_seconds, retry_after, scope=None)
+
+    def apply_scope_cooldown(self, pool_id: str, scope: str, cooldown_seconds: float,
+                             retry_after: float | None = None) -> None:
+        if not is_failure_scope(scope):
+            raise ValueError("invalid failure scope")
+        self._apply_circuit(pool_id, cooldown_seconds, retry_after, scope=scope)
+
+    def _apply_circuit(self, pool_id: str, cooldown_seconds: float,
+                       retry_after: float | None, *, scope: str | None) -> None:
+        """Open or extend a circuit, never shortening a longer live cooldown.
+
+        ``pool_id`` is the *real* shared pool (global) and ``scope`` selects the
+        destination row: ``None`` means the pool row itself, otherwise the
+        scope's own ``scope:`` row.  A scoped cooldown therefore never touches
+        the shared quota's cooldown state and vice versa.
+        """
+        target = pool_id if scope is None else _scope_pool_id(scope)
         with self._engine.begin() as conn:
             self._set_timeout(conn)
-            self._ensure_pool(conn, pool_id)
+            if scope is None:
+                self._ensure_pool(conn, pool_id)
+            else:
+                self._ensure_scope_pool(conn, scope)
             now = self._db_now(conn)
             seconds = min(3600.0, max(1.0, float(cooldown_seconds)))
             until = now + timedelta(seconds=seconds)
             conn.execute(
                 text("UPDATE model_admission_pools SET cooldown_until = GREATEST(cooldown_until, :until), "
                      "cooldown_retry_after = :ra, updated_at = :now WHERE pool_id = :pid"),
-                {"pid": pool_id, "until": until, "ra": int(min(3600, max(1, retry_after or seconds))), "now": now},
+                {"pid": target, "until": until, "ra": int(min(3600, max(1, retry_after or seconds))), "now": now},
             )
 
     def cooldown_remaining(self, pool_id: str) -> float:
@@ -367,6 +690,67 @@ class PostgresAdmissionBackend(AdmissionBackend):
             row = conn.execute(
                 text("SELECT cooldown_until FROM model_admission_pools WHERE pool_id = :pid"),
                 {"pid": pool_id},
+            ).mappings().one_or_none()
+            now = self._db_now(conn)
+        if row is None or row["cooldown_until"] is None:
+            return 0.0
+        return max(0.0, (row["cooldown_until"] - now).total_seconds())
+
+    def clear_probe_circuit(self, probe: Probe) -> bool:
+        """Close a circuit by CAS, only while *this* probe is still valid.
+
+        The update is guarded by two independent facts:
+
+        * the probe's ``owner_token`` still has a live lease row, and
+        * ``cooldown_until`` still equals the marker the probe observed.
+
+        A late success from a request that started before the failure owns no
+        probe and fails the first guard; an expired probe, or a newer failure
+        that moved the marker, fails one of them.  Either way the newer fault
+        survives, and only the caller that actually proved the channel healthy
+        can reopen it.
+        """
+        if not probe.token:
+            return False
+        with self._engine.begin() as conn:
+            self._set_timeout(conn)
+            # Serialize with successor probes and failure updates before
+            # checking ownership/expiry; a pre-lock snapshot can be stale.
+            row = conn.execute(
+                text("SELECT cooldown_until FROM model_admission_pools "
+                     "WHERE pool_id = :pid FOR UPDATE"),
+                {"pid": probe.pool_id},
+            ).first()
+            if row is None or row[0] != probe.expected_until:
+                return False
+            now = self._db_now(conn)
+            held = conn.execute(
+                text(
+                    "SELECT 1 FROM model_admission_leases "
+                    "WHERE pool_id = :pid AND owner_token = :token AND lease_until > :ts"
+                ),
+                {"pid": probe.pool_id, "token": probe.token, "ts": now},
+            ).first()
+            if held is None:
+                return False
+            result = conn.execute(
+                text(
+                    "UPDATE model_admission_pools SET cooldown_until = NULL, "
+                    "cooldown_retry_after = NULL, updated_at = :now "
+                    "WHERE pool_id = :pid AND cooldown_until = :expected"
+                ),
+                {"pid": probe.pool_id, "now": now, "expected": probe.expected_until},
+            )
+            return (result.rowcount or 0) > 0
+
+    def scope_cooldown_remaining(self, pool_id: str, scope: str) -> float:
+        if not is_failure_scope(scope):
+            return 0.0
+        with self._engine.connect() as conn:
+            self._set_timeout(conn)
+            row = conn.execute(
+                text("SELECT cooldown_until FROM model_admission_pools WHERE pool_id = :pid"),
+                {"pid": _scope_pool_id(scope)},
             ).mappings().one_or_none()
             now = self._db_now(conn)
         if row is None or row["cooldown_until"] is None:
@@ -384,38 +768,83 @@ class InMemoryAdmissionBackend(AdmissionBackend):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.leases: dict[str, tuple[str, str, str, datetime]] = {}
+        # token -> (pool_id, kind, purpose, lease_until, failure_scope)
+        self.leases: dict[str, tuple[str, str, str, datetime, str | None]] = {}
         self.cooldown_until: dict[str, datetime] = {}
         self.cooldown_retry_after: dict[str, float] = {}
 
     def _prune(self, now: datetime) -> list[tuple[str, str, str]]:
         live: list[tuple[str, str, str]] = []
-        for token, (pid, k, purpose, until) in list(self.leases.items()):
+        for token, (pid, k, purpose, until, _scope) in list(self.leases.items()):
             if until <= now:
                 self.leases.pop(token, None)
             else:
                 live.append((pid, k, purpose))
         return live
 
-    def acquire(self, pool_id, kind, purpose, *, lease_ttl_seconds, acquire_timeout_seconds, now=None):
+    def _claim_probe(self, circuit: str, now: datetime, lease_ttl_seconds: float
+                     ) -> tuple[str, Probe]:
+        """Mirror of the Postgres single-probe half-open semantics.
+
+        ``cooldown_until`` is not advanced: a newer failure moves it to a future
+        value, which is exactly what invalidates a late success's CAS.
+        """
+        until = self.cooldown_until.get(circuit)
+        if until is None:
+            return "closed", Probe(circuit, "", None)
+        if until > now:
+            return "cooling", Probe(circuit, "", None)
+        busy = any(pid == circuit and k == "probe" and lease_until > now
+                   for pid, k, _p, lease_until, _s in self.leases.values())
+        if busy:
+            return "cooling", Probe(circuit, "", None)
+        token = uuid.uuid4().hex
+        self.leases[token] = (
+            circuit, "probe", "probe", now + timedelta(seconds=float(lease_ttl_seconds)), None,
+        )
+        return "probe", Probe(circuit, token, until)
+
+    def _drop_probes(self, probes: list[Probe]) -> None:
+        for probe in probes:
+            if probe.token:
+                self.leases.pop(probe.token, None)
+
+    def acquire(self, pool_id, kind, purpose, *, lease_ttl_seconds, acquire_timeout_seconds,
+                now=None, failure_scope=None):
+        scope = failure_scope if is_failure_scope(failure_scope) else None
         deadline_mono = time.monotonic() + acquire_timeout_seconds
         while True:
             with self._lock:
                 now = _now()
-                if self.cooldown_until.get(pool_id, now) > now:
-                    raise AdmissionCooldownError(retry_after=self.cooldown_retry_after.get(pool_id))
-                live = [entry for entry in self._prune(now) if entry[0] == pool_id]
+                probes: list[Probe] = []
+                for circuit in [pool_id] + ([_scope_pool_id(scope)] if scope else []):
+                    status, probe = self._claim_probe(circuit, now, lease_ttl_seconds)
+                    if status == "cooling":
+                        self._drop_probes(probes)
+                        raise AdmissionCooldownError(
+                            retry_after=self.cooldown_retry_after.get(circuit))
+                    if status == "probe":
+                        probes.append(probe)
+                live = [entry for entry in self._prune(now)
+                        if entry[0] == pool_id and entry[1] != "probe"]
                 cap, bg_cap, ocr_cap = _default_capacity(pool_id)
                 total = len(live)
                 bgcount = sum(1 for _, k, _ in live if k == BACKGROUND)
                 ocr_count = sum(1 for _, _, p in live if p == OCR)
+                # Background work never consumes the last slot, so a foreground
+                # call always keeps one free.  capacity 1 reserves nothing.
+                bg_effective = min(bg_cap, max(0, cap - 1)) if cap > 1 else bg_cap
                 if (total < cap
-                        and not (kind == BACKGROUND and bgcount >= bg_cap)
+                        and not (kind == BACKGROUND and bgcount >= bg_effective)
                         and not (purpose == OCR and ocr_count >= ocr_cap)):
                     token = uuid.uuid4().hex
-                    self.leases[token] = (pool_id, kind, purpose, now + timedelta(seconds=lease_ttl_seconds))
+                    until = now + timedelta(seconds=lease_ttl_seconds)
+                    self.leases[token] = (pool_id, kind, purpose, until, scope)
                     return Lease(pool_id=pool_id, owner_token=token, kind=kind,
-                                 purpose=purpose, lease_until=now + timedelta(seconds=lease_ttl_seconds))
+                                 purpose=purpose, lease_until=until, failure_scope=scope,
+                                 probes=tuple(probes))
+                # Busy: give the probe back so the next caller can use it.
+                self._drop_probes(probes)
             if time.monotonic() >= deadline_mono:
                 raise AdmissionBusyError("模型额度繁忙")
             time.sleep(0.01)
@@ -425,10 +854,12 @@ class InMemoryAdmissionBackend(AdmissionBackend):
             return True
         with self._lock:
             held = self.leases.get(lease.owner_token)
-            if held is None or held[0] != lease.pool_id:
-                return False
-            del self.leases[lease.owner_token]
-            return True
+            released = held is not None and held[0] == lease.pool_id
+            if released:
+                del self.leases[lease.owner_token]
+            for probe in lease.probes:
+                self.leases.pop(probe.token, None)
+            return released
 
     def apply_cooldown(self, pool_id: str, cooldown_seconds: float,
                        retry_after: float | None = None) -> None:
@@ -437,6 +868,27 @@ class InMemoryAdmissionBackend(AdmissionBackend):
             self.cooldown_until[pool_id] = max(self.cooldown_until.get(pool_id, until), until)
             self.cooldown_retry_after[pool_id] = float(retry_after) if retry_after else float(cooldown_seconds)
 
+    def apply_scope_cooldown(self, pool_id: str, scope: str, cooldown_seconds: float,
+                             retry_after: float | None = None) -> None:
+        if not is_failure_scope(scope):
+            raise ValueError("invalid failure scope")
+        self.apply_cooldown(_scope_pool_id(scope), cooldown_seconds, retry_after)
+
+    def clear_probe_circuit(self, probe: Probe) -> bool:
+        """Mirror of the Postgres guarded CAS: token must be live *and* current."""
+        if not probe.token:
+            return False
+        with self._lock:
+            now = _now()
+            held = self.leases.get(probe.token)
+            if held is None or held[0] != probe.pool_id or held[3] <= now:
+                return False
+            if self.cooldown_until.get(probe.pool_id) != probe.expected_until:
+                return False
+            self.cooldown_until.pop(probe.pool_id, None)
+            self.cooldown_retry_after.pop(probe.pool_id, None)
+            return True
+
     def cooldown_remaining(self, pool_id: str) -> float:
         with self._lock:
             until = self.cooldown_until.get(pool_id)
@@ -444,6 +896,10 @@ class InMemoryAdmissionBackend(AdmissionBackend):
                 return 0.0
             return max(0.0, (until - _now()).total_seconds())
 
+    def scope_cooldown_remaining(self, pool_id: str, scope: str) -> float:
+        if not is_failure_scope(scope):
+            return 0.0
+        return self.cooldown_remaining(_scope_pool_id(scope))
 
 # ---------------------------------------------------------------------------
 # Module singleton + (test-only) injection
@@ -490,12 +946,27 @@ def cooldown_remaining(pool_id: str) -> float:
 # ---------------------------------------------------------------------------
 # Upstream-status cooldown
 # ---------------------------------------------------------------------------
-# A single shared pool means one upstream talks to the whole product. When it
-# answers 429 the pool cools down with the caller-supplied Retry-After;
-# 401/403 and transient 5xx add small bounded cooldowns so a revoked or broken
-# channel is not hot-spammed from every worker process. None of these record a
-# URL or key, and they never mask the *current* real request failure, which the
-# caller is still expected to report truthfully through its own error path.
+# A single shared pool means one upstream talks for the whole product, so the
+# cooldown an upstream status implies depends on *what we actually know*:
+#
+#   429       The upstream itself is asking us to back off.  We cannot tell
+#             which model is responsible, so this stays **global** and uses the
+#             caller-supplied Retry-After (falling back to a conservative 60 s).
+#   401/403   Almost always one revoked credential -> **scoped** when the call
+#             site supplied a ``failure_scope``.
+#   5xx       One model or endpoint being sick must not freeze every other
+#             foreground ask -> **scoped** when a ``failure_scope`` was
+#             supplied.
+#
+# Without a scope there is nothing safe to attribute the fault to, so a
+# 401/403/5xx is recorded nowhere at all: a global 5xx cooldown used to take
+# the whole product offline because one background model was flaky.  The caller
+# still surfaces the real error through its own error path; these cooldowns only
+# prevent hot-spamming.  Timeouts and unparseable JSON output are *not* channel
+# faults and never set a shared cooldown.
+#
+# Every circuit is half-open: once its cooldown elapses exactly one caller may
+# probe, and a success closes the circuit by CAS.
 
 _AUTH_COOLDOWN_SECONDS = 300.0
 _TRANSIENT_COOLDOWN_SECONDS = 60.0
@@ -542,30 +1013,63 @@ def parse_retry_after(headers) -> float | None:
     return _bounded_retry_after(value)
 
 
-def apply_response_cooldown(
-    pool_id: str, status_code: int, retry_after: float | None = None
-) -> None:
-    """Apply a bounded pool cooldown derived from an upstream HTTP status.
+def classify_response(status_code: int, failure_scope: str | None = None) -> tuple[str, float] | None:
+    """Map an upstream status to the cooldown it justifies.
 
-    * ``429`` honours ``Retry-After`` (falling back to a conservative 60 s).
-    * ``401/403`` add a short auth-failure cooldown so a revoked credential is
-      not retried from every process.
-    * ``5xx`` add a small transient cooldown.
-
-    The current request's real failure is left untouched; callers must still
-    surface it via their own error handling.
+    Returns ``None`` when the status must not set any cooldown.  The first
+    element of the tuple is the routing target: ``"global"`` for the shared pool
+    row, ``"scope"`` for this scope's own circuit.  The second is the seconds.
     """
     try:
         status = int(status_code)
     except (TypeError, ValueError):
-        return
-    ra = _bounded_retry_after(retry_after)
+        return None
+    scoped = is_failure_scope(failure_scope)
     if status == 429:
-        apply_cooldown(pool_id, ra or _DEFAULT_RETRY_AFTER, retry_after=ra)
-    elif status in (401, 403):
-        apply_cooldown(pool_id, _AUTH_COOLDOWN_SECONDS)
-    elif 500 <= status <= 599:
-        apply_cooldown(pool_id, _TRANSIENT_COOLDOWN_SECONDS)
+        # Global: the upstream, not we, is asking for the back-off and we do
+        # not know which model is responsible.
+        return "global", _DEFAULT_RETRY_AFTER
+    if status in (401, 403):
+        return ("scope", _AUTH_COOLDOWN_SECONDS) if scoped else None
+    if 500 <= status <= 599:
+        return ("scope", _TRANSIENT_COOLDOWN_SECONDS) if scoped else None
+    return None
+
+
+def apply_response_cooldown(
+    pool_id: str,
+    status_code: int,
+    retry_after: float | None = None,
+    failure_scope: str | None = None,
+) -> None:
+    """Apply the cooldown an upstream HTTP status actually justifies.
+
+    * ``429`` is always **global** and honours ``Retry-After`` (falling back to
+      a conservative 60 s).
+    * ``401/403`` and ``5xx`` are **scoped** when ``failure_scope`` was
+      supplied, so one broken model or credential cannot freeze unrelated
+      foreground work.  Without a scope they set no cooldown at all: there is
+      nothing safe to attribute the fault to, and a global 5xx cooldown used to
+      take the whole product offline because one background model was flaky.
+    * ``2xx`` and other ``4xx`` set nothing.
+
+    The current request's real failure is left untouched; callers must still
+    surface it via their own error handling.  Timeouts and unparseable output
+    are not channel faults and never reach this function.
+    """
+    routed = classify_response(status_code, failure_scope)
+    if routed is None:
+        return
+    target, seconds = routed
+    ra = _bounded_retry_after(retry_after)
+    if target == "global":
+        apply_cooldown(pool_id, ra or seconds, retry_after=ra)
+        return
+    try:
+        admission_backend().apply_scope_cooldown(pool_id, failure_scope, seconds)
+    except Exception:  # noqa: BLE001 - a coordination hiccup must not fail the call
+        logger.warning("model_admission_scope_cooldown_failed scope=%s", failure_scope)
+
 
 
 # ---------------------------------------------------------------------------
@@ -591,11 +1095,65 @@ class _AsyncChannel:
         backend: AdmissionBackend,
         deadline_monotonic: float,
         lease_until: datetime,
+        *,
+        pool_id: str = DEFAULT_POOL,
+        failure_scope: str | None = None,
+        probes: tuple[Probe, ...] = (),
     ) -> None:
         self._backend = backend
         self._deadline = deadline_monotonic
         self._lease_until = lease_until
+        self._pool_id = pool_id
+        self._scope = failure_scope if is_failure_scope(failure_scope) else None
+        self._probes = tuple(probes)
         self._started = False
+        self._circuit_closed = False
+
+    @property
+    def failure_scope(self) -> str | None:
+        return self._scope
+
+    def record_response(self, status_code: int, retry_after: float | None = None) -> None:
+        """Report the upstream HTTP status and route the resulting cooldown.
+
+        Call this after **every** HTTP response in the channel and before the
+        channel is released, so each cooldown is attributed to this exact
+        attempt while the half-open probe - if any - is still owned.  Call it
+        more than once: the Ollama legacy fallback and the embedding canary each
+        issue a second request inside one channel, and an error there is a real
+        fault that must not be swallowed by an earlier ``200``.
+
+        Routing:
+
+        * ``429`` -> global cooldown.
+        * ``401/403`` and ``5xx`` -> this scope's circuit only.
+        * ``2xx`` -> close every circuit this attempt holds a live probe for,
+          guarded by that probe's own ownership.  Closing happens **at most
+          once** per channel: the first success is the proof; a later one has
+          nothing left to prove.
+        * a transport timeout or unparseable body never reaches here and so
+          never sets a shared cooldown.
+
+        This is synchronous and never raises: a coordination hiccup must not
+        turn a successful model answer into an error.
+        """
+        try:
+            status = int(status_code)
+        except (TypeError, ValueError):
+            return
+        try:
+            if 200 <= status < 300:
+                if self._circuit_closed:
+                    return  # already proved healthy; nothing left to close
+                self._circuit_closed = True
+                for probe in self._probes:
+                    self._backend.clear_probe_circuit(probe)
+                return
+            apply_response_cooldown(
+                self._pool_id, status, retry_after, self._scope,
+            )
+        except Exception:  # noqa: BLE001 - never fail the caller over bookkeeping
+            logger.warning("model_admission_record_response_failed pool=%s", self._pool_id)
 
     async def run(self, awaitable: "Awaitable[Any] | asyncio.Future") -> Any:
         """Run one outbound awaitable under the remaining hard deadline.
@@ -620,6 +1178,14 @@ class _AsyncChannel:
             raise AdmissionDeadlineError("模型调用超出硬期限，未发送")
         self._started = True
         return await asyncio.wait_for(awaitable, timeout=remaining)
+
+
+def _acquire_with_scope(backend: AdmissionBackend, pid: str, kind: str, purpose: str,
+                        ttl: float, scope: str | None) -> Lease:
+    """Thread-side acquire that passes the optional failure scope through."""
+    return backend.acquire(pid, kind, purpose, lease_ttl_seconds=ttl,
+                           acquire_timeout_seconds=_config().acquire_timeout,
+                           failure_scope=scope)
 
 
 async def _settle(task: asyncio.Future) -> tuple[Any, bool]:
@@ -655,15 +1221,24 @@ async def async_channel(
     kind: str | None = None,
     hard_lifetime_seconds: float | None = None,
     pool_id: str | None = None,
+    failure_scope: str | None = None,
 ) -> AsyncIterator["_AsyncChannel"]:
     """Acquire a slot (before any request), yield a channel whose ``run``
     enforces ``asyncio.wait_for`` hard deadline (cancellable), and release
     **only in the ``finally`` after the transport body exits** so the slot is
     held for the entire request.  The threaded acquire is shielded; a
     cancellation during a still-running acquire waits for its bounded result
-    and releases any acquired lease before propagating cancellation."""
+    and releases any acquired lease before propagating cancellation.
+
+    ``failure_scope`` is optional.  When supplied (via :func:`failure_scope`)
+    this request also passes through that channel scope's circuit, so a 5xx
+    from this model/credential cools only this scope, while other models and
+    the shared quota keep serving.  A scope **still acquires the same shared
+    slot**: it adds isolation, it never adds capacity.
+    """
     hard, ttl = _hard_and_ttl(hard_lifetime_seconds)
     pid = pool_id or channel_pool_id(purpose)
+    scope = failure_scope if is_failure_scope(failure_scope) else None
     backend = admission_backend()
     # Absolute monotonic deadline captured BEFORE the acquire: the run window
     # starts here, so a delayed acquire can never push the request past the
@@ -671,8 +1246,8 @@ async def async_channel(
     deadline = time.monotonic() + hard
     acquire_fut = asyncio.ensure_future(
         asyncio.to_thread(
-            backend.acquire, pid, kind or current_kind(), purpose,
-            lease_ttl_seconds=ttl, acquire_timeout_seconds=_config().acquire_timeout,
+            _acquire_with_scope, backend, pid, kind or current_kind(), purpose,
+            ttl, scope,
         )
     )
     try:
@@ -683,12 +1258,17 @@ async def async_channel(
         except Exception:
             pass  # No lease was obtained.
         else:
+            # Releases the real slot *and* any probe this late acquire claimed,
+            # leaving an elapsed circuit ready for the next request to probe.
             await _release(backend, late_lease)
         raise
     if isinstance(lease, AdmissionError):
         raise lease
     try:
-        yield _AsyncChannel(backend=backend, deadline_monotonic=deadline, lease_until=lease.lease_until)
+        yield _AsyncChannel(
+            backend=backend, deadline_monotonic=deadline, lease_until=lease.lease_until,
+            pool_id=pid, failure_scope=lease.failure_scope, probes=lease.probes,
+        )
     finally:
         # Create + await the release here, AFTER the request exited, so the
         # slot is never dropped early.  Shield it: cancellation must not drop it.

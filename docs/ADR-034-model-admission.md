@@ -3,6 +3,10 @@
 日期：2026-10-23。实施分支：`codex/CZ-Q09-reliability-complete`。
 本 ADR 取代先前草案的接线缺口；发布验收及实际部署以 PROJECT_STATUS / DEVLOG 为准。
 
+后续冷却范围与前台预留规则由 [ADR-037](ADR-037-interactive-model-priority.md)
+细化：共享额度不等于共享所有故障；401/403/5xx按模型身份隔离，429仍保守共享。
+以下保留最初决策记录，新实现需要迁移0044并同步更新所有外发进程。
+
 ## 决策
 
 - API 和 Worker 通过 PostgreSQL 短事务共用额度，不按空间、模型名称或 Profile

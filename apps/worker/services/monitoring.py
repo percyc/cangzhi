@@ -156,11 +156,15 @@ def _queue_probes():
 
 def _model_pool_metrics(db):
     rows = db.execute(text("""
-        SELECT p.pool_id, p.capacity, p.background_capacity, p.ocr_sublimit,
+        SELECT p.pool_id, p.capacity,
+               CASE WHEN p.capacity > 1 THEN LEAST(p.background_capacity, p.capacity - 1)
+                    ELSE p.background_capacity END AS background_capacity,
+               p.ocr_sublimit,
                p.cooldown_until, count(l.id) AS in_use,
                count(l.id) FILTER (WHERE l.kind='background') AS background_in_use
         FROM model_admission_pools p LEFT JOIN model_admission_leases l
-          ON l.pool_id=p.pool_id AND l.lease_until > CURRENT_TIMESTAMP
+          ON l.pool_id=p.pool_id AND l.lease_until > CURRENT_TIMESTAMP AND l.kind <> 'probe'
+        WHERE p.pool_id NOT LIKE 'scope:%'
         GROUP BY p.id ORDER BY p.pool_id LIMIT 32
     """)).mappings().all()
     return {"model_pools": [{**dict(row), "cooldown_until":

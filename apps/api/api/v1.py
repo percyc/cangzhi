@@ -78,7 +78,7 @@ from ..services.processing_status import (
     ProcessingStatusError,
     compute_processing_status,
 )
-from ..services.qa import AskError, AskRequest, QAService
+from ..services.qa import PROGRESS_TOTAL, AskError, AskRequest, QAService
 from ..services.scope_keys import (
     DocumentSelection,
     candidate_condition,
@@ -959,9 +959,35 @@ async def knowledge_ask_stream(
     async def events() -> AsyncIterator[str]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         stream_started = asyncio.get_running_loop().time()
+        is_deep = payload.mode == "deep"
+        # The starting event must truthfully report the mode so the front
+        # end can render a quick spinner (tool_calls=0, max_tool_calls=0)
+        # instead of mislabeling a single-pass ask as a deep analysis
+        # run with twelve planned tool calls.
+        max_tool_calls = (
+            DeepAnalysisService.default_max_tool_calls if is_deep else 0
+        )
 
         async def on_progress(event: dict[str, Any]) -> None:
             await queue.put({"type": "progress", **event})
+
+        async def quick_progress(
+            current: int, total: int, message: str
+        ) -> None:
+            # The Q&A service reports coarse stages with a (current,
+            # total, message) signature. Re-shape them into the same
+            # streaming event shape the deep path uses so the front
+            # end can render a single progress bar for both modes.
+            await on_progress(
+                {
+                    "phase": "synthesis",
+                    "message": message,
+                    "progress": current,
+                    "total": total,
+                    "tool_calls": 0,
+                    "max_tool_calls": 0,
+                }
+            )
 
         async def run() -> None:
             try:
@@ -972,19 +998,20 @@ async def knowledge_ask_stream(
                     if workspace_id is not None:
                         bind_workspace_context(stream_db.sync_session, workspace_id)
                     service = (
-                        DeepAnalysisService(provider)
-                        if payload.mode == "deep"
-                        else QAService(provider)
+                        DeepAnalysisService(provider) if is_deep else QAService(provider)
                     )
-                    if isinstance(service, DeepAnalysisService):
+                    if is_deep:
                         result = await service.ask(
                             stream_db, request, on_progress=on_progress
                         )
                     else:
-                        await on_progress(
-                            {"phase": "synthesis", "message": "正在检索并生成回答"}
+                        # Forward the Q&A service's stage updates through
+                        # the same channel instead of letting the request
+                        # sit silent until the model returns.
+                        await quick_progress(0, PROGRESS_TOTAL, "正在分析问题")
+                        result = await service.ask(
+                            stream_db, request, on_progress=quick_progress
                         )
-                        result = await service.ask(stream_db, request)
                     response_payload = {**result.to_dict(), "scope": scope_payload}
                     if payload.conversation_id is not None:
                         turn = await record_ask_turn(
@@ -1028,7 +1055,7 @@ async def knowledge_ask_stream(
                 "phase": "starting",
                 "message": "正在分析问题",
                 "tool_calls": 0,
-                "max_tool_calls": DeepAnalysisService.default_max_tool_calls,
+                "max_tool_calls": max_tool_calls,
             }
         )
         try:

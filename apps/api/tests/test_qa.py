@@ -1145,10 +1145,11 @@ def test_quick_table_discovery_keeps_connector_scope(qa_db, monkeypatch):
     result = asyncio.run(_run())
     assert result.insufficient_evidence is True
     assert captured["document_ids"] == [42]
-    assert captured["force"] is False
+    assert captured["force"] is True
 
 
-def test_quick_table_discovery_merges_ranked_and_catalog_candidates(qa_db, monkeypatch):
+@pytest.mark.parametrize("question", ["订单状态有哪些", "2024年某市常住人口", "去年产品收入"])
+def test_quick_table_discovery_merges_ranked_and_catalog_candidates(qa_db, monkeypatch, question):
     import apps.api.services.qa as qa_service_module
 
     captured: dict[str, list[int]] = {}
@@ -1196,7 +1197,7 @@ def test_quick_table_discovery_merges_ranked_and_catalog_candidates(qa_db, monke
     async def _run():
         async with qa_db() as session:
             return await QAService(provider).ask(
-                session, AskRequest(question="订单状态有哪些")
+                session, AskRequest(question=question)
             )
 
     asyncio.run(_run())
@@ -1593,6 +1594,55 @@ def test_qa_service_propagates_provider_failure_as_user_facing_error(qa_db, erro
     assert "boom" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize("error_kind", ["provider", "cooldown", "busy"])
+def test_table_planning_failure_keeps_cited_document_fallback(qa_db, monkeypatch, error_kind):
+    import apps.api.services.qa as qa_module
+    from apps.api.services import model_admission as admission
+
+    errors = {
+        "provider": AIProviderError("private upstream detail"),
+        "cooldown": admission.AdmissionCooldownError(message="private detail"),
+        "busy": admission.AdmissionBusyError("private detail"),
+    }
+
+    async def failed_plan(*args, **kwargs):
+        raise errors[error_kind]
+
+    monkeypatch.setattr(qa_module, "try_structured_table_query", failed_plan)
+
+    async def run():
+        await _seed_document(qa_db, title="向量检索", body="向量检索通过向量比较相似度。")
+        provider = StubProvider()
+        provider.queue(AnswerResult(answer="向量检索比较相似度。", citation_ids=[1], insufficient_evidence=False))
+        async with qa_db() as session:
+            return await QAService(provider).ask(session, AskRequest(question="向量检索"))
+
+    result = asyncio.run(run())
+    assert not result.insufficient_evidence
+    assert result.citations
+    assert "private" not in result.answer
+
+
+def test_empty_recall_does_not_misreport_planner_cooldown_as_no_knowledge(qa_db, monkeypatch):
+    import apps.api.services.qa as qa_module
+    from apps.api.services import model_admission as admission
+
+    async def failed_plan(*args, **kwargs):
+        raise admission.AdmissionCooldownError(message="private upstream detail")
+
+    monkeypatch.setattr(qa_module, "try_structured_table_query", failed_plan)
+
+    async def run():
+        async with qa_db() as session:
+            return await QAService(StubProvider()).ask(session, AskRequest(question="季度收入"))
+
+    with pytest.raises(AskError) as error:
+        asyncio.run(run())
+    assert error.value.code == "provider_failed"
+    assert "冷却" in str(error.value)
+    assert "private" not in str(error.value)
+
+
 def test_qa_service_recalls_chinese_natural_question(qa_db):
     async def _run():
         await _seed_document(
@@ -1873,6 +1923,96 @@ def test_ask_status_endpoint(qa_db):
         "provider_configured": False,
         "provider": "openai",
     }
+
+
+# --- CZ-Q10 error classification through the Q&A service -----------------
+
+
+@pytest.mark.parametrize(
+    "category, expected_phrase",
+    [
+        (AIProviderError.CATEGORY_TIMEOUT, "超时"),
+        (AIProviderError.CATEGORY_NETWORK, "连接失败"),
+        (AIProviderError.CATEGORY_UPSTREAM_HTTP, "暂时不可用"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "输出格式异常"),
+    ],
+)
+def test_qa_service_maps_provider_category_to_desensitized_message(
+    qa_db, category, expected_phrase
+):
+    """Each provider category maps to a single safe user-facing prompt.
+
+    The original exception message (which may carry the channel URL,
+    the key header, or the upstream response body) MUST NOT appear in
+    the AskError that reaches the API layer; the public code stays
+    ``provider_failed`` so HTTP 502 compatibility is preserved.
+    """
+
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="向量检索",
+            body="向量检索把文档转换为向量再比较相似度。",
+        )
+        provider = StubProvider()
+        # Mimic the kind of message a misconfigured provider might
+        # raise today: it embeds the secret URL and key header. The
+        # AskError surface must scrub all of that.
+        secret_message = (
+            "调用模型失败：https://secret.example.com/v1 "
+            "Bearer sk-LEAK-ME response=upstream 500"
+        )
+        provider.fail_with(AIProviderError(secret_message, category=category))
+        async with qa_db() as session:
+            return await QAService(provider).ask(
+                session, AskRequest(question="什么是向量检索？")
+            )
+
+    with pytest.raises(AskError) as exc_info:
+        asyncio.run(_run())
+    assert exc_info.value.code == "provider_failed"
+    assert expected_phrase in str(exc_info.value)
+    # No secret string ever crosses the service boundary.
+    assert "secret.example.com" not in str(exc_info.value)
+    assert "sk-LEAK-ME" not in str(exc_info.value)
+    assert "https://" not in str(exc_info.value)
+
+
+def test_qa_service_logs_only_static_category_on_provider_failure(qa_db, caplog):
+    """The log line must carry the static category, not the secret text."""
+
+    async def _run():
+        await _seed_document(
+            qa_db,
+            title="向量检索",
+            body="向量检索把文档转换为向量再比较相似度。",
+        )
+        provider = StubProvider()
+        provider.fail_with(
+            AIProviderError(
+                "调用模型失败：https://secret.example.com/v1 Bearer sk-LEAK-ME",
+                category=AIProviderError.CATEGORY_TIMEOUT,
+            )
+        )
+        async with qa_db() as session:
+            return await QAService(provider).ask(
+                session, AskRequest(question="什么是向量检索？")
+            )
+
+    caplog.set_level("WARNING")
+    with pytest.raises(AskError):
+        asyncio.run(_run())
+    matching = [
+        record
+        for record in caplog.records
+        if "qa provider failure" in record.getMessage()
+    ]
+    assert matching, "expected a qa provider failure warning"
+    message = matching[-1].getMessage()
+    assert "category=timeout" in message
+    # The secret text must never appear in the log.
+    assert "secret.example.com" not in message
+    assert "sk-LEAK-ME" not in message
 
 
 # Import the module-level symbol used by the override helpers.

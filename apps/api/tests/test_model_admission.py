@@ -118,11 +118,22 @@ def test_retry_after_http_date():
     assert 88 <= value <= 90
 
 
-@pytest.mark.parametrize("status,seconds", [(429, 60), (401, 300), (403, 300), (503, 60), (404, 0)])
+@pytest.mark.parametrize("status,seconds", [(429, 60), (404, 0)])
 def test_response_cooldown_categories(status, seconds):
+    """Only 429 is global; every other status needs a scope to cool anything."""
     ma.apply_response_cooldown(ma.DEFAULT_POOL, status)
     remaining = ma.admission_backend().cooldown_remaining(ma.DEFAULT_POOL)
     assert max(0, seconds - 2) <= remaining <= seconds
+
+
+@pytest.mark.parametrize("status,seconds", [(401, 300), (403, 300), (503, 60)])
+def test_scoped_response_cooldown_categories(status, seconds):
+    backend = ma.admission_backend()
+    scope = ma.failure_scope(CHAT, "https://unit.invalid/v1/chat", "unit-model", "unit-key")
+    ma.apply_response_cooldown(ma.DEFAULT_POOL, status, failure_scope=scope)
+    assert max(0, seconds - 2) <= backend.scope_cooldown_remaining(ma.DEFAULT_POOL, scope) <= seconds
+    # The shared pool is untouched by a scoped fault.
+    assert backend.cooldown_remaining(ma.DEFAULT_POOL) == 0.0
 
 
 def test_typed_busy_quickly_bounded():

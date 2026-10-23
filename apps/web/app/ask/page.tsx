@@ -238,6 +238,7 @@ function AskClient() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [liveAnalysis, setLiveAnalysis] = useState<LiveAnalysis | null>(null);
+  const [quickProgress, setQuickProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [providerReady, setProviderReady] = useState<boolean | null>(null);
   const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null);
@@ -417,6 +418,7 @@ function AskClient() {
     historyAbortRef.current = null;
     setLoading(false);
     setLiveAnalysis(null);
+    setQuickProgress(null);
     setHistoryLoading(false);
     setSelectedCitation(null);
     setEvidenceOpen(false);
@@ -506,6 +508,7 @@ function AskClient() {
     setLoading(true);
     followOutputRef.current = true;
     setError(null);
+    setQuickProgress(null);
     const contextLabel = (documentIds.length ? `指定资料 ${documentIds.map((id) => `#${id}`).join('、')} · ` : '') + buildContextLabel(
       selectedScope?.name ?? '全部知识',
       facets,
@@ -554,9 +557,7 @@ function AskClient() {
         context_label: contextLabel,
       };
       const response = await fetch(
-        mode === 'deep'
-          ? '/api/v1/knowledge/ask/stream'
-          : '/api/v1/knowledge/ask',
+        '/api/v1/knowledge/ask/stream',
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -568,35 +569,38 @@ function AskClient() {
         const body = await response.json().catch(() => ({}));
         throw new Error(askRequestError(body?.detail, response.status));
       }
-      const body =
-        mode === 'deep'
-          ? await readAskStream(response, (event) => {
-              if (event.type !== 'progress') return;
-              if (!isCurrent()) return;
-              setLiveAnalysis((current) => {
-                if (!current || !isCurrent()) return current;
-                const steps = event.step
-                  ? [...current.steps, event.step]
-                  : current.steps;
-                const evidenceAudits = event.audit
-                  ? [...current.evidenceAudits, event.audit]
-                  : current.evidenceAudits;
-                return {
-                  ...current,
-                  message:
-                    event.message ??
-                    (event.step
-                      ? progressMessage(event.step)
-                      : current.message),
-                  steps,
-                  evidenceAudits,
-                  toolCalls: event.tool_calls ?? current.toolCalls,
-                  maxToolCalls: event.max_tool_calls ?? current.maxToolCalls,
-                  iterations: event.iterations ?? current.iterations,
-                };
-              });
-            })
-          : ((await response.json()) as AskResponse);
+      const body = await readAskStream(response, (event) => {
+        // Quick mode reports stage progress on the generic loading card via a
+        // dedicated state; it must not render the deep tool-exploration panel.
+        if (event.type !== 'progress') return;
+        if (!isCurrent()) return;
+        if (mode === 'deep') {
+          setLiveAnalysis((current) => {
+            if (!current || !isCurrent()) return current;
+            const steps = event.step
+              ? [...current.steps, event.step]
+              : current.steps;
+            const evidenceAudits = event.audit
+              ? [...current.evidenceAudits, event.audit]
+              : current.evidenceAudits;
+            return {
+              ...current,
+              message:
+                event.message ??
+                (event.step
+                  ? progressMessage(event.step)
+                  : current.message),
+              steps,
+              evidenceAudits,
+              toolCalls: event.tool_calls ?? current.toolCalls,
+              maxToolCalls: event.max_tool_calls ?? current.maxToolCalls,
+              iterations: event.iterations ?? current.iterations,
+            };
+          });
+        } else {
+          setQuickProgress(quickProgressMessage(event));
+        }
+      });
       if (!isCurrent()) return;
       setTurns((current) => viewRevisionRef.current !== revision ? current : [
         ...current,
@@ -621,6 +625,7 @@ function AskClient() {
       if (isCurrent()) {
         requestAbortRef.current = null;
         setLiveAnalysis(null);
+        setQuickProgress(null);
         setLoading(false);
       }
     }
@@ -739,7 +744,7 @@ function AskClient() {
               <div className="flex gap-3">
                 <AssistantMark />
                 <div className="rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm">
-                  正在检索、核对出处并组织回答…
+                  {quickProgress ?? '正在检索、核对出处并组织回答…'}
                 </div>
               </div>
             ) : null}
@@ -1142,6 +1147,8 @@ async function readAskStream(
     if (event.type === 'progress') onProgress(event);
     if (event.type === 'result') result = event.data;
     if (event.type === 'error') {
+      // The backend sanitizes timeout/quota/other hints before sending them here,
+      // so surface that specific message rather than hiding it behind a generic one.
       throw new Error(event.error.message ?? '问答请求失败');
     }
   };
@@ -1156,7 +1163,7 @@ async function readAskStream(
       if (done) break;
     }
     if (buffer.trim()) consumeLine(buffer);
-    if (!result) throw new Error('深度分析连接中断，请重试');
+    if (!result) throw new Error('问答连接中断，请重试');
     completed = true;
     return result;
   } finally {
@@ -1169,6 +1176,21 @@ function progressMessage(step: AnalysisStep): string {
   if (step.status === 'degraded') return `${step.label}未完成，正在调整方案`;
   if (step.result_count === undefined) return `${step.label}已完成`;
   return `${step.label}，得到 ${step.result_count} 条结果`;
+}
+
+const quickPhaseLabels: Record<string, string> = {
+  retrieval: '正在检索资料',
+  search: '正在检索资料',
+  evidence: '正在核对出处',
+  generation: '正在生成回答',
+  answer: '正在组织回答',
+  done: '即将完成',
+};
+
+function quickProgressMessage(event: Extract<AskStreamEvent, { type: 'progress' }>): string | null {
+  if (event.message) return event.message;
+    if (event.phase) return quickPhaseLabels[event.phase] ?? '正在处理问答…';
+  return null;
 }
 
 function LiveAnalysisCard({ analysis }: { analysis: LiveAnalysis }) {

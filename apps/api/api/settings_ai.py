@@ -876,7 +876,7 @@ async def _probe_openai(
             "message": msg,
         }
 
-    return {"ok": True, "message": "连接正常，模型已验证"}
+    return {"ok": True, "message": "模型列表可访问，且包含所选模型；尚未验证实际回答能力。"}
 
 
 async def _probe_ollama(
@@ -1070,13 +1070,16 @@ async def _probe_openai_embedding(
         "Accept": "application/json",
     }
     body = {"model": model, "input": _EMBEDDING_PROBE_TEXT}
-    pool_id = admission.channel_pool_id(admission.EMBEDDING)
     try:
         async with admission.async_channel(
-            admission.EMBEDDING, hard_lifetime_seconds=timeout
+            admission.EMBEDDING, hard_lifetime_seconds=timeout,
+            failure_scope=admission.failure_scope(
+                admission.EMBEDDING, url, model, headers.get("Authorization", "")
+            ),
         ) as channel:
             async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                 response = await channel.run(client.post(url, headers=headers, json=body))
+            channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
     except admission.AdmissionError:
         return {"ok": False, "message": "Embedding 模型额度繁忙或暂时不可用，请稍后再试"}
     except TimeoutError:
@@ -1085,8 +1088,6 @@ async def _probe_openai_embedding(
         return _safe_failure("无法连接 Embedding 服务", exc)
 
     if response.status_code >= 400:
-        admission.apply_response_cooldown(pool_id, response.status_code,
-                                          admission.parse_retry_after(response.headers))
         return {
             "ok": False,
             "message": f"服务返回 HTTP {response.status_code}，请检查地址、密钥和模型权限",
@@ -1121,13 +1122,14 @@ async def _probe_ollama_embedding(
     deadline = asyncio.get_running_loop().time() + timeout
     url = f"{base_url.rstrip('/')}/api/embed"
     body = {"model": model, "input": _EMBEDDING_PROBE_TEXT}
-    pool_id = admission.channel_pool_id(admission.EMBEDDING)
     try:
         async with admission.async_channel(
-            admission.EMBEDDING, hard_lifetime_seconds=timeout
+            admission.EMBEDDING, hard_lifetime_seconds=timeout,
+            failure_scope=admission.failure_scope(admission.EMBEDDING, url, model, ""),
         ) as channel:
             async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                 response = await channel.run(client.post(url, json=body))
+            channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
     except admission.AdmissionError:
         return {"ok": False, "message": "Embedding 模型额度繁忙或暂时不可用，请稍后再试"}
     except TimeoutError:
@@ -1136,8 +1138,6 @@ async def _probe_ollama_embedding(
         return _safe_failure("无法连接 Ollama Embedding 服务", exc)
 
     if response.status_code >= 400:
-        admission.apply_response_cooldown(pool_id, response.status_code,
-                                          admission.parse_retry_after(response.headers))
         # Some older Ollama builds only expose ``/api/embeddings``.
         # Fall back to that legacy path so the user still gets a
         # useful result instead of a hard error.
@@ -1178,13 +1178,14 @@ async def _probe_ollama_legacy_embedding(
 ) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/api/embeddings"
     body = {"model": model, "prompt": _EMBEDDING_PROBE_TEXT}
-    pool_id = admission.channel_pool_id(admission.EMBEDDING)
     try:
         async with admission.async_channel(
-            admission.EMBEDDING, hard_lifetime_seconds=timeout
+            admission.EMBEDDING, hard_lifetime_seconds=timeout,
+            failure_scope=admission.failure_scope(admission.EMBEDDING, url, model, ""),
         ) as channel:
             async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                 response = await channel.run(client.post(url, json=body))
+            channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
     except admission.AdmissionError:
         return {"ok": False, "message": "Embedding 模型额度繁忙或暂时不可用，请稍后再试"}
     except TimeoutError:
@@ -1192,8 +1193,6 @@ async def _probe_ollama_legacy_embedding(
     except httpx.HTTPError as exc:
         return _safe_failure("无法连接 Ollama Embedding 服务", exc)
     if response.status_code >= 400:
-        admission.apply_response_cooldown(pool_id, response.status_code,
-                                          admission.parse_retry_after(response.headers))
         return {
             "ok": False,
             "message": f"Ollama Embedding 返回 HTTP {response.status_code}",

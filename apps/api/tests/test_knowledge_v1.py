@@ -1055,6 +1055,207 @@ def test_deep_ask_stream_emits_live_tool_progress_and_result(client, monkeypatch
     assert events[-1]["data"]["answer"] == "流式问答会实时展示工具进度。"
 
 
+def test_quick_ask_stream_forwards_qa_progress_and_final_result(client, monkeypatch):
+    """Quick-mode streaming must reuse the QA on_progress callback.
+
+    Before CZ-Q10 the quick path sent a single placeholder and then sat
+    silent until the model returned. The stream should now forward the
+    same stage updates the Q&A service produces (retrieval, synthesis,
+    finishing) so the front end can render a single progress bar for
+    both modes.
+    """
+
+    from apps.api.ai import AIProviderError
+
+    test_client, _ = client
+    _enable_real_login()
+    _setup_owner(test_client)
+
+    async def seed():
+        async for db in app.dependency_overrides[get_db]():
+            document = Document(
+                title="快速问答资料", source_type=DocumentSourceType.note
+            )
+            db.add(document)
+            await db.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="quick-stream-version",
+                raw_content="快速问答会展示阶段进度。",
+                processing_status="ready",
+            )
+            db.add(version)
+            await db.flush()
+            document.current_version_id = version.id
+            db.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id="quick-stream-chunk",
+                    role="child",
+                    chunk_type="paragraph",
+                    order_index=0,
+                    content="快速问答会展示阶段进度。",
+                    search_text="快速问答 展示 阶段进度",
+                    content_hash="quick-stream-chunk-hash",
+                    heading_path=[],
+                    char_count=15,
+                    token_estimate=8,
+                    is_current=True,
+                )
+            )
+            await db.commit()
+            return
+
+    asyncio.run(seed())
+
+    class Provider(AIProvider):
+        name = "stub"
+
+        def is_configured(self):
+            return True
+
+        def generate_understanding(self, **_):
+            raise NotImplementedError
+
+        def answer_question(self, *, question, evidence):
+            return AnswerResult(
+                answer="快速问答会展示阶段进度。",
+                citation_ids=[int(evidence[0]["id"])],
+                insufficient_evidence=False,
+            )
+
+    async def provider_from_db(_db):
+        return Provider()
+
+    monkeypatch.setattr(v1_module, "build_provider_from_db", provider_from_db)
+    with test_client.stream(
+        "POST",
+        "/api/v1/knowledge/ask/stream",
+        json={"question": "快速问答如何展示进度？", "mode": "quick"},
+    ) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    # The starting event must report the quick contract: no planned
+    # tool calls, so the front end does not mislabel this as deep.
+    assert events[0]["phase"] == "starting"
+    assert events[0]["max_tool_calls"] == 0
+    # The QA service's stage updates should arrive as ``synthesis``
+    # events with monotonically increasing progress values. We expect
+    # at least retrieval, generation and a finishing step.
+    synthesis_events = [
+        event for event in events
+        if event.get("phase") == "synthesis" and "progress" in event
+    ]
+    assert synthesis_events, "expected the QA service progress to be forwarded"
+    progresses = [event["progress"] for event in synthesis_events]
+    assert progresses == sorted(progresses)
+    # The QA service publishes the four coarse stages defined in
+    # ``QAService.ask`` (start, retrieval, generation, finishing); the
+    # last one is the "即将完成" prompt at 90/100, which is enough to
+    # confirm the existing on_progress callback is now wired up to the
+    # stream instead of being silently ignored.
+    assert progresses[0] == 0
+    assert progresses[-1] == 90
+    # The last event is the result DTO with the cited answer.
+    assert events[-1]["type"] == "result"
+    assert events[-1]["data"]["answer"] == "快速问答会展示阶段进度。"
+
+
+def test_quick_ask_stream_emits_provider_error_for_timeout(client, monkeypatch):
+    """A timeout in quick mode must surface as a 502-equivalent error event.
+
+    The public code stays ``provider_failed`` for HTTP 502 compatibility,
+    but the user-facing message must be the desensitized timeout prompt
+    and never the raw exception text.
+    """
+
+    from apps.api.ai import AIProviderError
+
+    test_client, _ = client
+    _enable_real_login()
+    _setup_owner(test_client)
+
+    async def seed():
+        async for db in app.dependency_overrides[get_db]():
+            document = Document(
+                title="超时资料", source_type=DocumentSourceType.note
+            )
+            db.add(document)
+            await db.flush()
+            version = DocumentVersion(
+                document_id=document.id,
+                version_number=1,
+                content_hash="quick-timeout-version",
+                raw_content="超时后会怎样",
+                processing_status="ready",
+            )
+            db.add(version)
+            await db.flush()
+            document.current_version_id = version.id
+            db.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    document_version_id=version.id,
+                    external_id="quick-timeout-chunk",
+                    role="child",
+                    chunk_type="paragraph",
+                    order_index=0,
+                    content="超时后会怎样",
+                    search_text="超时后会怎样",
+                    content_hash="quick-timeout-chunk-hash",
+                    heading_path=[],
+                    char_count=15,
+                    token_estimate=8,
+                    is_current=True,
+                )
+            )
+            await db.commit()
+            return
+
+    asyncio.run(seed())
+
+    class Provider(AIProvider):
+        name = "stub"
+
+        def is_configured(self):
+            return True
+
+        def generate_understanding(self, **_):
+            raise NotImplementedError
+
+        def answer_question(self, **_):
+            raise AIProviderError(
+                "调用模型失败：https://secret.example.com/v1 Bearer sk-LEAK-ME",
+                category=AIProviderError.CATEGORY_TIMEOUT,
+            )
+
+    async def provider_from_db(_db):
+        return Provider()
+
+    monkeypatch.setattr(v1_module, "build_provider_from_db", provider_from_db)
+    with test_client.stream(
+        "POST",
+        "/api/v1/knowledge/ask/stream",
+        json={"question": "超时后会怎样？", "mode": "quick"},
+    ) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert error_events, "expected a streaming error event for the timeout"
+    error = error_events[-1]["error"]
+    assert error["code"] == "provider_failed"
+    # The desensitized prompt; the secret text must not leak through.
+    assert "超时" in error["message"]
+    assert "secret.example.com" not in error["message"]
+    assert "sk-LEAK-ME" not in error["message"]
+    # And the stream must terminate on the error event.
+    assert events[-1]["type"] == "error"
+
+
 def test_missing_saved_scope_never_broadens_to_all(client):
     test_client, _ = client
     _enable_real_login()

@@ -52,7 +52,6 @@ from .search import (
 from .structured_table import (
     TableQueryResult,
     candidate_dataset_document_ids,
-    is_structured_table_question,
     try_structured_table_query,
 )
 
@@ -61,6 +60,20 @@ from .structured_table import (
 # indicator without leaking the model's chain of thought.
 ProgressCallback = Callable[[int, int, str], Awaitable[None]]
 PROGRESS_TOTAL = 100
+
+# Desensitized provider-failure prompts. The user-facing message is
+# chosen by the static category the provider attached to the error;
+# the original exception (which may carry the channel URL, key header
+# or response body) is never copied into the AskError message and is
+# never written to logs. The dict is the single source of truth so
+# REST, streaming and MCP endpoints stay in lockstep.
+_PROVIDER_FAILED_MESSAGES: dict[str, str] = {
+    "timeout": "模型响应超时，请稍后再试",
+    "network": "模型服务连接失败，请稍后再试",
+    "upstream_http": "模型服务暂时不可用，请稍后再试",
+    "illegal_output": "模型输出格式异常，请稍后再试",
+}
+_PROVIDER_FAILED_DEFAULT_MESSAGE = "模型暂时不可用，请稍后再试"
 
 # ---- Limits ---------------------------------------------------------------
 # These constants cap what a single ask call can do. The point is to
@@ -381,7 +394,6 @@ class QAService:
         if on_progress is not None:
             await on_progress(40, PROGRESS_TOTAL, "检索完成，正在分析")
         assert self._provider is not None  # checked above
-        structured_intent = is_structured_table_question(question)
         table_matches_none = request.matches_none
         candidate_table_document_ids = (
             [] if table_matches_none else list(request.document_ids)
@@ -410,7 +422,7 @@ class QAService:
                     item.document_id for item in evidence if item.table_location
                 )
             )
-        if not candidate_table_document_ids and structured_intent:
+        if not candidate_table_document_ids:
             # Database catalog chunks are document-level discovery evidence
             # rather than row chunks, so they do not carry table_location.
             # Their ranked document ids are nevertheless the best dataset
@@ -418,7 +430,10 @@ class QAService:
             candidate_table_document_ids = list(
                 dict.fromkeys(item.document_id for item in evidence)
             )
-        if structured_intent and not table_matches_none:
+        # Short lookup questions need not contain "how many" or another
+        # aggregation keyword. Discover bounded, scope-filtered catalogs;
+        # the existing schema/summary planner decides relevance and may decline.
+        if not table_matches_none:
             discovery_document_ids = (
                 candidate_table_document_ids
                 if request.connector_ids or request.document_ids
@@ -445,20 +460,40 @@ class QAService:
             )
         from .dataset_execution import DatasetExecutionError
 
+        if table_matches_none:
+            candidate_table_document_ids = []
+
         try:
             structured_result = await try_structured_table_query(
                 db,
                 provider=self._provider,
                 question=question,
                 document_ids=candidate_table_document_ids,
+                force=True,
             )
-        except DatasetExecutionError as exc:
+        except (DatasetExecutionError, AIProviderError, admission.AdmissionError) as exc:
             # Dataset execution is an optimisation over the normal evidence
             # path. A corrupt/missing artifact must not turn an otherwise
             # answerable knowledge question into a 500 response.
             logger.warning(
-                "structured dataset query degraded to semantic retrieval: %s", exc
+                "structured dataset query degraded to semantic retrieval type=%s",
+                type(exc).__name__,
             )
+            if not evidence and isinstance(exc, admission.AdmissionError):
+                message = (
+                    "模型渠道正在冷却，请稍后再试"
+                    if isinstance(exc, admission.AdmissionCooldownError)
+                    else "模型额度繁忙，请稍后再试"
+                )
+                raise AskError("provider_failed", message) from exc
+            if not evidence and isinstance(exc, AIProviderError):
+                raise AskError(
+                    "provider_failed",
+                    _PROVIDER_FAILED_MESSAGES.get(
+                        getattr(exc, "category", "illegal_output"),
+                        _PROVIDER_FAILED_DEFAULT_MESSAGE,
+                    ),
+                ) from exc
             structured_result = None
         if structured_result is not None:
             structured_evidence = await _structured_result_to_evidence(
@@ -533,7 +568,19 @@ class QAService:
                 raise AskError("provider_failed", "模型渠道正在冷却，请稍后再试") from exc
             raise AskError("provider_failed", "模型额度繁忙，请稍后再试") from exc
         except AIProviderError as exc:
-            raise AskError("provider_failed", "模型暂时不可用，请稍后再试") from exc
+            # Map the desensitized category to a safe user-facing prompt.
+            # The original exception message is intentionally NOT propagated
+            # into AskError: the timeout / network / HTTP branches above may
+            # embed the channel URL, key header or response text, and we
+            # never want those to reach the user or the access log. We only
+            # log the static category, which is the contract the provider
+            # promises; the exception text is dropped on the floor.
+            category = getattr(exc, "category", "illegal_output")
+            user_message = _PROVIDER_FAILED_MESSAGES.get(
+                category, _PROVIDER_FAILED_DEFAULT_MESSAGE
+            )
+            logger.warning("qa provider failure category=%s", category)
+            raise AskError("provider_failed", user_message) from exc
         if on_progress is not None:
             await on_progress(90, PROGRESS_TOTAL, "即将完成")
 

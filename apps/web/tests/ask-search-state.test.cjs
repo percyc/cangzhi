@@ -18,6 +18,10 @@ function load(relative, mocks = {}, globals = {}) {
 const helpers = load('lib/ask-search-state.ts');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const json = body => ({ ok: true, json: async () => body });
+// Streaming response double: the ask page now reads both quick and deep
+// answers from the NDJSON stream in /api/v1/knowledge/ask/stream.
+const streamResult = data => ({ ok: true, body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: 'result', data }) + '\n')); controller.close(); } }) });
+const streamResponse = () => { let controller; const body = new ReadableStream({ start(controller_) { controller = controller_; } }); const emit = event => controller.enqueue(new TextEncoder().encode(JSON.stringify(event) + '\n')); return { body, emit, close: () => controller.close() }; };
 function nodes(element) {
   if (!element || typeof element !== 'object') return [];
   return [element, ...[element.props?.children].flat(Infinity).flatMap(nodes)];
@@ -118,12 +122,12 @@ test('real ask initialization restores only this workspace and sends validated f
     ['cangzhi:ask-preferences:v3:other-space', JSON.stringify({ question: 'foreign draft' })],
     ['cangzhi:ask-preferences:v3:test-space', JSON.stringify({ question: 'local draft', scopeSlug: 'removed', categoryIds: [1, 99], tagIds: [98] })],
   ]);
-  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask' ? Promise.resolve(json(answer('ok'))) : null), '', storage);
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve(streamResult(answer('ok'))) : null), '', storage);
   await h.flush();
   assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, 'local draft');
   assert.match(text(h.tree), /已移除当前空间中失效/);
   h.submit(); await h.flush();
-  const body = JSON.parse(h.requests.find(request => request.url === '/api/v1/knowledge/ask').body);
+  const body = JSON.parse(h.requests.find(request => request.url === '/api/v1/knowledge/ask/stream').body);
   assert.equal(body.scope_slug, 'all'); assert.deepEqual(body.category_ids, [1]); assert.deepEqual(body.tag_ids, []);
 });
 test('workspace draft restores before recent history, so history cannot silently replace a new draft context', async () => {
@@ -150,30 +154,30 @@ test('slow facets disable preference controls while allowing a draft, then enabl
 });
 test('new conversation ignores late answer and cleanup, preserving a second in-flight request', async () => {
   const first = deferred(), second = deferred(); let count = 0;
-  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask' ? (++count === 1 ? first.promise : second.promise) : null));
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? (++count === 1 ? first.promise : second.promise) : null));
   await h.flush(); h.type('first'); await h.flush(); h.submit(); await h.flush();
   h.click('＋ 新建'); await h.flush(); h.type('second'); await h.flush(); h.submit(); await h.flush();
-  first.resolve(json(answer('old answer'))); await h.flush();
+  first.resolve(streamResult(answer('old answer'))); await h.flush();
   assert.ok(h.button('停止')); assert.equal(text(h.tree).includes('old answer'), false);
   assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, 'second');
-  second.resolve(json(answer('new answer'))); await h.flush();
+  second.resolve(streamResult(answer('new answer'))); await h.flush();
   const turns = nodes(h.tree).filter(node => node.props.turn);
   assert.equal(turns.length, 1); assert.equal(turns[0].props.turn.response.answer, 'new answer');
   assert.equal(h.requests.some(request => request.method === 'DELETE'), false);
 });
 test('late request error cannot clear a newer request or show its error in the new view', async () => {
   const old = deferred(), next = deferred(); let count = 0;
-  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask' ? (++count === 1 ? old.promise : next.promise) : null));
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? (++count === 1 ? old.promise : next.promise) : null));
   await h.flush(); h.type('one'); await h.flush(); h.submit(); await h.flush(); h.click('停止'); await h.flush();
   h.type('two'); await h.flush(); h.submit(); await h.flush(); old.reject(new Error('old failure')); await h.flush();
   assert.ok(h.button('停止')); assert.equal(text(h.tree).includes('old failure'), false);
-  next.resolve(json(answer('done'))); await h.flush();
+  next.resolve(streamResult(answer('done'))); await h.flush();
 });
 test('a response does not erase input edited while it was running', async () => {
   const pending = deferred();
-  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask' ? pending.promise : null));
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? pending.promise : null));
   await h.flush(); h.type('submitted'); await h.flush(); h.submit(); await h.flush(); h.type('new draft'); await h.flush();
-  pending.resolve(json(answer('done'))); await h.flush();
+  pending.resolve(streamResult(answer('done'))); await h.flush();
   assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, 'new draft');
 });
 test('slow conversation creation after new cannot start an unwanted model request', async () => {
@@ -266,7 +270,7 @@ test('single-document asks isolate and restore their own draft after refresh/log
   const normalKey = helpers.askPreferencesKey('cangzhi_workspace=test-space');
   const documentKey = helpers.askPreferencesKey('cangzhi_workspace=test-space', [20]);
   const storage = new Map([[normalKey, JSON.stringify({ question: 'workspace draft', categoryIds: [1] })]]);
-  const fetcher = askFetcher(url => url === '/api/v1/knowledge/ask' ? Promise.resolve(json(answer('restricted answer'))) : null);
+  const fetcher = askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve(streamResult(answer('restricted answer'))) : null);
   const h = harness('ask', fetcher, 'document_ids=20', storage); await h.flush();
   assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, '');
   h.type('document-specific draft'); await h.flush();
@@ -275,7 +279,7 @@ test('single-document asks isolate and restore their own draft after refresh/log
   const returned = harness('ask', fetcher, 'document_ids=20', storage); await returned.flush();
   assert.equal(nodes(returned.tree).find(node => node.type === 'textarea').props.value, 'document-specific draft');
   returned.submit(); await returned.flush();
-  const request = JSON.parse(returned.requests.find(item => item.url === '/api/v1/knowledge/ask').body);
+  const request = JSON.parse(returned.requests.find(item => item.url === '/api/v1/knowledge/ask/stream').body);
   assert.deepEqual(request.document_selection, { document_ids: [20] });
   assert.equal(Object.hasOwn(request, 'document_ids'), false); assert.deepEqual(request.category_ids, []);
   assert.equal(JSON.parse(storage.get(normalKey)).question, 'workspace draft');
@@ -284,12 +288,12 @@ test('single-document asks isolate and restore their own draft after refresh/log
 test('invalid document selection never silently sends an unrestricted ask', async () => {
   const h = harness('ask', askFetcher(() => null), 'document_ids=bad&q=question'); await h.flush();
   assert.equal(h.button('发送').props.disabled, true); h.submit(); await h.flush();
-  assert.equal(h.requests.some(item => item.url === '/api/v1/knowledge/ask'), false);
+  assert.equal(h.requests.some(item => item.url === '/api/v1/knowledge/ask/stream'), false);
 });
 
 for (const mode of ['quick', 'deep']) for (const restricted of [false, true]) {
   test(`${mode} ask serializes ${restricted ? 'selected documents' : 'whole knowledge'} using the v1 contract`, async () => {
-    const endpoint = mode === 'deep' ? '/api/v1/knowledge/ask/stream' : '/api/v1/knowledge/ask';
+    const endpoint = '/api/v1/knowledge/ask/stream';
     const h = harness('ask', askFetcher(url => url === endpoint ? Promise.resolve({ ok: false, status: 422, json: async () => ({ detail: [{ loc: ['body', 'question'], type: 'string_too_long', input: 'private input' }] }) }) : null), restricted ? 'document_ids=20,21' : '');
     await h.flush(); if (mode === 'deep') { h.click('深度分析'); await h.flush(); }
     h.type('合成问题'); await h.flush(); h.submit(); await h.flush();
@@ -313,7 +317,7 @@ test('ask error handling tolerates null, malformed details and does not echo val
   assert.match(helpers.askRequestError([null, {}], 422), /参数校验失败/);
 });
 test('workbench area changes and evidence collapse preserve input and selected citation without dialogs', async () => {
-  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask' ? Promise.resolve(json(answer('answer'))) : null));
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve(streamResult(answer('answer'))) : null));
   await h.flush(); h.type('question'); await h.flush(); h.submit(); await h.flush(); h.type('draft to preserve'); await h.flush();
   const selected = { id: 1, document_id: 20, document_version_id: 21, chunk_id: 22, title: 'Synthetic', heading_path: [], page: null, paragraph_index: null, source_type: 'note', source_url: null, snippet: 'Evidence' };
   nodes(h.tree).find(node => node.props.turn).props.onOpenCitation(selected); await h.flush();
@@ -335,4 +339,49 @@ test('storage failure is visible and enables leave protection instead of silentl
   const h = harness('ask', askFetcher(() => null), '', storage); await h.flush(); h.type('unsaved'); await h.flush();
   assert.match(text(h.tree), /浏览器无法保存草稿/); assert.equal(h.guards.at(-1)[0], true);
   h.click('清空草稿'); await h.flush(); assert.equal(h.guards.at(-1)[0], false);
+});
+test('quick ask uses the streaming endpoint and saves the streamed answer', async () => {
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve(streamResult(answer('quick answer'))) : null));
+  await h.flush(); h.type('quick'); await h.flush(); h.submit(); await h.flush();
+  assert.equal(h.requests.some(request => request.url === '/api/v1/knowledge/ask/stream'), true);
+  assert.equal(h.requests.some(request => request.url === '/api/v1/knowledge/ask'), false);
+  const turn = nodes(h.tree).find(node => node.props.turn)?.props.turn;
+  assert.equal(turn.response.answer, 'quick answer');
+  // Quick progress never renders the deep tool-exploration panel.
+  assert.equal(nodes(h.tree).some(node => node.props.analysis), false);
+});
+test('quick mode streams stage progress on the loading card without a deep tool panel', async () => {
+  const stream = streamResponse();
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve({ ok: true, body: stream.body }) : null));
+  await h.flush(); h.type('streamed question'); await h.flush(); h.submit(); await h.flush();
+  stream.emit({ type: 'progress', phase: 'retrieval', message: '正在检索资料' }); await h.flush();
+  assert.equal(nodes(h.tree).some(node => node.props.analysis), false);
+  assert.equal(text(h.tree).includes('正在检索资料'), true);
+  stream.emit({ type: 'result', data: answer('final') }); stream.close(); await h.flush();
+  assert.equal(nodes(h.tree).find(node => node.props.turn).props.turn.response.answer, 'final');
+});
+test('quick stream error surfaces the de-masked hint and keeps the draft', async () => {
+  const stream = streamResponse();
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve({ ok: true, body: stream.body }) : null));
+  await h.flush(); h.type('streamed'); await h.flush(); h.submit(); await h.flush();
+  stream.emit({ type: 'error', error: { message: '模型配额受限，请稍后重试' } }); stream.close(); await h.flush();
+  assert.equal(text(h.tree).includes('模型配额受限，请稍后重试'), true);
+  assert.equal(nodes(h.tree).filter(node => node.props.turn).length, 0);
+  assert.equal(nodes(h.tree).find(node => node.type === 'textarea').props.value, 'streamed');
+  assert.equal(h.requests.some(request => request.method === 'DELETE'), false);
+});
+test('late quick stream result cannot enter a replacement stream', async () => {
+  let firstController, secondController, calls = 0;
+  const first = new ReadableStream({ start(controller) { firstController = controller; } });
+  const second = new ReadableStream({ start(controller) { secondController = controller; } });
+  const h = harness('ask', askFetcher(url => url === '/api/v1/knowledge/ask/stream' ? Promise.resolve({ ok: true, body: ++calls === 1 ? first : second }) : null));
+  await h.flush(); h.type('first'); await h.flush(); h.submit(); await h.flush();
+  h.click('＋ 新建'); await h.flush(); h.type('second'); await h.flush(); h.submit(); await h.flush();
+  const emit = (controller, event) => controller.enqueue(new TextEncoder().encode(JSON.stringify(event) + '\n'));
+  emit(firstController, { type: 'result', data: answer('stale') }); firstController.close(); await h.flush();
+  assert.equal(nodes(h.tree).filter(node => node.props.turn).length, 0);
+  emit(secondController, { type: 'progress', phase: 'generation', message: '正在生成回答' }); await h.flush();
+  assert.equal(text(h.tree).includes('正在生成回答'), true);
+  emit(secondController, { type: 'result', data: answer('fresh') }); secondController.close(); await h.flush();
+  assert.equal(nodes(h.tree).find(node => node.props.turn).props.turn.response.answer, 'fresh');
 });

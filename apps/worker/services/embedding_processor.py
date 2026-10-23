@@ -156,18 +156,17 @@ async def _request_embedding_async(
     released, so concurrency can never exceed the limit; an upstream 429 is
     recorded as a cooldown."""
     async with admission.async_channel(
-        admission.EMBEDDING, hard_lifetime_seconds=timeout_seconds
+        admission.EMBEDDING, hard_lifetime_seconds=timeout_seconds,
+        failure_scope=admission.failure_scope(
+            admission.EMBEDDING, url, str(body.get("model", "")),
+            headers.get("Authorization", ""),
+        ),
     ) as channel:
         factory = client_factory or (lambda **kwargs: httpx.AsyncClient(**kwargs))
         client = factory(timeout=timeout_seconds, trust_env=False)
         async with client:
             response = await channel.run(client.post(url, headers=headers, json=body))
-        if response.status_code >= 400:
-            admission.apply_response_cooldown(
-                admission.channel_pool_id(admission.EMBEDDING),
-                response.status_code,
-                admission.parse_retry_after(response.headers),
-            )
+        channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
         return response
 
 

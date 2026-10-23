@@ -195,11 +195,6 @@ class OpenAICompatibleOcrProvider(ExternalOcrProvider):
             ) from None
 
         if response.status_code >= 400:
-            admission.apply_response_cooldown(
-                admission.channel_pool_id(admission.OCR),
-                response.status_code,
-                admission.parse_retry_after(response.headers),
-            )
             self._raise_for_status(response)
 
         try:
@@ -228,7 +223,11 @@ class OpenAICompatibleOcrProvider(ExternalOcrProvider):
             "Content-Type": "application/json",
         }
         async with admission.async_channel(
-            admission.OCR, hard_lifetime_seconds=self._timeout
+            admission.OCR, hard_lifetime_seconds=self._timeout,
+            failure_scope=admission.failure_scope(
+                admission.OCR, url, str(request_body.get("model", "")),
+                headers.get("Authorization", ""),
+            ),
         ) as channel:
             async with httpx.AsyncClient(
                 timeout=self._timeout,
@@ -237,9 +236,11 @@ class OpenAICompatibleOcrProvider(ExternalOcrProvider):
                 # HTTP(S)/SOCKS proxy variables.
                 trust_env=False,
             ) as client:
-                return await channel.run(
+                response = await channel.run(
                     client.post(url, json=request_body, headers=headers)
                 )
+            channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
+            return response
 
     def _build_data_url(self, png_bytes: bytes) -> str:
         encoded = base64.b64encode(png_bytes).decode("ascii")

@@ -398,7 +398,8 @@ def test_connection_test_rejects_html_200(client, monkeypatch):
     assert "API 地址" in body["message"]
 
 
-def test_connection_test_checks_configured_model(client, monkeypatch):
+@pytest.mark.parametrize("available", [False, True])
+def test_connection_test_checks_configured_model(client, monkeypatch, available):
     test_client, _ = client
     _setup_admin(test_client)
     test_client.patch(
@@ -411,15 +412,17 @@ def test_connection_test_checks_configured_model(client, monkeypatch):
         },
     )
     transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, json={"data": [{"id": "other"}]})
+        lambda request: httpx.Response(200, json={"data": [{"id": "wanted" if available else "other"}]})
     )
     monkeypatch.setattr(
         "apps.api.api.settings_ai.httpx.AsyncClient",
         lambda *args, **kwargs: _MockAsyncClient(transport),
     )
     body = test_client.post("/api/settings/ai/test").json()
-    assert body["ok"] is False
+    assert body["ok"] is available
     assert "模型" in body["message"]
+    if available:
+        assert "尚未验证实际回答能力" in body["message"]
 
 
 # --- DB config overrides env -------------------------------------------

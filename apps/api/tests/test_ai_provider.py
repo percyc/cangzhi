@@ -435,3 +435,123 @@ def test_ollama_provider_not_configured():
             question="q",
             evidence=[{"id": 1, "title": "t", "heading_path": [], "snippet": "s"}],
         )
+
+
+# --- Provider error classification (CZ-Q10) ------------------------------
+
+
+@pytest.mark.parametrize("timeout_type", [TimeoutError, httpx.ReadTimeout, httpx.ConnectTimeout])
+def test_post_chat_timeout_is_classified_with_no_request_details(monkeypatch, timeout_type):
+    """A timeout must surface as ``timeout`` and never embed the URL or key."""
+
+    from apps.api.ai.provider import _post_chat
+
+    def _explode(*_args, **_kwargs):
+        raise timeout_type("connect timeout at https://secret.example.com/v1")
+
+    monkeypatch.setattr(
+        "apps.api.services.model_admission.run_sync", lambda _fn: _explode()
+    )
+
+    with pytest.raises(AIProviderError) as exc_info:
+        _post_chat(
+            "https://secret.example.com/v1/chat/completions",
+            {},
+            {"Authorization": "Bearer sk-LEAK-ME"},
+            timeout=0.01,
+        )
+    assert exc_info.value.category == AIProviderError.CATEGORY_TIMEOUT
+    # The exception message is the safe static label; neither the URL
+    # nor any key fragment must leak into the user-facing string.
+    assert "secret.example.com" not in str(exc_info.value)
+    assert "sk-LEAK-ME" not in str(exc_info.value)
+    assert "https://" not in str(exc_info.value)
+
+
+def test_post_chat_network_error_is_classified_with_no_request_details(monkeypatch):
+    """A network-level httpx error must be reported as ``network``."""
+
+    from apps.api.ai.provider import _post_chat
+
+    def _explode(*_args, **_kwargs):
+        # httpx.ConnectError usually embeds the request URL; never let
+        # that string reach the user.
+        raise httpx.ConnectError(
+            "Cannot connect to host=secret.example.com:443"
+        )
+
+    monkeypatch.setattr(
+        "apps.api.services.model_admission.run_sync", lambda _fn: _explode()
+    )
+
+    with pytest.raises(AIProviderError) as exc_info:
+        _post_chat(
+            "https://secret.example.com/v1/chat/completions",
+            {},
+            {"Authorization": "Bearer sk-LEAK-ME"},
+            timeout=1.0,
+        )
+    assert exc_info.value.category == AIProviderError.CATEGORY_NETWORK
+    assert "secret.example.com" not in str(exc_info.value)
+    assert "sk-LEAK-ME" not in str(exc_info.value)
+    assert "ConnectError" not in str(exc_info.value)
+
+
+def test_openai_answer_question_upstream_http_omits_body(monkeypatch):
+    """An upstream HTTP 500 must not propagate the response body."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            content=(
+                b"Internal Server Error "
+                b"request_id=req-LEAK-ME "
+                b"url=https://secret.example.com/v1/chat/completions"
+            ),
+        )
+
+    provider, transport = _openai_provider(handler)
+    _patch_async_transport(monkeypatch, transport)
+    with pytest.raises(AIProviderError) as exc_info:
+        provider.answer_question(
+            question="什么是向量检索？",
+            evidence=[{"id": 1, "title": "t", "heading_path": [], "snippet": "s"}],
+        )
+    assert exc_info.value.category == AIProviderError.CATEGORY_UPSTREAM_HTTP
+    # Body and URL must not leak through the user-facing label.
+    assert "req-LEAK-ME" not in str(exc_info.value)
+    assert "secret.example.com" not in str(exc_info.value)
+    assert "Internal Server Error" not in str(exc_info.value)
+
+
+def test_openai_answer_question_illegal_json_keeps_desensitized_label(monkeypatch):
+    """A 200 with non-JSON body stays in the ``illegal_output`` bucket."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"<html>not json at all"
+        )
+
+    provider, transport = _openai_provider(handler)
+    _patch_async_transport(monkeypatch, transport)
+    with pytest.raises(AIProviderError) as exc_info:
+        provider.answer_question(
+            question="什么是向量检索？",
+            evidence=[{"id": 1, "title": "t", "heading_path": [], "snippet": "s"}],
+        )
+    assert exc_info.value.category == AIProviderError.CATEGORY_ILLEGAL_OUTPUT
+    assert "<html>" not in str(exc_info.value)
+
+
+def test_ai_provider_error_default_category_is_illegal_output():
+    """Legacy ``AIProviderError(msg)`` keeps its old shape for back-compat."""
+
+    err = AIProviderError("legacy call site")
+    assert err.category == AIProviderError.CATEGORY_ILLEGAL_OUTPUT
+    # The category constants are part of the public contract used by the
+    # Q&A service for safe-message lookup; they MUST be stable strings.
+    assert AIProviderError.CATEGORY_TIMEOUT == "timeout"
+    assert AIProviderError.CATEGORY_NETWORK == "network"
+    assert AIProviderError.CATEGORY_UPSTREAM_HTTP == "upstream_http"
+    assert AIProviderError.CATEGORY_ILLEGAL_OUTPUT == "illegal_output"

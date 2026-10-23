@@ -1,5 +1,7 @@
 # 藏知关键技术决策
 
+- [ADR-037：交互请求优先与模型故障隔离](ADR-037-interactive-model-priority.md)
+
 - [ADR-036：引导配置、连接复用与设置搜索](ADR-036-guided-settings.md)
 
 - [ADR-034：跨进程模型调用准入](ADR-034-model-admission.md)

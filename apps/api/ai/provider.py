@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -11,6 +12,8 @@ from ..core.config import settings
 from ..services import model_admission as admission
 from .prompts import get_allowed_version
 from .schema import AnswerResult, UnderstandingResult, validate_against_evidence
+
+logger = logging.getLogger(__name__)
 
 UNDERSTANDING_PROMPT = """你是一名中文个人知识库助理。下面是用户保存的一段内容（可能来自网页、文件或随手记）。
 
@@ -57,7 +60,30 @@ ANSWER_PROMPT = """你是一名严谨的中文个人知识库助理。下面是�
 
 
 class AIProviderError(RuntimeError):
-    """Raised when an AI provider call fails or returns invalid output."""
+    """Raised when an AI provider call fails or returns invalid output.
+
+    The ``category`` attribute is a static, desensitized label so callers
+    can map the failure to a safe user-facing message and a safe log line
+    without ever recording the original URL, key or response text. The
+    constructor is backward compatible: existing ``AIProviderError(msg)``
+    calls default to the ``illegal_output`` category, which preserves the
+    pre-CZ-Q10 behaviour for parse / schema failures.
+    """
+
+    #: Static classification labels. New code MUST pick one of these and
+    #: never invent a free-form string. The mapping to user-facing copy
+    #: lives in the Q&A service; this module never embeds URLs, headers
+    #: or response bodies into the message.
+    CATEGORY_TIMEOUT = "timeout"
+    CATEGORY_NETWORK = "network"
+    CATEGORY_UPSTREAM_HTTP = "upstream_http"
+    CATEGORY_ILLEGAL_OUTPUT = "illegal_output"
+
+    def __init__(self, message: str, category: str = "illegal_output") -> None:
+        super().__init__(message)
+        self.category = category if category in {
+            "timeout", "network", "upstream_http", "illegal_output"
+        } else "illegal_output"
 
 
 def _strip_code_fence(text: str) -> str:
@@ -266,15 +292,14 @@ async def _post_chat_async(
 
     async def adm():
         async with admission.async_channel(
-            admission.CHAT, hard_lifetime_seconds=timeout
+            admission.CHAT, hard_lifetime_seconds=timeout,
+            failure_scope=admission.failure_scope(
+                admission.CHAT, url, str(body.get("model", "")),
+                (headers or {}).get("Authorization", ""),
+            ),
         ) as channel:
             response = await channel.run(worker())
-            if response.status_code >= 400:
-                admission.apply_response_cooldown(
-                    admission.channel_pool_id(admission.CHAT),
-                    response.status_code,
-                    admission.parse_retry_after(response.headers),
-                )
+            channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
             return response
 
     return await adm()
@@ -300,13 +325,30 @@ def _post_chat(
         )
     except admission.AdmissionError:
         raise
-    except TimeoutError as exc:
+    except (TimeoutError, httpx.TimeoutException) as exc:
         # The absolute hard deadline (or an httpx timeout) expired while the
         # request was in flight. Report truthfully as a timeout, never as an
         # unhandled 500. The slot was already released inside the transport.
-        raise AIProviderError("调用模型超时：模型响应未在期限内返回") from exc
+        # The message is a static label; the original URL / key / body are
+        # never embedded here so it is safe to surface to operators and
+        # callers without redaction.
+        raise AIProviderError(
+            "调用模型超时：模型响应未在期限内返回",
+            category=AIProviderError.CATEGORY_TIMEOUT,
+        ) from exc
     except httpx.HTTPError as exc:
-        raise AIProviderError(f"调用模型失败：{type(exc).__name__}") from None
+        # Network-level failure (DNS, connect, read, protocol). Classify as
+        # ``network`` so callers can prompt the user to retry without
+        # confusing it with the upstream HTTP status path. We never log the
+        # exception text: httpx HTTPError often embeds the request URL and
+        # the wrapped OS error, both of which can leak the channel address.
+        logger.warning(
+            "ai provider network failure type=%s", type(exc).__name__
+        )
+        raise AIProviderError(
+            "调用模型失败：网络异常",
+            category=AIProviderError.CATEGORY_NETWORK,
+        ) from None
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -430,17 +472,29 @@ class OpenAICompatibleProvider(AIProvider):
         }
         response = _post_chat(url, body, headers, timeout=self._timeout)
         if response.status_code >= 400:
+            # Upstream returned an HTTP error. We deliberately do NOT
+            # include ``response.text`` here: the body can carry the
+            # request id, the channel URL fragments, or operator notes
+            # that should never reach logs or the user. The status code
+            # alone is enough to classify the failure.
             raise AIProviderError(
-                f"模型服务返回 {response.status_code}：{response.text[:200]}"
+                "模型服务返回错误",
+                category=AIProviderError.CATEGORY_UPSTREAM_HTTP,
             )
         try:
             data = response.json()
         except ValueError:
-            raise AIProviderError("模型响应不是 JSON") from None
+            raise AIProviderError(
+                "模型响应不是 JSON",
+                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
+            ) from None
         try:
             text = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            raise AIProviderError("模型响应缺少 choices 字段") from None
+            raise AIProviderError(
+                "模型响应缺少 choices 字段",
+                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
+            ) from None
         allowed_ids = {int(item["id"]) for item in evidence if "id" in item}
         return _parse_answer_and_validate(text, allowed_ids)
 
@@ -551,17 +605,27 @@ class OllamaProvider(AIProvider):
         }
         response = _post_chat(url, body, None, timeout=self._timeout)
         if response.status_code >= 400:
+            # Upstream returned an HTTP error. Never embed ``response.text``:
+            # Ollama error pages regularly include the local model path and
+            # the wrapper script, both of which are out-of-scope to surface.
             raise AIProviderError(
-                f"Ollama 返回 {response.status_code}：{response.text[:200]}"
+                "模型服务返回错误",
+                category=AIProviderError.CATEGORY_UPSTREAM_HTTP,
             )
         try:
             data = response.json()
         except ValueError:
-            raise AIProviderError("Ollama 响应不是 JSON") from None
+            raise AIProviderError(
+                "Ollama 响应不是 JSON",
+                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
+            ) from None
         try:
             text = data["message"]["content"]
         except (KeyError, TypeError):
-            raise AIProviderError("Ollama 响应缺少 message.content") from None
+            raise AIProviderError(
+                "Ollama 响应缺少 message.content",
+                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
+            ) from None
         allowed_ids = {int(item["id"]) for item in evidence if "id" in item}
         return _parse_answer_and_validate(text, allowed_ids)
 

@@ -422,12 +422,17 @@ async def _request_canary_vectors(
         if channel is not None:
             async with factory(timeout=descriptor.timeout_seconds, trust_env=False) as client:
                 response = await channel.run(client.post(url, headers=headers, json=body))
+            channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
         else:
             async with admission.async_channel(
-                admission.EMBEDDING, hard_lifetime_seconds=descriptor.timeout_seconds
+                admission.EMBEDDING, hard_lifetime_seconds=descriptor.timeout_seconds,
+                failure_scope=admission.failure_scope(
+                    admission.EMBEDDING, url, descriptor.model, headers.get("Authorization", "")
+                ),
             ) as own:
                 async with factory(timeout=descriptor.timeout_seconds, trust_env=False) as client:
                     response = await own.run(client.post(url, headers=headers, json=body))
+                own.record_response(response.status_code, admission.parse_retry_after(response.headers))
     except admission.AdmissionError:
         # No request was sent (or the slot was refused by a busy/cooldown gate)
         # and no URL / pool id / key may leak.
@@ -445,11 +450,6 @@ async def _request_canary_vectors(
         # channel. Every other status cooldowns the shared pool.
         if descriptor.provider == "ollama" and response.status_code in (404, 405):
             raise _EmbeddingLegacyFallback(response.status_code)
-        admission.apply_response_cooldown(
-            pool_id=admission.channel_pool_id(admission.EMBEDDING),
-            status_code=response.status_code,
-            retry_after=admission.parse_retry_after(response.headers),
-        )
         raise ValueError(f"Embedding 服务返回 HTTP {response.status_code}")
 
     try:
@@ -486,7 +486,11 @@ async def _request_canary_vectors_ollama_with_legacy_fallback(
     factory = client_factory or (lambda **kwargs: httpx.AsyncClient(**kwargs))
     try:
         async with admission.async_channel(
-            admission.EMBEDDING, hard_lifetime_seconds=descriptor.timeout_seconds
+            admission.EMBEDDING, hard_lifetime_seconds=descriptor.timeout_seconds,
+            failure_scope=admission.failure_scope(
+                admission.EMBEDDING, _build_canary_request(descriptor, texts)[0],
+                descriptor.model, "",
+            ),
         ) as channel:
             try:
                 return await _request_canary_vectors(
@@ -497,7 +501,6 @@ async def _request_canary_vectors_ollama_with_legacy_fallback(
                 )
             except _EmbeddingLegacyFallback:
                 pass
-            pool_id = admission.channel_pool_id(admission.EMBEDDING)
             url = f"{descriptor.base_url.rstrip('/')}/api/embeddings"
             vectors: list[list[float]] = []
             async with factory(
@@ -510,12 +513,8 @@ async def _request_canary_vectors_ollama_with_legacy_fallback(
                             json={"model": descriptor.model, "prompt": text},
                         )
                     )
+                    channel.record_response(response.status_code, admission.parse_retry_after(response.headers))
                     if response.status_code >= 400:
-                        admission.apply_response_cooldown(
-                            pool_id,
-                            response.status_code,
-                            admission.parse_retry_after(response.headers),
-                        )
                         raise ValueError(
                             f"Ollama Embedding 返回 HTTP {response.status_code}"
                         )
