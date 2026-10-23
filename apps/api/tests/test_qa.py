@@ -1990,16 +1990,24 @@ def test_ask_status_endpoint(qa_db):
 
 
 @pytest.mark.parametrize(
-    "category, expected_phrase",
+    "category, reason, expected_phrase",
     [
-        (AIProviderError.CATEGORY_TIMEOUT, "超时"),
-        (AIProviderError.CATEGORY_NETWORK, "连接失败"),
-        (AIProviderError.CATEGORY_UPSTREAM_HTTP, "暂时不可用"),
-        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "输出格式异常"),
+        (AIProviderError.CATEGORY_TIMEOUT, "", "超时"),
+        (AIProviderError.CATEGORY_NETWORK, "", "连接失败"),
+        (AIProviderError.CATEGORY_UPSTREAM_HTTP, "", "暂时不可用"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "", "输出未通过校验"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "empty_response", "未返回可用回答正文"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "invalid_json", "有效且唯一"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "invalid_fields", "字段缺失"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "missing_citations", "缺少有效引用"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "unknown_citations", "证据范围以外"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "truncated_response", "被上游截断"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "refused_response", "拒绝生成"),
+        (AIProviderError.CATEGORY_ILLEGAL_OUTPUT, "response_shape", "接口返回结构异常"),
     ],
 )
 def test_qa_service_maps_provider_category_to_desensitized_message(
-    qa_db, category, expected_phrase
+    qa_db, category, reason, expected_phrase
 ):
     """Each provider category maps to a single safe user-facing prompt.
 
@@ -2023,7 +2031,7 @@ def test_qa_service_maps_provider_category_to_desensitized_message(
             "调用模型失败：https://secret.example.com/v1 "
             "Bearer sk-LEAK-ME response=upstream 500"
         )
-        provider.fail_with(AIProviderError(secret_message, category=category))
+        provider.fail_with(AIProviderError(secret_message, category=category, reason=reason))
         async with qa_db() as session:
             return await QAService(provider).ask(
                 session, AskRequest(question="什么是向量检索？")

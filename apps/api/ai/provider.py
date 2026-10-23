@@ -79,18 +79,23 @@ class AIProviderError(RuntimeError):
     CATEGORY_UPSTREAM_HTTP = "upstream_http"
     CATEGORY_ILLEGAL_OUTPUT = "illegal_output"
 
-    def __init__(self, message: str, category: str = "illegal_output") -> None:
+    OUTPUT_REASONS = frozenset({
+        "response_shape", "empty_response", "truncated_response", "refused_response",
+        "invalid_json", "invalid_fields", "missing_citations", "unknown_citations",
+    })
+
+    def __init__(self, message: str, category: str = "illegal_output", *, reason: str = "") -> None:
         super().__init__(message)
         self.category = category if category in {
             "timeout", "network", "upstream_http", "illegal_output"
         } else "illegal_output"
+        self.reason = reason if reason in self.OUTPUT_REASONS else ""
 
 
 def _strip_code_fence(text: str) -> str:
     cleaned = (text or "").strip()
     if cleaned.startswith("```"):
-        first_newline = cleaned.find("\n")
-        cleaned = cleaned[first_newline + 1 :] if first_newline >= 0 else ""
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, count=1, flags=re.IGNORECASE)
         cleaned = cleaned.removesuffix("```")
     return cleaned.strip()
 
@@ -98,24 +103,35 @@ def _strip_code_fence(text: str) -> str:
 def _parse_json_object(text: str) -> dict:
     """Parse a JSON object from common OpenAI-compatible text variants."""
 
+    if not isinstance(text, str) or not text.strip():
+        raise AIProviderError("模型未返回可用正文", reason="empty_response")
     cleaned = _strip_code_fence(text)
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    decoder = json.JSONDecoder(object_pairs_hook=unique_object)
     try:
-        payload = json.loads(cleaned)
+        payload = decoder.decode(cleaned)
     except (TypeError, ValueError):
-        decoder = json.JSONDecoder()
-        payload = None
-        for index, character in enumerate(cleaned):
-            if character != "{":
-                continue
-            try:
-                candidate, _ = decoder.raw_decode(cleaned[index:])
-            except ValueError:
-                continue
-            if isinstance(candidate, dict):
-                payload = candidate
-                break
+        # Accept a single object surrounded by commentary, never a nested
+        # object salvaged from broken JSON, an array, or competing answers.
+        start = cleaned.find("{")
+        if start < 0 or any(char in cleaned[:start] for char in "[]{}"):
+            raise AIProviderError("模型没有返回有效 JSON 对象", reason="invalid_json") from None
+        try:
+            payload, end = decoder.raw_decode(cleaned[start:])
+        except ValueError:
+            raise AIProviderError("模型没有返回有效 JSON 对象", reason="invalid_json") from None
+        if any(char in cleaned[start + end:] for char in "[]{}"):
+            raise AIProviderError("模型返回多个或不完整 JSON 对象", reason="invalid_json")
     if not isinstance(payload, dict):
-        raise AIProviderError("模型没有返回有效 JSON")
+        raise AIProviderError("模型没有返回 JSON 对象", reason="invalid_json")
     return payload
 
 
@@ -133,9 +149,36 @@ def _message_content_text(message: Any) -> str:
     for part in content:
         if isinstance(part, str):
             parts.append(part)
-        elif isinstance(part, dict) and isinstance(part.get("text"), str):
+        elif (isinstance(part, dict) and part.get("type", "text") in ("text", "output_text")
+              and isinstance(part.get("text"), str)):
             parts.append(part["text"])
-    return "\n".join(parts)
+    return "".join(parts)
+
+
+def _response_text(response: httpx.Response, *, ollama: bool = False) -> str:
+    """One envelope/text adapter for planning, understanding and final answers.
+
+    Never inspect reasoning_content/thinking or log provider response bodies.
+    """
+    try:
+        data = response.json()
+    except ValueError:
+        raise AIProviderError("模型响应不是 JSON", reason="response_shape") from None
+    try:
+        envelope = data if ollama else data["choices"][0]
+        message = envelope["message"]
+        if not isinstance(message, dict):
+            raise TypeError
+    except (KeyError, IndexError, TypeError):
+        raise AIProviderError("模型响应缺少消息字段", reason="response_shape") from None
+    if envelope.get("done_reason" if ollama else "finish_reason") in ("length", "max_tokens"):
+        raise AIProviderError("模型输出被截断", reason="truncated_response")
+    if message.get("refusal") or envelope.get("finish_reason") == "content_filter":
+        raise AIProviderError("模型拒绝生成回答", reason="refused_response")
+    text = _message_content_text(message)
+    if not text.strip():
+        raise AIProviderError("模型未返回可用正文", reason="empty_response")
+    return text
 
 
 class AIProvider(ABC):
@@ -412,12 +455,7 @@ class OpenAICompatibleProvider(AIProvider):
         )
         if response.status_code >= 400:
             raise AIProviderError(f"模型服务返回 HTTP {response.status_code}")
-        try:
-            message = response.json()["choices"][0]["message"]
-            payload = _parse_json_object(_message_content_text(message))
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise AIProviderError("模型没有返回有效 JSON") from None
-        return payload
+        return _parse_json_object(_response_text(response))
 
     def generate_understanding(
         self,
@@ -457,14 +495,7 @@ class OpenAICompatibleProvider(AIProvider):
             raise AIProviderError(
                 f"模型服务返回 {response.status_code}：{response.text[:200]}"
             )
-        try:
-            data = response.json()
-        except ValueError:
-            raise AIProviderError("模型响应不是 JSON") from None
-        try:
-            text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            raise AIProviderError("模型响应缺少 choices 字段") from None
+        text = _response_text(response)
         return _parse_and_validate(text, category_slugs)
 
     def answer_question(
@@ -498,20 +529,7 @@ class OpenAICompatibleProvider(AIProvider):
                 "模型服务返回错误",
                 category=AIProviderError.CATEGORY_UPSTREAM_HTTP,
             )
-        try:
-            data = response.json()
-        except ValueError:
-            raise AIProviderError(
-                "模型响应不是 JSON",
-                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
-            ) from None
-        try:
-            text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            raise AIProviderError(
-                "模型响应缺少 choices 字段",
-                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
-            ) from None
+        text = _response_text(response)
         allowed_ids = {int(item["id"]) for item in evidence if "id" in item}
         return _parse_answer_and_validate(text, allowed_ids)
 
@@ -551,14 +569,7 @@ class OllamaProvider(AIProvider):
         )
         if response.status_code >= 400:
             raise AIProviderError(f"Ollama 返回 HTTP {response.status_code}")
-        try:
-            content = response.json()["message"]["content"]
-            payload = json.loads(_strip_code_fence(content))
-        except (ValueError, KeyError, TypeError):
-            raise AIProviderError("模型没有返回有效 JSON") from None
-        if not isinstance(payload, dict):
-            raise AIProviderError("模型 JSON 顶层必须是对象")
-        return payload
+        return _parse_json_object(_response_text(response, ollama=True))
 
     def generate_understanding(
         self,
@@ -594,14 +605,7 @@ class OllamaProvider(AIProvider):
             raise AIProviderError(
                 f"Ollama 返回 {response.status_code}：{response.text[:200]}"
             )
-        try:
-            data = response.json()
-        except ValueError:
-            raise AIProviderError("Ollama 响应不是 JSON") from None
-        try:
-            text = data["message"]["content"]
-        except (KeyError, TypeError):
-            raise AIProviderError("Ollama 响应缺少 message.content") from None
+        text = _response_text(response, ollama=True)
         return _parse_and_validate(text, category_slugs)
 
     def answer_question(
@@ -629,20 +633,7 @@ class OllamaProvider(AIProvider):
                 "模型服务返回错误",
                 category=AIProviderError.CATEGORY_UPSTREAM_HTTP,
             )
-        try:
-            data = response.json()
-        except ValueError:
-            raise AIProviderError(
-                "Ollama 响应不是 JSON",
-                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
-            ) from None
-        try:
-            text = data["message"]["content"]
-        except (KeyError, TypeError):
-            raise AIProviderError(
-                "Ollama 响应缺少 message.content",
-                category=AIProviderError.CATEGORY_ILLEGAL_OUTPUT,
-            ) from None
+        text = _response_text(response, ollama=True)
         allowed_ids = {int(item["id"]) for item in evidence if "id" in item}
         return _parse_answer_and_validate(text, allowed_ids)
 
@@ -651,23 +642,11 @@ def _parse_and_validate(
     text: str,
     category_slugs: Iterable[str],
 ) -> UnderstandingResult:
-    if not text or not text.strip():
-        raise AIProviderError("模型返回空字符串")
-    cleaned = text.strip()
-    # Allow accidental ```json ... ``` fences.
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?", "", cleaned, count=1).strip()
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3].strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise AIProviderError(f"模型输出无法解析为 JSON：{exc}") from None
-    payload = _coerce_payload(payload)
+    payload = _parse_json_object(text)
     try:
         result = UnderstandingResult.model_validate(payload)
-    except Exception as exc:  # noqa: BLE001 — Pydantic errors vary
-        raise AIProviderError(f"模型输出不符合 Schema：{exc}") from None
+    except Exception:  # noqa: BLE001 — Pydantic errors vary
+        raise AIProviderError("模型输出字段不符合要求", reason="invalid_fields") from None
     allowed = {slug.lower() for slug in category_slugs}
     result.category_slug = _validate_category_slug(result.category_slug, allowed)
     return result
@@ -679,7 +658,7 @@ def _parse_answer_and_validate(
 ) -> AnswerResult:
     """Parse the model output for an ``answer_question`` call.
 
-    Strips optional Markdown fences, decodes JSON, validates against
+    Uses the shared single-object parser, then validates against
     :class:`AnswerResult` and finally enforces the citation rules
     (id whitelist, sufficient-evidence contract) via
     :func:`validate_against_evidence`. ``allowed_ids`` is the integer
@@ -687,22 +666,11 @@ def _parse_answer_and_validate(
     that is not in this set is treated as fabrication.
     """
 
-    if not text or not text.strip():
-        raise AIProviderError("模型返回空字符串")
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?", "", cleaned, count=1).strip()
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3].strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise AIProviderError(f"模型输出无法解析为 JSON：{exc}") from None
-    payload = _coerce_payload(payload)
+    payload = _parse_json_object(text)
     try:
         result = AnswerResult.model_validate(payload)
-    except Exception as exc:  # noqa: BLE001 — Pydantic errors vary
-        raise AIProviderError(f"模型输出不符合 Schema：{exc}") from None
+    except Exception:  # noqa: BLE001 — Pydantic errors vary
+        raise AIProviderError("模型回答字段不符合要求", reason="invalid_fields") from None
     # Some reasoning models occasionally mark an answer as insufficient while
     # also returning citations. Keeping the citations would misrepresent the
     # model's own confidence; dropping them is a conservative, deterministic
@@ -711,8 +679,10 @@ def _parse_answer_and_validate(
         result.citation_ids = []
     try:
         return validate_against_evidence(result, allowed_ids=allowed_ids)
-    except ValueError as exc:
-        raise AIProviderError(str(exc)) from None
+    except ValueError:
+        if any(cid not in allowed_ids for cid in result.citation_ids):
+            raise AIProviderError("模型引用了不存在的证据", reason="unknown_citations") from None
+        raise AIProviderError("充分回答必须至少引用一条证据", reason="missing_citations") from None
 
 
 import re

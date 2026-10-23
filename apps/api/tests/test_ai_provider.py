@@ -585,3 +585,109 @@ def test_ai_provider_error_default_category_is_illegal_output():
     assert AIProviderError.CATEGORY_NETWORK == "network"
     assert AIProviderError.CATEGORY_UPSTREAM_HTTP == "upstream_http"
     assert AIProviderError.CATEGORY_ILLEGAL_OUTPUT == "illegal_output"
+
+
+@pytest.mark.parametrize("factory,ollama", [(_openai_provider, False), (_ollama_provider, True)])
+@pytest.mark.parametrize("variant", ["plain", "fence", "inline_fence", "commentary", "parts"])
+def test_planning_and_answer_share_response_adapter(monkeypatch, factory, ollama, variant):
+    payload = {"answer": "合成答案[1]", "citation_ids": [1], "insufficient_evidence": False}
+    text = json.dumps(payload)
+    if variant == "fence":
+        text = "```json\n" + text + "\n```"
+    elif variant == "inline_fence":
+        text = "```JSON" + text + "```"
+    elif variant == "commentary":
+        text = "结果如下：\n" + text + "\n结束。"
+    content = text if variant != "parts" else [
+        {"type": "text", "text": text[:15]},
+        {"type": "reasoning", "text": "不得读取的推理"},
+        {"type": "output_text", "text": text[15:]},
+    ]
+    calls = []
+    def handler(request):
+        calls.append(request)
+        message = {"content": content, "reasoning_content": "私有推理"}
+        return httpx.Response(200, json={"message": message} if ollama else {"choices": [{"message": message}]})
+    provider, transport = factory(handler)
+    _patch_async_transport(monkeypatch, transport)
+    assert provider.generate_json(system="JSON", prompt="synthetic") == payload
+    result = provider.answer_question(question="synthetic", evidence=[{"id": 1}])
+    assert result.answer == payload["answer"]
+    assert result.citation_ids == [1]
+    assert len(calls) == 2  # no implicit retry or second generation
+
+
+@pytest.mark.parametrize("factory,ollama", [(_openai_provider, False), (_ollama_provider, True)])
+@pytest.mark.parametrize("message,finish,reason", [
+    ({"content": None, "reasoning_content": "secret"}, None, "empty_response"),
+    ({"content": [{"type": "reasoning", "text": "secret"}]}, None, "empty_response"),
+    ({"content": "{}"}, "length", "truncated_response"),
+    ({"content": "{}", "refusal": "secret"}, None, "refused_response"),
+    ({"content": "not JSON secret"}, None, "invalid_json"),
+    ({"content": '{"answer":12,"citation_ids":[1]}'}, None, "invalid_fields"),
+    ({"content": '{"answer":"secret","citation_ids":[]}'}, None, "missing_citations"),
+    ({"content": '{"answer":"secret","citation_ids":[99]}'}, None, "unknown_citations"),
+])
+def test_response_failures_are_typed_private_and_not_retried(monkeypatch, factory, ollama, message, finish, reason):
+    calls = []
+    def handler(request):
+        calls.append(request)
+        envelope = {"message": message, "done_reason" if ollama else "finish_reason": finish}
+        return httpx.Response(200, json=envelope if ollama else {"choices": [envelope]})
+    provider, transport = factory(handler)
+    _patch_async_transport(monkeypatch, transport)
+    with pytest.raises(AIProviderError) as error:
+        provider.answer_question(question="synthetic", evidence=[{"id": 1}])
+    assert error.value.category == "illegal_output"
+    assert error.value.reason == reason
+    assert "secret" not in str(error.value)
+    assert len(calls) == 1
+    from apps.api.services.qa import _provider_failure_message
+    hint = _provider_failure_message(error.value)
+    assert "secret" not in hint
+    assert "请稍后再试" not in hint
+
+
+@pytest.mark.parametrize("text", [
+    '[{"answer":"a","citation_ids":[1]}]',
+    '{"answer":"a","citation_ids":[1]} {"answer":"b","citation_ids":[1]}',
+    '{broken {"answer":"a","citation_ids":[1]}',
+    '{"answer":"a","answer":"b","citation_ids":[1]}',
+    '{"answer":"unfinished',
+])
+def test_shared_json_parser_does_not_salvage_ambiguous_or_broken_objects(text):
+    from apps.api.ai.provider import _parse_json_object
+    for parse in [lambda: _parse_json_object(text), lambda: _parse_answer_and_validate(text, {1})]:
+        with pytest.raises(AIProviderError) as error:
+            parse()
+        assert error.value.reason == "invalid_json"
+
+
+def test_overlong_answer_still_fails_without_truncation_or_fabrication():
+    text = json.dumps({"answer": "字" * 2001, "citation_ids": [1]})
+    with pytest.raises(AIProviderError) as error:
+        _parse_answer_and_validate(text, {1})
+    assert error.value.reason == "invalid_fields"
+
+
+@pytest.mark.parametrize("factory,ollama", [(_openai_provider, False), (_ollama_provider, True)])
+def test_understanding_uses_shared_adapter_and_preserves_category_allowlist(monkeypatch, factory, ollama):
+    payload = {"summary": "合成摘要", "category_slug": "notes", "tags": ["test"], "confidence": 0.8}
+    def handler(_request):
+        message = {"content": [{"type": "text", "text": json.dumps(payload)}]}
+        return httpx.Response(200, json={"message": message} if ollama else {"choices": [{"message": message}]})
+    provider, transport = factory(handler)
+    _patch_async_transport(monkeypatch, transport)
+    args = dict(content="synthetic", title=None, category_slugs=["notes"], category_display={"notes": "笔记"})
+    assert provider.generate_understanding(**args).summary == "合成摘要"
+    payload["category_slug"] = "unknown"
+    with pytest.raises(AIProviderError):
+        provider.generate_understanding(**args)
+
+
+@pytest.mark.parametrize("data", [None, [], {"choices": []}, {"choices": [{"message": None}]}])
+def test_bad_envelope_is_a_safe_typed_error(data):
+    from apps.api.ai.provider import _response_text
+    with pytest.raises(AIProviderError) as error:
+        _response_text(httpx.Response(200, json=data))
+    assert error.value.reason == "response_shape"

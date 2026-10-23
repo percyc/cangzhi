@@ -72,8 +72,25 @@ _PROVIDER_FAILED_MESSAGES: dict[str, str] = {
     "timeout": "模型响应超时，请稍后再试",
     "network": "模型服务连接失败，请稍后再试",
     "upstream_http": "模型服务暂时不可用，请稍后再试",
-    "illegal_output": "模型输出格式异常，请稍后再试",
+    "illegal_output": "模型输出未通过校验，未展示未经核验的回答；请检查模型兼容性",
 }
+_OUTPUT_FAILURE_MESSAGES = {
+    "response_shape": "模型接口返回结构异常，请检查是否兼容对话接口",
+    "empty_response": "模型未返回可用回答正文，未将推理过程当作答案；请检查模型配置",
+    "truncated_response": "模型回答被上游截断，未展示不完整结果；请缩小问题范围或检查模型输出限制",
+    "refused_response": "模型拒绝生成本次回答，请调整问题或检查模型服务的限制",
+    "invalid_json": "模型未返回有效且唯一的 JSON 对象，请检查模型的结构化输出兼容性",
+    "invalid_fields": "模型回答字段缺失、类型错误或超出长度限制，未展示未经校验的回答",
+    "missing_citations": "模型回答缺少有效引用，无法核验依据，已拒绝展示",
+    "unknown_citations": "模型引用了本次证据范围以外的内容，已拒绝展示",
+}
+
+
+def _provider_failure_message(exc: AIProviderError) -> str:
+    if exc.category == "illegal_output" and exc.reason in _OUTPUT_FAILURE_MESSAGES:
+        return _OUTPUT_FAILURE_MESSAGES[exc.reason]
+    return _PROVIDER_FAILED_MESSAGES.get(exc.category, _PROVIDER_FAILED_DEFAULT_MESSAGE)
+
 _PROVIDER_FAILED_DEFAULT_MESSAGE = "模型暂时不可用，请稍后再试"
 
 # ---- Limits ---------------------------------------------------------------
@@ -548,10 +565,7 @@ class QAService:
             if not evidence and isinstance(exc, AIProviderError):
                 raise AskError(
                     "provider_failed",
-                    _PROVIDER_FAILED_MESSAGES.get(
-                        getattr(exc, "category", "illegal_output"),
-                        _PROVIDER_FAILED_DEFAULT_MESSAGE,
-                    ),
+                    _provider_failure_message(exc),
                 ) from exc
             structured_result = None
         if structured_result is not None:
@@ -673,10 +687,8 @@ class QAService:
             # log the static category, which is the contract the provider
             # promises; the exception text is dropped on the floor.
             category = getattr(exc, "category", "illegal_output")
-            user_message = _PROVIDER_FAILED_MESSAGES.get(
-                category, _PROVIDER_FAILED_DEFAULT_MESSAGE
-            )
-            logger.warning("qa provider failure category=%s", category)
+            user_message = _provider_failure_message(exc)
+            logger.warning("qa provider failure category=%s reason=%s", category, exc.reason or "unspecified")
             raise AskError("provider_failed", user_message) from exc
         if on_progress is not None:
             await on_progress(90, PROGRESS_TOTAL, "即将完成")
