@@ -43,6 +43,7 @@ from ..ai import AIProvider, AIProviderError
 from ..models.chunks import DocumentChunk
 from ..models.documents import Document, DocumentSourceType, DocumentVersion
 from . import model_admission as admission
+from .qa_timing import measure_qa, observe_qa, qa_stage
 from .scope_keys import DocumentSelection
 from .search import (
     extract_cjk_ngrams,
@@ -400,6 +401,7 @@ class QAService:
     def is_provider_configured(self) -> bool:
         return self._provider is not None and self._provider.is_configured()
 
+    @observe_qa
     async def ask(
         self,
         db: AsyncSession,
@@ -517,12 +519,15 @@ class QAService:
             candidate_table_document_ids = []
 
         try:
-            structured_result = await try_structured_table_query(
-                db,
-                provider=self._provider,
-                question=question,
-                document_ids=candidate_table_document_ids,
-                force=True,
+            structured_result = await measure_qa(
+                "dataset_plan_execute",
+                try_structured_table_query(
+                    db,
+                    provider=self._provider,
+                    question=question,
+                    document_ids=candidate_table_document_ids,
+                    force=True,
+                ),
             )
         except (DatasetExecutionError, AIProviderError, admission.AdmissionError) as exc:
             # Dataset execution is an optimisation over the normal evidence
@@ -642,10 +647,13 @@ class QAService:
             await on_progress(70, PROGRESS_TOTAL, "正在生成回答")
         try:
             assert self._provider is not None  # checked above
-            answer = await asyncio.to_thread(
-                self._provider.answer_question,
-                question=question,
-                evidence=provider_payload,
+            answer = await measure_qa(
+                "answer_generation",
+                asyncio.to_thread(
+                    self._provider.answer_question,
+                    question=question,
+                    evidence=provider_payload,
+                ),
             )
         except admission.AdmissionError as exc:
             # Admission refused the slot (busy / cooldown / unavailable /
@@ -722,6 +730,7 @@ class QAService:
 
     # ---- evidence retrieval ------------------------------------------------
 
+    @qa_stage("retrieval")
     async def collect_evidence(
         self,
         db: AsyncSession,
@@ -806,11 +815,14 @@ class QAService:
             )
         from .hybrid_retrieval import recall_vector_chunks, rrf_scores
 
-        vector = await recall_vector_chunks(
-            db,
-            query=question,
-            filters=filters,
-            limit=evidence_limit * 4,
+        vector = await measure_qa(
+            "vector_recall",
+            recall_vector_chunks(
+                db,
+                query=question,
+                filters=filters,
+                limit=evidence_limit * 4,
+            ),
         )
         if vector.status.vector_used:
             lexical_ids = [row.chunk_id for row in rows]
@@ -837,6 +849,7 @@ class QAService:
         )
         return evidence[:evidence_limit], vector.status.to_dict()
 
+    @qa_stage("lexical_recall")
     async def _recall_postgres(
         self,
         db: AsyncSession,
@@ -896,6 +909,7 @@ class QAService:
             return []
         return result
 
+    @qa_stage("lexical_recall")
     async def _recall_like(
         self,
         db: AsyncSession,
@@ -953,6 +967,7 @@ class QAService:
         ).limit(limit)
         return (await db.execute(stmt)).all()
 
+    @qa_stage("lexical_recall")
     async def _recall_cjk(
         self,
         db: AsyncSession,
@@ -1062,6 +1077,7 @@ class QAService:
         ).limit(limit)
         return (await db.execute(stmt)).all()
 
+    @qa_stage("evidence_context")
     async def _rows_to_evidence(
         self,
         db: AsyncSession,
@@ -1074,6 +1090,9 @@ class QAService:
     ) -> list[Evidence]:
         if not rows:
             return []
+        # Ranking is already final here. Load metadata/text only for the exact
+        # anchors the existing evidence budget selects, not all recall candidates.
+        rows = list(rows[: max(1, min(evidence_limit, MAX_EVIDENCE_ITEMS))])
         # The Q&A service uses a stable positive integer id for the
         # model, distinct from the chunk primary key. Re-issuing the
         # same id across one ask call is fine: the prompt is bounded
@@ -1093,7 +1112,7 @@ class QAService:
         }
         terms = normalize_query(question)
 
-        selected_rows = list(rows[: max(1, min(evidence_limit, MAX_EVIDENCE_ITEMS))])
+        selected_rows = list(rows)
         from .fragment_context import bounded_anchor_context, recover_fragment_contexts
 
         recovered = await recover_fragment_contexts(
@@ -1111,6 +1130,10 @@ class QAService:
                 seen_pages.add(key)
             distinct_rows.append(row)
         selected_rows = distinct_rows
+        contexts = await _batch_expanded_chunk_contexts(
+            db, [chunks[row.chunk_id] for row in selected_rows
+                 if row.chunk_id in chunks and row.chunk_id not in recovered]
+        )
         evidence: list[Evidence] = []
         budget = max(1, evidence_total_chars)
         for index, row in enumerate(selected_rows, start=1):
@@ -1118,10 +1141,8 @@ class QAService:
                 break
             remaining_items = len(selected_rows) - index + 1
             fair_share = max(1, budget // remaining_items)
-            content = recovered.get(row.chunk_id) or await _expanded_chunk_context(
-                db,
-                chunks.get(row.chunk_id),
-                fallback=row.content or "",
+            content = recovered.get(row.chunk_id) or contexts.get(
+                row.chunk_id, (row.content or "").strip()
             )
             snippet = (
                 content if row.chunk_id in recovered
@@ -1601,6 +1622,45 @@ def _ensure_complete_structured_answer(
         return answer
     suffix = "精确结果补充（模型未完整覆盖）：" + "、".join(missing)
     return f"{answer.rstrip()}\n\n{suffix}"
+
+
+async def _batch_expanded_chunk_contexts(
+    db: AsyncSession, chunks: list[DocumentChunk],
+) -> dict[int, str]:
+    """Same neighboring text as the single-anchor path, one bounded SQL query.
+
+    Callers supply only selected, authorized anchors (at most MAX_EVIDENCE_ITEMS).
+    Each predicate retains document, version, parent and +/-1 order boundaries.
+    No shared cache, so another request/version/workspace cannot reuse this text.
+    """
+    eligible = [chunk for chunk in chunks if chunk.parent_id is not None
+                and not (chunk.extra or {}).get("sheet_name")
+                and not (chunk.extra or {}).get("table_ranges")]
+    contexts = {chunk.id: (chunk.content or "").strip() for chunk in chunks}
+    if not eligible:
+        return contexts
+    neighbors = (await db.scalars(
+        select(DocumentChunk).where(
+            DocumentChunk.is_current.is_(True), DocumentChunk.role == "child",
+            or_(*(and_(
+                DocumentChunk.parent_id == chunk.parent_id,
+                DocumentChunk.document_id == chunk.document_id,
+                DocumentChunk.document_version_id == chunk.document_version_id,
+                DocumentChunk.order_index.between(chunk.order_index - 1, chunk.order_index + 1),
+            ) for chunk in eligible)),
+        ).order_by(DocumentChunk.order_index)
+    )).all()
+    grouped = {}
+    for item in neighbors:
+        grouped.setdefault((item.document_id, item.document_version_id, item.parent_id), []).append(item)
+    for chunk in eligible:
+        group = grouped.get((chunk.document_id, chunk.document_version_id, chunk.parent_id), [])
+        previous = next((item.content for item in group
+                         if chunk.order_index - 1 <= item.order_index < chunk.order_index), "")
+        following = next((item.content for item in group
+                          if chunk.order_index < item.order_index <= chunk.order_index + 1), "")
+        contexts[chunk.id] = _merge_neighbor_context(previous, chunk.content or "", following)
+    return contexts
 
 
 async def _expanded_chunk_context(

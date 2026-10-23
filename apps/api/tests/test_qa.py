@@ -49,6 +49,7 @@ from apps.api.services.qa import (
     Evidence,
     QAService,
     _expanded_chunk_context,
+    _batch_expanded_chunk_contexts,
     _merge_neighbor_context,
 )
 
@@ -532,7 +533,8 @@ def test_dataset_evidence_anchors_matching_sheet_region_and_rows():
     assert selected is matching
 
 
-def test_neighbor_context_is_loaded_from_same_parent(qa_db):
+@pytest.mark.parametrize("size", [3, 16])
+def test_neighbor_context_is_loaded_from_same_parent(qa_db, size):
     async def _run():
         async with qa_db() as session:
             document = Document(title="申请流程", source_type=DocumentSourceType.note)
@@ -584,10 +586,33 @@ def test_neighbor_context_is_loaded_from_same_parent(qa_db):
                 )
                 for index, content in enumerate(
                     ["先实名认证。", "然后提交申请。", "最后等待审核。"]
+                    + [f"补充内容{index}" for index in range(size - 3)]
                 )
             ]
             session.add_all(children)
+            # Nearby but stale/parent text must never contaminate evidence.
+            stale = chunk(external_id="stale-child", role="child", order=0,
+                          content="过期事实", parent_id=parent.id)
+            stale.is_current = False
+            session.add(stale)
             await session.commit()
+            # Identical output for each anchor, including edge anchors. The
+            # optimized path performs one read instead of one per hit.
+            from unittest.mock import AsyncMock
+            original_scalars = session.scalars
+            session.scalars = AsyncMock(wraps=original_scalars)
+            batch = await _batch_expanded_chunk_contexts(session, children)
+            assert session.scalars.await_count == 1
+            for child in children:
+                assert batch[child.id] == await _expanded_chunk_context(
+                    session, child, fallback=child.content
+                )
+                assert "过期事实" not in batch[child.id]
+            children[1].extra = {"sheet_name": "Sheet1"}
+            batch = await _batch_expanded_chunk_contexts(session, [children[1], parent])
+            assert batch == {children[1].id: children[1].content, parent.id: parent.content}
+            assert session.scalars.await_count == 1  # no unnecessary query
+            children[1].extra = {}
             return await _expanded_chunk_context(
                 session,
                 children[1],

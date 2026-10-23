@@ -49,6 +49,20 @@ from .services.workspaces import require_workspace_context
 
 logger = logging.getLogger(__name__)
 
+# Uvicorn configures its own loggers, not the application root. Make the
+# content-free QA timing record observable without enabling verbose logs
+# from providers/HTTP clients. Respect an operator's existing handlers.
+qa_timing_logger = logging.getLogger("apps.api.services.qa_timing")
+qa_timing_logger.setLevel(
+    logging.getLevelNamesMapping().get(settings.log_level.upper(), logging.INFO)
+)
+if not qa_timing_logger.hasHandlers():
+    timing_handler = logging.StreamHandler()
+    timing_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    qa_timing_logger.addHandler(timing_handler)
+
 
 app = FastAPI(
     title="藏知 Cangzhi API",

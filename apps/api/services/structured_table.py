@@ -27,6 +27,7 @@ from .measurement_context import (
     select_context_candidates,
     verify_group_coverage,
 )
+from .qa_timing import measure_qa, qa_stage
 
 _ROW_RE = re.compile(r"^行\s+(\d+)｜(.*)$")
 _ORIGINAL_VALUE_RE = re.compile(r"（原始值：([^）]+)）$")
@@ -188,6 +189,7 @@ def _is_direct_child_path(actual: Any, parent: Any) -> bool:
         start = index + 1
 
 
+@qa_stage("dataset_discovery")
 async def candidate_dataset_document_ids(
     db: AsyncSession,
     *,
@@ -1058,6 +1060,7 @@ def _literal_detail_plan_is_complete(
     )
 
 
+@qa_stage("dataset_catalog")
 async def _load_datasets(
     db: AsyncSession,
     document_ids: Sequence[int],
@@ -1159,17 +1162,15 @@ async def _load_datasets(
         if catalog_ids
         else set()
     )
+    fields_by_dataset: dict[int, list[DatasetField]] = defaultdict(list)
+    for field in (await db.scalars(
+        select(DatasetField).where(DatasetField.dataset_id.in_(catalog_ids))
+        .order_by(DatasetField.position)
+    )).all():
+        fields_by_dataset[field.dataset_id].append(field)
     datasets: list[TableDataset] = []
     for catalog, title, semantic_summary in catalogs:
-        fields = list(
-            (
-                await db.scalars(
-                    select(DatasetField)
-                    .where(DatasetField.dataset_id == catalog.id)
-                    .order_by(DatasetField.position)
-                )
-            ).all()
-        )
+        fields = fields_by_dataset[catalog.id]
         records = list(
             (
                 await db.scalars(
@@ -1239,6 +1240,7 @@ async def _load_datasets(
     return datasets
 
 
+@qa_stage("dataset_execution")
 async def _execute_dataset_plan(
     db: AsyncSession,
     dataset: TableDataset,
@@ -1435,10 +1437,13 @@ async def try_structured_table_query(
     correction = ""
     for _attempt in range(2):
         try:
-            raw_plan = await asyncio.to_thread(
-                provider.generate_json,
-                system=_PLAN_SYSTEM,
-                prompt=prompt + correction,
+            raw_plan = await measure_qa(
+                "dataset_planning_model",
+                asyncio.to_thread(
+                    provider.generate_json,
+                    system=_PLAN_SYSTEM,
+                    prompt=prompt + correction,
+                ),
             )
             if raw_plan.get("relevant") is False:
                 return None
@@ -1517,10 +1522,13 @@ async def try_structured_table_query(
     if unit_conflict:
         feedback["单位诊断"] = result.measure_context
     try:
-        raw_refined = await asyncio.to_thread(
-            provider.generate_json,
-            system=_PLAN_SYSTEM,
-            prompt=prompt + "\n" + json.dumps(feedback, ensure_ascii=False),
+        raw_refined = await measure_qa(
+            "dataset_refinement_model",
+            asyncio.to_thread(
+                provider.generate_json,
+                system=_PLAN_SYSTEM,
+                prompt=prompt + "\n" + json.dumps(feedback, ensure_ascii=False),
+            ),
         )
         if raw_refined.get("relevant") is not True:
             return result
