@@ -684,15 +684,27 @@ def _typed_expression(column: str, inferred_type: str) -> str:
     return quoted
 
 
+def _filter_parameter(value: Any, inferred_type: str) -> Any:
+    """Bind text comparisons as text, without implicit whole-column casts."""
+    if value is not None and inferred_type not in {"number", "date"}:
+        return str(value)
+    return value
+
+
 def _where_sql(query: SafeDatasetQuery, types: dict[str, str]) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     parameters: list[Any] = []
     operators = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
     for item in query.filters:
+        field_type = types.get(item["column"], "text")
         expression = _typed_expression(
-            item["column"], types.get(item["column"], "text")
+            item["column"], field_type
         )
         operator, value = item["operator"], item["value"]
+        # DuckDB otherwise casts the whole VARCHAR column to the parameter's
+        # numeric type, failing on unrelated mixed text (e.g. period labels).
+        # Text identifiers must also retain leading zeros rather than acquire
+        # numeric equality semantics. Do not turn SQL NULL into the text None.
         if operator == "contains":
             clauses.append(f"COALESCE({expression}, '') ILIKE ?")
             parameters.append(f"%{value}%")
@@ -712,12 +724,12 @@ def _where_sql(query: SafeDatasetQuery, types: dict[str, str]) -> tuple[str, lis
                 clauses.append("FALSE")
             else:
                 clauses.append(f"{expression} IN ({', '.join('?' for _ in values)})")
-                parameters.extend(values)
+                parameters.extend(_filter_parameter(entry, field_type) for entry in values)
         elif value is None and operator in {"eq", "ne"}:
             clauses.append(f"{expression} IS {'NOT ' if operator == 'ne' else ''}NULL")
         else:
             clauses.append(f"{expression} {operators[operator]} ?")
-            parameters.append(value)
+            parameters.append(_filter_parameter(value, field_type))
     return (" AND ".join(clauses) if clauses else "TRUE"), parameters
 
 
@@ -1013,6 +1025,7 @@ async def execute_dataset_query(
             records,
             fallback_plan,
             include_measure_context=include_measure_context,
+            field_types={field.name: field.inferred_type for field in fields},
         )
         rows = fallback.rows[query.offset : query.offset + query.limit]
         if query.metric == "rows" and query.columns:

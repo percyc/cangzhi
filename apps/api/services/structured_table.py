@@ -517,7 +517,9 @@ def _numeric(value: Any) -> Decimal | None:
     return number / Decimal(100) if is_percent and original is None else number
 
 
-def _comparable_pair(actual: Any, expected: Any) -> tuple[Any, Any]:
+def _comparable_pair(actual: Any, expected: Any, *, text_only: bool = False) -> tuple[Any, Any]:
+    if text_only:
+        return str(actual if actual is not None else ""), str(expected if expected is not None else "")
     actual_number = _numeric(actual)
     expected_number = _numeric(expected)
     if actual_number is not None and expected_number is not None:
@@ -525,9 +527,11 @@ def _comparable_pair(actual: Any, expected: Any) -> tuple[Any, Any]:
     return str(actual or "").casefold(), str(expected or "").casefold()
 
 
-def _matches(values: dict[str, Any], condition: TableFilter) -> bool:
+def _matches(values: dict[str, Any], condition: TableFilter, *, text_only: bool = False) -> bool:
     actual = values.get(condition.column)
     expected = condition.value
+    if text_only and expected is None and condition.operator in {"eq", "ne"}:
+        return (actual is None) if condition.operator == "eq" else (actual is not None)
     if condition.operator == "contains":
         return str(expected).casefold() in str(actual or "").casefold()
     if condition.operator == "starts_with":
@@ -540,11 +544,11 @@ def _matches(values: dict[str, Any], condition: TableFilter) -> bool:
         if not isinstance(expected, list):
             return False
         for item in expected:
-            left, right = _comparable_pair(actual, item)
+            left, right = _comparable_pair(actual, item, text_only=text_only)
             if left == right:
                 return True
         return False
-    left, right = _comparable_pair(actual, expected)
+    left, right = _comparable_pair(actual, expected, text_only=text_only)
     if condition.operator == "eq":
         return left == right
     if condition.operator == "ne":
@@ -775,9 +779,15 @@ def execute_query_plan(
     plan: TableQueryPlan,
     *,
     include_measure_context: bool = False,
+    field_types: dict[str, str] | None = None,
 ) -> TableQueryResult:
     filtered = [
-        row for row in rows if all(_matches(row.values, item) for item in plan.filters)
+        row for row in rows if all(
+            _matches(
+                row.values, item,
+                text_only=field_types is not None and field_types.get(item.column, "text") not in {"number", "date"},
+            ) for item in plan.filters
+        )
     ]
     measure_context = (
         _row_measure_context(plan=plan, filtered=filtered, columns=dataset.columns)

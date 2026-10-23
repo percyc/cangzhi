@@ -18,6 +18,7 @@ from apps.api.services.measurement_context import (
 )
 from apps.api.services.structured_table import (
     TableDataset,
+    TableFilter,
     TableQueryPlan,
     execute_query_plan,
 )
@@ -126,6 +127,87 @@ def test_unit_group_limit_is_not_reported_as_complete():
         ]
         == "grouped"
     )
+
+
+@pytest.mark.parametrize(
+    ("column", "field_type", "operator", "value", "expected"),
+    [
+        ("period", "text", "eq", 2023, 1),
+        ("period", "text", "in", [2023], 1),
+        ("period", "text", "ne", 2023, 2),
+        ("code", "identifier", "eq", 1, 1),
+        ("code", "identifier", "in", [1], 1),
+        ("amount", "number", "eq", 1, 2),
+        ("period", "text", "eq", None, 0),
+    ],
+)
+def test_filter_parameters_follow_column_type(
+    tmp_path, column, field_type, operator, value, expected
+):
+    connection = duckdb.connect()
+    connection.execute(
+        "CREATE TABLE data (__row_number BIGINT, period VARCHAR, code VARCHAR, amount VARCHAR, unit VARCHAR)"
+    )
+    connection.executemany(
+        "INSERT INTO data VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, "2023", "001", "1", "kg"),
+            (2, "2024 1-3", "1", "1.0", "kg"),
+            (3, "undated", "unknown", "n/a", "kg"),
+        ],
+    )
+    path = tmp_path / "mixed.parquet"
+    connection.execute("COPY data TO ? (FORMAT PARQUET)", [str(path)])
+    connection.close()
+    names = ["period", "code", "amount", "unit"]
+    fields = [
+        DatasetField(
+            name=n, inferred_type=field_type if n == column else "text", position=i
+        )
+        for i, n in enumerate(names)
+    ]
+    plan = validate_safe_query(
+        {
+            "filters": [{"column": column, "operator": operator, "value": value}],
+            "metric": "count",
+        },
+        names,
+    )
+    result = _execute_parquet_query(path, plan, fields, include_measure_context=True)
+    assert result["matched_row_count"] == expected
+    assert result["rows"][0]["metric"] == expected
+    dataset = TableDataset(
+        document_id=1,
+        document_version_id=1,
+        title="synthetic",
+        sheet_name="data",
+        region_index=1,
+        columns=tuple(names),
+        row_count=3,
+    )
+    records = [
+        StructuredTableRow(row_number=i + 1, values=dict(zip(names, values)))
+        for i, values in enumerate(
+            [
+                ("2023", "001", "1", "kg"),
+                ("2024 1-3", "1", "1.0", "kg"),
+                ("undated", "unknown", "n/a", "kg"),
+            ]
+        )
+    ]
+    fallback = execute_query_plan(
+        dataset,
+        records,
+        TableQueryPlan(
+            document_id=1,
+            sheet_name="data",
+            region_index=1,
+            filters=(TableFilter(column, operator, value),),
+            metric="count",
+        ),
+        field_types={f.name: f.inferred_type for f in fields},
+    )
+    assert fallback.matched_row_count == expected
 
 
 def test_missing_candidates_empty_and_excess_are_not_confirmed():
