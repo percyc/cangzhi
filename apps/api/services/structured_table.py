@@ -640,9 +640,6 @@ def validate_query_plan(
     sort_by = raw.get("sort_by")
     sort_by = str(sort_by).strip() if sort_by is not None else None
     sort_by = sort_by or None
-    result_columns = columns | set(group_by) | {"metric", "matched_rows"}
-    if sort_by is not None and sort_by not in result_columns:
-        raise ValueError("排序字段无效")
     sort_order = str(raw.get("sort_order") or "desc")
     if sort_order not in ALLOWED_SORT_ORDERS:
         raise ValueError("排序方向无效")
@@ -654,6 +651,30 @@ def validate_query_plan(
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("返回数量必须是正整数")
     limit = min(limit, MAX_RESULT_ROWS)
+    # Validate against the actual executor *before* leaving the bounded plan
+    # correction loop. Otherwise an accepted planner DTO can fail later (for
+    # example aggregate ORDER BY a non-grouped source column) and silently
+    # degrade to snippets instead of giving the model its format correction.
+    from .dataset_execution import DatasetExecutionError, validate_safe_query
+
+    try:
+        validate_safe_query(
+            {
+                "filters": [
+                    {"column": item.column, "operator": item.operator, "value": item.value}
+                    for item in filters
+                ],
+                "group_by": list(group_by),
+                "metric": metric,
+                "metric_column": metric_column,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+                "limit": limit,
+            },
+            dataset.columns,
+        )
+    except DatasetExecutionError as exc:
+        raise ValueError(str(exc)) from exc
     return TableQueryPlan(
         document_id=document_id,
         sheet_name=sheet_name,
@@ -1315,6 +1336,8 @@ metric 仅可用 rows/count/count_distinct/sum/avg/min/max。
 用户要查看、筛选或排序具体明细时用 rows，group_by=[]。
 没有分组但需要总计时 group_by=[]。
 排名时设置 group_by、sort_by=metric、sort_order=desc 和 limit。
+明细排序只能使用原列名或 row_number；聚合排序只能使用分组列、metric 或 matched_rows。
+不需要排序时 sort_by=null，不要把未分组的原始列当成聚合结果的排序列。
 limit 必须是 1 到 50 之间的整数，不确定时使用 20。
 不要臆造列名或数据集。"""
 

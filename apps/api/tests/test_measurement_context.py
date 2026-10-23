@@ -119,6 +119,32 @@ def test_missing_candidates_empty_and_excess_are_not_confirmed():
     ).blocked
 
 
+@pytest.mark.parametrize(("metric", "sort_by"), [("sum", "值"), ("rows", "metric")])
+def test_planner_rejects_sorting_that_executor_would_reject(metric, sort_by):
+    from apps.api.services.structured_table import validate_query_plan
+
+    dataset = TableDataset(
+        document_id=1,
+        document_version_id=1,
+        title="synthetic",
+        sheet_name="data",
+        region_index=1,
+        columns=("值", "单位"),
+        row_count=2,
+    )
+    with pytest.raises(ValueError, match="排序字段无效"):
+        validate_query_plan(
+            {
+                "document_id": 1,
+                "sheet_name": "data",
+                "metric": metric,
+                "metric_column": "值",
+                "sort_by": sort_by,
+            },
+            [dataset],
+        )
+
+
 @pytest.mark.parametrize("narrow", [False, True])
 def test_unit_refinement_is_bounded_and_cannot_drop_conflicting_rows(
     monkeypatch, narrow

@@ -529,8 +529,9 @@ class QAService:
             # path. A corrupt/missing artifact must not turn an otherwise
             # answerable knowledge question into a 500 response.
             logger.warning(
-                "structured dataset query degraded to semantic retrieval type=%s",
+                "structured dataset query degraded to semantic retrieval type=%s code=%s",
                 type(exc).__name__,
+                getattr(exc, "code", "provider_error"),
             )
             if not evidence and isinstance(exc, admission.AdmissionError):
                 message = (
