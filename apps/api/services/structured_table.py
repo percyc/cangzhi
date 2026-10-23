@@ -25,6 +25,7 @@ from .measurement_context import (
     ColumnStats,
     evaluate_measure_context,
     select_context_candidates,
+    verify_group_coverage,
 )
 
 _ROW_RE = re.compile(r"^行\s+(\d+)｜(.*)$")
@@ -865,6 +866,9 @@ def execute_query_plan(
         reverse=plan.sort_order == "desc",
     )
     result_rows = result_rows[: plan.limit]
+    if measure_context:
+        measure_context = verify_group_coverage(measure_context, result_rows, len(filtered))
+        unsafe_aggregate = measure_context.get("state") == "blocked"
     if unsafe_aggregate:
         # Mixed units or partially filled unit columns: the summed value is
         # arithmetically real but not comparable, so it is withheld while the

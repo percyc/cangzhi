@@ -14,6 +14,7 @@ from apps.api.services.measurement_context import (
     ColumnStats,
     evaluate_measure_context,
     is_context_column,
+    verify_group_coverage,
 )
 from apps.api.services.structured_table import (
     TableDataset,
@@ -40,7 +41,7 @@ from apps.api.services.structured_table import (
     ],
 )
 def test_backends_verify_same_matched_units(
-    tmp_path: Path, values, metric, groups, state
+    tmp_path: Path, values, metric, groups, state, limit=20
 ):
     fields = [
         DatasetField(name=n, inferred_type="number" if i == 0 else "text", position=i)
@@ -57,7 +58,7 @@ def test_backends_verify_same_matched_units(
     )
     connection.execute("COPY data TO ? (FORMAT PARQUET)", [str(path)])
     connection.close()
-    raw = {"metric": metric, "metric_column": "值", "group_by": groups}
+    raw = {"metric": metric, "metric_column": "值", "group_by": groups, "limit": limit}
     query = validate_safe_query(raw, [f.name for f in fields])
     plain = _execute_parquet_query(path, query, fields)
     assert "measure_context" not in plain
@@ -82,6 +83,7 @@ def test_backends_verify_same_matched_units(
         metric=metric,
         metric_column="值",
         group_by=tuple(groups),
+        limit=limit,
     )
     fallback = execute_query_plan(dataset, rows, plan, include_measure_context=True)
     assert sql["measure_context"]["state"] == fallback.measure_context["state"] == state
@@ -89,6 +91,12 @@ def test_backends_verify_same_matched_units(
         assert sql["measure_context"]["columns"][0]["unit"] == "人"
     if state == "blocked":
         assert fallback.rows == []
+
+
+def test_incomplete_unit_groups_are_blocked_in_both_backends(tmp_path):
+    test_backends_verify_same_matched_units(
+        tmp_path, ["USD", "CNY"], "sum", ["单位"], "blocked", limit=1
+    )
 
 
 @pytest.mark.parametrize(
@@ -105,6 +113,19 @@ def test_complete_distinct_count_not_bounded_sample_controls_verdict():
         stats_by_column={"currency": ColumnStats("currency", 100, 7, 0, ("USD",))},
     )
     assert verdict.blocked
+
+
+def test_unit_group_limit_is_not_reported_as_complete():
+    context = {"state": "grouped", "columns": [{"column": "币种", "grouped": True}]}
+    assert (
+        verify_group_coverage(context, [{"matched_rows": 2}], 4)["state"] == "blocked"
+    )
+    assert (
+        verify_group_coverage(context, [{"matched_rows": 2}, {"matched_rows": 2}], 4)[
+            "state"
+        ]
+        == "grouped"
+    )
 
 
 def test_missing_candidates_empty_and_excess_are_not_confirmed():

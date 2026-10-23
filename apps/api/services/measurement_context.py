@@ -186,6 +186,23 @@ def select_context_candidates(
     return candidates[:limit], True
 
 
+def verify_group_coverage(
+    context: dict[str, Any], rows: Sequence[dict[str, Any]], matched: int
+) -> dict[str, Any]:
+    """A limited set of unit groups must not look like a complete answer."""
+    if (
+        any(item.get("grouped") for item in context.get("columns", []))
+        and sum(int(row.get("matched_rows", 0)) for row in rows) < matched
+    ):
+        return {
+            **context,
+            "state": STATE_BLOCKED,
+            "reason": "单位分组结果未覆盖全部命中行",
+            "groups_truncated": True,
+        }
+    return context
+
+
 def _clean_samples(values: Sequence[Any]) -> tuple[str, ...]:
     samples: list[str] = []
     for value in values:

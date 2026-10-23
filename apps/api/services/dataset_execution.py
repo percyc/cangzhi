@@ -37,6 +37,7 @@ from .measurement_context import (
     ColumnStats,
     evaluate_measure_context,
     select_context_candidates,
+    verify_group_coverage,
 )
 from .scope_keys import DocumentSelection, candidate_condition
 
@@ -900,7 +901,7 @@ def _execute_parquet_query(
             else False,
         }
         if measure_context is not None:
-            payload["measure_context"] = measure_context
+            payload["measure_context"] = verify_group_coverage(measure_context, rows, matched)
         return payload
     finally:
         timeout.cancel()
