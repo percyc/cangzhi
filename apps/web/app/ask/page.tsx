@@ -202,7 +202,7 @@ export default function AskPage() {
 
 function AskSkeleton() {
   return (
-    <main className="mx-auto max-w-6xl px-5 py-8">
+    <main className="workspace-shell py-8">
       <div className="h-8 w-48 animate-pulse rounded bg-slate-200" />
       <div className="mt-6 h-80 animate-pulse rounded-3xl bg-slate-100" />
     </main>
@@ -668,7 +668,7 @@ function AskClient() {
   };
 
   return (
-    <main className="ask-shell mx-auto flex w-full max-w-[1800px] flex-col gap-3 overflow-hidden">
+    <main className="workspace-shell ask-shell flex flex-col gap-3 overflow-hidden">
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <button type="button" aria-controls="ask-library" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)} className="hidden rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 lg:block">{historyOpen ? '收起侧栏' : '范围与记录'}</button>
@@ -745,6 +745,7 @@ function AskClient() {
                 <AssistantMark />
                 <div className="rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm">
                   {quickProgress ?? '正在检索、核对出处并组织回答…'}
+                  <QuickWaitTime />
                 </div>
               </div>
             ) : null}
@@ -1170,6 +1171,18 @@ async function readAskStream(
     if (!completed) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+}
+
+function QuickWaitTime() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const timer = window.setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <p className="mt-2 text-xs text-slate-400" aria-live="off">
+    已等待 {seconds} 秒{seconds >= 30 ? ' · 数据集规划或模型响应可能较慢，可停止后重试；不会自动转入深度分析。' : ''}
+  </p>;
 }
 
 function progressMessage(step: AnalysisStep): string {

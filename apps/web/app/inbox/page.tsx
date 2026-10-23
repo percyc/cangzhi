@@ -335,7 +335,7 @@ export default function InboxPage() {
   const effectivePage = Math.min(page, totalPages);
 
   return (
-    <main className="container mx-auto max-w-6xl p-4">
+    <main className="workspace-shell">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">收件箱</h1>

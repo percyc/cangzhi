@@ -143,7 +143,7 @@ export function TopNav() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 shadow-[0_1px_0_rgba(15,23,42,0.02)] backdrop-blur-xl">
-      <div className="mx-auto flex h-16 max-w-7xl items-center gap-2 px-3 sm:gap-4 sm:px-6">
+      <div className="workspace-shell flex h-16 items-center gap-2 sm:gap-4">
         <Link
           href="/documents"
           className="group flex shrink-0 items-center gap-2.5"
@@ -248,7 +248,7 @@ export function TopNav() {
 
       {error && (
         <div className="border-t border-red-200 bg-red-50 text-xs text-red-700">
-          <div className="mx-auto max-w-7xl px-4 py-2 sm:px-6">{error}</div>
+          <div className="workspace-shell py-2">{error}</div>
         </div>
       )}
       {status && !status.authenticated && !status.setup_required && (

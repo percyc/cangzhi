@@ -202,7 +202,7 @@ export default function TagsPage() {
   };
 
   return (
-    <main className="container mx-auto max-w-5xl p-4">
+    <main className="workspace-shell">
       <Link href="/documents" className="text-blue-600 hover:underline">← 返回知识库</Link>
       <h1 className="mt-4 text-2xl font-bold">标签管理</h1>
       <p className="mt-2 text-sm text-slate-500">

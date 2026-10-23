@@ -176,7 +176,7 @@ export default function EditNotePage() {
   }
 
   return (
-    <main className="mx-auto max-w-4xl px-4 sm:px-6">
+    <main className="workspace-shell workspace-form">
       <Link href={`/documents/${params.id}`} className="text-sm font-medium text-slate-500 hover:text-slate-900">← 返回资料</Link>
       <h1 className="mb-2 mt-5 text-3xl font-semibold text-slate-950">编辑随手记</h1>
       <p className="mb-6 text-sm text-slate-500">修改后保存为新版本；草稿与已保存正文分开保留。</p>

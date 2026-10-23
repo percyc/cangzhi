@@ -288,7 +288,7 @@ export default function FileUploadPage() {
   const failedCount = items.filter((item) => item.status === 'error').length;
 
   return (
-    <main className="mx-auto max-w-4xl px-4 sm:px-6">
+    <main className="workspace-shell workspace-form">
       <p className="my-4 text-sm text-slate-600">
         {limitMb === null ? '正在读取上传限额…' : `单个文件上限 ${limitMb} MiB`}
         {' · '}<Link href="/settings/uploads" className="text-blue-700 underline">调整上传上限</Link>

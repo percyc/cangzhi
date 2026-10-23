@@ -21,7 +21,7 @@ export function PageGuide() {
   const help = pageHelp(pathname, search?.get('section') ?? 'chat');
   if (!help || pathname === '/ask') return null;
   return (
-    <div className="mx-auto w-full max-w-7xl px-4 pt-3 sm:px-6">
+    <div className="workspace-shell pt-3">
       <details key={`${pathname}:${search?.get('section')}`} className="group rounded-xl border border-slate-200/70 bg-slate-50/80">
         <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 rounded-xl px-4 py-2.5 text-xs text-slate-500">
           <span className="font-semibold text-slate-700">如何使用此页</span><span className="flex-1">{help.title}</span><span aria-hidden="true" className="group-open:hidden">展开 ↓</span><span aria-hidden="true" className="hidden group-open:inline">收起 ↑</span>

@@ -53,11 +53,19 @@ const fixture = http.createServer(async (req, res) => {
   if (route === '/api/ask/status') return json({ provider_configured: true });
   if (route === '/api/datasets/summary') return json({ dataset_count: 0, document_count: 0, ready_count: 0, examples: [] });
   if (route === '/api/ask/conversations') return json(req.method === 'POST' ? { id: 1, title: '合成测试问答', turn_count: 0 } : { items: [] });
-  if (route === '/api/v1/knowledge/ask') {
+  if (route === '/api/v1/knowledge/ask' || route === '/api/v1/knowledge/ask/stream') {
     askRequests++;
     assert.equal(Object.hasOwn(body, 'document_ids'), false);
     assert.deepEqual(body.document_selection, { document_ids: [21] });
-    return json({ question: body.question, answer: '这是有据可查的演示回答。[1]', insufficient_evidence: false, citations: [citation], evidence: [citation], provider: 'fixture', model: 'none', history: { conversation_id: 1, turn_id: 1 } });
+    const data = { question: body.question, answer: '这是有据可查的演示回答。[1]', insufficient_evidence: false, citations: [citation], evidence: [citation], provider: 'fixture', model: 'none', history: { conversation_id: 1, turn_id: 1 } };
+    if (route.endsWith('/stream')) {
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+      res.write(JSON.stringify({ type: 'progress', phase: 'generation', message: '正在生成回答' }) + '\n');
+      await new Promise(resolve => setTimeout(resolve, 2200));
+      res.end(JSON.stringify({ type: 'result', data }) + '\n');
+      return;
+    }
+    return json(data);
   }
   return json({ detail: `Unmocked route: ${route}` }, 404);
 });
@@ -92,6 +100,26 @@ async function main() {
       const url = new URL(route.request().url());
       return url.origin === base ? route.continue() : route.abort();
     });
+
+    if (process.env.CANGZHI_TEST_ONLY === 'layout') {
+      for (const width of [390, 1024, 1920, 2560]) {
+        await page.setViewportSize({ width, height: 1000 });
+        for (const route of ['/documents', '/inbox', '/search', '/ask', '/documents/21', '/settings?section=chat', '/tags', '/categories', '/notes/new']) {
+          await page.goto(`${base}${route}`);
+          const shell = page.locator(route.startsWith('/settings') ? '.settings-layout' : 'main.workspace-shell');
+          await shell.waitFor();
+          await page.waitForTimeout(200);
+          const rect = await shell.boundingBox();
+          assert.ok(Math.abs(rect.width - Math.min(width, 1800)) <= 2, `${route} at ${width}: ${rect.width}`);
+          assert.ok(Math.abs(rect.x - (width - rect.width) / 2) <= 2, `${route}: not centered`);
+          assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${route} at ${width}: horizontal overflow`);
+        }
+        await page.screenshot({ path: path.join(artifacts, `layout-${width}.png`) });
+      }
+      assert.deepEqual(errors, []);
+      console.log(`PASS shared workspace widths, mobile overflow and centered ultrawide layouts: ${artifacts}`);
+      return;
+    }
 
     if (process.env.CANGZHI_TEST_ONLY !== 'navigation') {
     await page.goto(`${base}/notes/new`);
@@ -130,7 +158,9 @@ async function main() {
     assert.equal(askRequests, 0);
     await page.locator('textarea').fill('这份演示资料说了什么？');
     await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.getByText('已等待 1 秒', { exact: false }).waitFor();
     await page.getByText('这是有据可查的演示回答。', { exact: false }).waitFor();
+    assert.equal(await page.getByText(/已等待 \d+ 秒/).count(), 0);
     await page.getByText('查看 1 条引用', { exact: true }).click();
     await page.getByRole('button', { name: /演示笔记/ }).last().click();
     await page.getByRole('heading', { name: '演示笔记', exact: true }).waitFor();

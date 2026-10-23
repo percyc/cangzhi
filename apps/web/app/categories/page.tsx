@@ -120,7 +120,7 @@ export default function CategoriesPage() {
   };
 
   return (
-    <main className="container mx-auto p-4">
+    <main className="workspace-shell">
       <Link href="/documents" className="text-blue-600 hover:underline">← 返回资料列表</Link>
 
       <h1 className="mt-4 text-2xl font-bold">分类管理</h1>

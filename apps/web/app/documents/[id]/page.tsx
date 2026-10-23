@@ -560,10 +560,10 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   };
 
   if (loading) {
-    return <main className="container mx-auto p-4"><p>加载中…</p></main>;
+    return <main className="workspace-shell"><p>加载中…</p></main>;
   }
   if (error && !document) {
-    return <main className="container mx-auto p-4"><p className="text-red-600">错误：{error}</p></main>;
+    return <main className="workspace-shell"><p className="text-red-600">错误：{error}</p></main>;
   }
   if (!document) return null;
 
@@ -631,7 +631,7 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   ].join(' · ');
 
   return (
-    <main className="document-shell mx-auto max-w-6xl px-4 sm:px-6">
+    <main className="workspace-shell document-shell">
       <Link
         href={returnToAsk ? '/ask' : '/documents'}
         className="text-sm font-medium text-slate-500 hover:text-slate-900"

@@ -8,7 +8,21 @@
   --muted: #64748b;
   --line: #dfe5ec;
   --focus: rgba(15, 23, 42, 0.14);
+  --workspace-width: 1800px;
 }
+
+/* Shared outer workspace; reading surfaces keep their own measure. */
+.workspace-shell {
+  width: 100%;
+  max-width: var(--workspace-width);
+  min-width: 0;
+  margin-inline: auto;
+  padding-inline: 1rem;
+}
+@media (min-width: 640px) {
+  .workspace-shell { padding-inline: 1.5rem; }
+}
+.workspace-form > :not(header) { max-width: 896px; }
 
 * {
   scrollbar-color: #cbd5e1 transparent;
@@ -190,7 +204,7 @@ details > summary::-webkit-details-marker {
 @media (min-width: 1024px) {
   .settings-layout {
     position: relative;
-    max-width: 1280px;
+    max-width: var(--workspace-width);
     padding-left: 280px;
     min-height: 860px;
   }
@@ -222,6 +236,10 @@ details > summary::-webkit-details-marker {
     top: 0;
     background: white;
   }
+}
+
+.settings-content > main.settings-shell > form {
+  max-width: 1024px;
 }
 
 :is(a, button, summary):focus-visible {

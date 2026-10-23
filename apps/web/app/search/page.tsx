@@ -95,7 +95,7 @@ export default function SearchPage() {
 
 function SearchSkeleton() {
   return (
-    <main className="container mx-auto max-w-5xl p-4">
+    <main className="workspace-shell">
       <p className="text-sm text-slate-500">加载中…</p>
     </main>
   );
@@ -275,7 +275,7 @@ function SearchClient() {
   };
 
   return (
-    <main className="mx-auto w-full max-w-[1600px] p-4 sm:px-6">
+    <main className="workspace-shell">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">搜索资料</h1>

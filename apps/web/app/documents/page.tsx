@@ -308,7 +308,7 @@ export default function DocumentsListPage() {
   const empty = libraryEmptyState(view === 'trash', categoryId !== null);
 
   return (
-    <main className="mx-auto max-w-7xl px-4 sm:px-6">
+    <main className="workspace-shell">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Personal Library</p>

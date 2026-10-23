@@ -13,7 +13,7 @@ export default function SettingsLayout({ children }: { children: ReactNode }) {
   // Never retain a departed form's callbacks/hints while a new route loads.
   const props = navigation?.pathname === pathname ? navigation.props : { active };
   return <SettingsNavigationContext.Provider value={setNavigation}>
-    <div className="settings-layout mx-auto max-w-5xl px-5">
+    <div className="workspace-shell settings-layout">
       <SettingsSectionNav {...props} />
       <div className="settings-content min-w-0">{children}</div>
     </div>

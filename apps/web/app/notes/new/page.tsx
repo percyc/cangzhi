@@ -119,7 +119,7 @@ export default function NewNotePage() {
   };
 
   return (
-    <main className="mx-auto max-w-4xl px-4 sm:px-6">
+    <main className="workspace-shell workspace-form">
       <Link href="/documents" className="text-sm font-medium text-slate-500 hover:text-slate-900">← 返回知识库</Link>
       <div className="mt-5">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">快速录入</p>
