@@ -318,6 +318,11 @@ def test_openapi_exposes_bearer_authorization_for_external_api_debugging(client)
     ("guide.txt", "text/plain"), ("guide.WPS", "application/kswps"),
     ("guide.DOCX", "application/zip"), ("guide.docx", "application/octet-stream"),
     ("guide.docx", " Application/X-Zip-Compressed ; charset=binary"),
+    ("guide.docx", "application/wps-office.docx"),
+    ("guide.doc", "application/wps-office.doc"),
+    ("guide.wps", "application/wps-office.wps"),
+    ("guide.xls", "application/wps-office.xls"),
+    ("guide.xlsx", "application/wps-office.xlsx"),
 ])
 def test_bound_token_uploads_and_manages_scope_keys(client, filename, mime):
     test_client, _ = client

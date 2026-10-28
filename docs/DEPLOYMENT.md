@@ -468,6 +468,11 @@ ZIP 容器声明。缺省类型及 `application/octet-stream` 原本已支持。
 规范化为标准 DOCX MIME；v1.4.9尚不包含此别名修复，需要更新包含该补丁的API。
 不接受任意WPS类型前缀，也不改变实际文件内容或后台格式校验。
 
+后续类型族补丁将DOC/DOCX/WPS/XLS/XLSX与各自的
+`application/wps-office.doc/docx/wps/xls/xlsx`显式一一映射，跨扩展名仍拒绝。
+v1.4.10仅兼容其中的DOCX，不包含其余四种别名。旧日志中的`mime=other`表示
+声明不在当时的日志白名单，无法据此还原具体原值；补丁后这些已知别名可明确记录。
+
 同版本的最小更新是重新构建并替换 **API 镜像**；本补丁无迁移、无新增依赖，不要求
 重建 Web 或 Worker。离线 ARM 环境须使用与目标 CPU 匹配的 API 镜像，不能导入
 amd64 镜像冒充 ARM 修复；本地测试结果不代替目标主机验收。

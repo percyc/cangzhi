@@ -1,4 +1,5 @@
 """Platform-independent upload headers, preserved originals and parser dispatch."""
+import logging
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -137,3 +138,60 @@ def test_webdav_docx_container_mime(client, monkeypatch, mime):
     assert response.json()["imported"] == 1, response.text
     entry = api.get(f"/api/webdav/{source['id']}/entries").json()[0]
     assert api.get(f"/api/documents/{entry['document_id']}/original").content == source_bytes
+
+
+OFFICE_EXTENSIONS = ["doc", "docx", "wps", "xls", "xlsx"]
+WPS_OFFICE_CANONICAL = {
+    "doc": "application/msword",
+    "docx": DOCX_MIME,
+    "wps": "application/kswps",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+@pytest.mark.parametrize("extension", OFFICE_EXTENSIONS)
+@pytest.mark.parametrize("declared", [
+    "application/wps-office.{ext}",
+    " Application/WPS-Office.{ext} ; charset=binary",
+    "APPLICATION/WPS-OFFICE.{ext}",
+    "",
+    None,
+])
+def test_wps_office_alias_accepted_returns_canonical(extension, declared):
+    if declared is None or declared == "":
+        expected = "application/octet-stream"
+    else:
+        declared = declared.replace("{ext}", extension)
+        expected = WPS_OFFICE_CANONICAL[extension]
+    assert validate_file_type(f"sample.{extension}", declared) == expected
+
+
+@pytest.mark.parametrize("source,declared", [
+    (src, f"application/wps-office.{decl}")
+    for src in OFFICE_EXTENSIONS
+    for decl in OFFICE_EXTENSIONS
+    if src != decl
+])
+def test_wps_office_cross_extension_alias_rejected(source, declared, caplog):
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        with pytest.raises(HTTPException) as error:
+            validate_file_type(f"sample.{source}", declared)
+    assert error.value.status_code == 415
+    assert f"mime={declared}" in caplog.text
+    assert f"extension=.{source}" in caplog.text
+    assert "sample" not in caplog.text
+
+
+@pytest.mark.parametrize("extension", OFFICE_EXTENSIONS)
+def test_wps_office_unknown_alias_rejected(extension):
+    with pytest.raises(HTTPException):
+        validate_file_type(f"sample.{extension}", "application/wps-office.unknown")
+
+
+def test_wps_office_alias_acceptance_no_warning_logged(caplog):
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        assert validate_file_type(
+            "材料.DOCX", " Application/WPS-Office.Docx ; charset=binary"
+        ) == DOCX_MIME
+    assert "upload_type_rejected" not in caplog.text

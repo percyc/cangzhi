@@ -37,7 +37,6 @@ _MIME_BY_EXTENSION = {
     },
     ".docx": {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/wps-office.docx",
     },
     ".xlsx": {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -65,6 +64,23 @@ _OFFICE_CONTAINER_MIMES = {
     ".wps": "application/kswps",
 }
 
+# WPS Office family aliases. Each supported extension binds exactly to its own
+# `application/wps-office.<extension>` declaration; matching returns the
+# canonical MIME. Cross-extension aliases and unknown suffixes are rejected.
+_WPS_OFFICE_ALIAS_MIMES = {
+    ".doc": ("application/wps-office.doc", "application/msword"),
+    ".docx": (
+        "application/wps-office.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    ".wps": ("application/wps-office.wps", "application/kswps"),
+    ".xls": ("application/wps-office.xls", "application/vnd.ms-excel"),
+    ".xlsx": (
+        "application/wps-office.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+}
+
 # Diagnostic allowlists. Rejection logs may only name a value that the module
 # already knows: an accepted extension, or a media type that appears in the
 # tables above. Anything else is reported as "other" so a hostile or secret
@@ -74,7 +90,9 @@ _KNOWN_MIMES = frozenset(
     mime
     for mimes in _MIME_BY_EXTENSION.values()
     for mime in mimes
-) | frozenset(_ZIP_MIMES) | frozenset(_OFFICE_CONTAINER_MIMES.values()) | {
+) | frozenset(_ZIP_MIMES) | frozenset(_OFFICE_CONTAINER_MIMES.values()) | frozenset(
+    alias for alias, _canonical in _WPS_OFFICE_ALIAS_MIMES.values()
+) | {
     "application/msword",
     "text/plain",
     "application/pdf",
@@ -111,8 +129,9 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
         )
     normalized_mime = (content_type or "").split(";", 1)[0].strip().lower()
     normalized_mime = normalized_mime or "application/octet-stream"
-    if extension == ".docx" and normalized_mime == "application/wps-office.docx":
-        return _OFFICE_CONTAINER_MIMES[".docx"]
+    wps_alias = _WPS_OFFICE_ALIAS_MIMES.get(extension)
+    if wps_alias is not None and normalized_mime == wps_alias[0]:
+        return wps_alias[1]
     if normalized_mime in _ZIP_MIMES and extension in _OFFICE_CONTAINER_MIMES:
         return _OFFICE_CONTAINER_MIMES[extension]
     if (

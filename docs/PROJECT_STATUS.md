@@ -6,6 +6,13 @@
 
 更新时间：2026-10-28
 
+代码完成：CZ-Q04 WPS Office类型族兼容，Codex / OpenCode，分支
+`codex/CZ-Q04-wps-office-family`。三个现场附件均可隔离解析，日志确认类型错配415；
+完善现有Office扩展名的显式别名映射及已知类型日志，不放开任意类型前缀。
+140项上传/REST/WebDAV回归通过；三附件在同族声明下隔离上传、原件回读与解析通过。
+用户已提供三种实际声明，均与映射一致；拟发布v1.4.11，已授权验收后合并推送。
+实例部署记录仅留本地；旧日志将未知声明脱敏为other，不能反推现场原始值。
+
 CZ-Q04 上传诊断与WPS DOCX兼容代码完成，Codex / OpenCode，分支
 `codex/CZ-Q04-upload-diagnostics`。现场确认application/wps-office.docx导致415，
 仅对.docx规范化该别名；类型拒绝日志不含正文、文件名或凭证。上传及WebDAV相关

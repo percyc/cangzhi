@@ -7,6 +7,12 @@
 任意 `application/wps-office.*`，其他扩展名使用该声明仍拒绝。沿用既有大小写、
 空格和参数规范化。原件字节、后台解析及所有权限/限额不变。
 
+后续同族兼容：将现有支持的 `.doc`、`.docx`、`.wps`、`.xls`、`.xlsx` 分别与
+`application/wps-office.doc`、`.docx`、`.wps`、`.xls`、`.xlsx` 精确绑定，
+匹配后规范化为各自标准类型。此为有限表驱动映射，不接受跨扩展名别名、不接受
+任意后缀，也不增加PPT等新格式。已知别名可进入安全诊断白名单，未知声明仍脱敏。
+DOCX及DOC/WPS/XLSX现场声明均已由客户端请求头确认；XLS为同族合成兼容测试。
+
 现有上传入口按扩展名与客户端声明的 MIME 校验，不使用 libmagic。
 DOCX 声明为 application/zip 时会返回 415；application/octet-stream 和缺省
 类型原本已支持。这个条件可独立于 CPU 架构复现，不能仅凭 ARM 环境推断实际根因。
