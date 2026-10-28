@@ -49,6 +49,18 @@ _MIME_BY_EXTENSION = {
     ".txt": {"text/plain"},
 }
 
+# These formats may be advertised by browsers/WebDAV as their ZIP container.
+# Only normalize known Office extensions; a MIME header does not prove validity.
+# The format-specific worker parser validates the preserved original bytes.
+_ZIP_MIMES = frozenset({
+    "application/zip", "application/x-zip", "application/x-zip-compressed",
+})
+_OFFICE_CONTAINER_MIMES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".wps": "application/kswps",
+}
+
 
 def normalized_filename(filename: str | None) -> str:
     safe_name = (filename or "未命名文件").replace("\\", "/").split("/")[-1]
@@ -63,7 +75,10 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
             status_code=415,
             detail="仅支持 PDF、Word、WPS 文字、Excel、Markdown 和 TXT 文件",
         )
-    normalized_mime = (content_type or "application/octet-stream").lower()
+    normalized_mime = (content_type or "").split(";", 1)[0].strip().lower()
+    normalized_mime = normalized_mime or "application/octet-stream"
+    if normalized_mime in _ZIP_MIMES and extension in _OFFICE_CONTAINER_MIMES:
+        return _OFFICE_CONTAINER_MIMES[extension]
     if (
         normalized_mime != "application/octet-stream"
         and normalized_mime not in allowed_mimes

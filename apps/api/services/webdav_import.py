@@ -153,9 +153,7 @@ async def import_single_entry(
             max_bytes=max_bytes,
         )
         filename = normalized_filename(PurePosixPath(remote_path).name)
-        content_type = validate_file_type(
-            filename, upstream_type.split(";", 1)[0].strip()
-        )
+        content_type = validate_file_type(filename, upstream_type)
         stored = storage.save(BytesIO(payload), max_bytes=max_bytes)
         saved_key = stored.storage_key
         existing_blob = await db.scalar(

@@ -454,6 +454,26 @@ WebDAV来源下载、解压/表格单元格等独立处理限制。
 开发验证：`cd apps/web && node tests/browser/upload-proxy.cjs` 在临时目录构建生产Web，
 通过本机合成HTTP上游检查超过10MiB、50MiB边界、413/401透传和网关路径，不读写真实资料。
 
+### DOCX 提示“文件扩展名与内容类型不匹配”
+
+这是上传类型校验返回的 HTTP 415，发生在保存原件和后台解析之前。旧版只接受标准
+DOCX MIME 或通用二进制声明；浏览器/文件服务声明为 `application/zip` 或
+`application/x-zip-compressed` 时会误拒绝。此行为不由 CPU 架构直接决定。
+
+ADR-039 补丁统一处理 MIME 大小写、参数与首尾空格，对 DOCX/XLSX/兼容 WPS 接受
+ZIP 容器声明。缺省类型及 `application/octet-stream` 原本已支持。普通 ZIP 改名并不
+证明内容有效，后台专用解析仍会拒绝无效文档并保留已上传原件。
+
+同版本的最小更新是重新构建并替换 **API 镜像**；本补丁无迁移、无新增依赖，不要求
+重建 Web 或 Worker。离线 ARM 环境须使用与目标 CPU 匹配的 API 镜像，不能导入
+amd64 镜像冒充 ARM 修复；本地测试结果不代替目标主机验收。
+
+若仍失败，核对浏览器网络面板中本次上传的状态码、响应及文件部分的 Content-Type：
+415检查类型；413检查文件/代理限额；502或连接中断检查代理与网络；已返回201/202后
+在收件箱显示失败，则检查Worker解析错误、文件是否损坏/加密及转换组件。DOCX正文
+由python-docx解析，PDF预览和图片型Word的OCR另依赖LibreOffice；两种阶段分别排查。
+不要在排障记录中复制Cookie、Authorization或模型密钥。
+
 ### 登录后反复返回登录页
 
 - 确认浏览器访问的协议和域名没有来回切换；

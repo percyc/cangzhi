@@ -314,9 +314,22 @@ def test_openapi_exposes_bearer_authorization_for_external_api_debugging(client)
     ]
 
 
-@pytest.mark.parametrize("filename,mime", [("guide.txt", "text/plain"), ("guide.WPS", "application/kswps")])
+@pytest.mark.parametrize("filename,mime", [
+    ("guide.txt", "text/plain"), ("guide.WPS", "application/kswps"),
+    ("guide.DOCX", "application/zip"), ("guide.docx", "application/octet-stream"),
+    ("guide.docx", " Application/X-Zip-Compressed ; charset=binary"),
+])
 def test_bound_token_uploads_and_manages_scope_keys(client, filename, mime):
     test_client, _ = client
+    content = b"scope key integration"
+    if filename.lower().endswith(".docx"):
+        from io import BytesIO
+        from docx import Document as WordDocument
+        buffer = BytesIO()
+        word = WordDocument()
+        word.add_paragraph("scope key integration")
+        word.save(buffer)
+        content = buffer.getvalue()
     _enable_real_login()
     _setup_owner(test_client)
     current = test_client.get("/api/workspaces/current").json()
@@ -336,7 +349,7 @@ def test_bound_token_uploads_and_manages_scope_keys(client, filename, mime):
     uploaded = test_client.post(
         "/api/v1/documents",
         headers=headers,
-        files={"file": (filename, b"scope key integration", mime)},
+        files={"file": (filename, content, mime)},
         data={"external_id": "ext-guide", "scope_keys": '["id-a", "id-b"]'},
     )
     assert uploaded.status_code == 202
@@ -360,7 +373,7 @@ def test_bound_token_uploads_and_manages_scope_keys(client, filename, mime):
     unchanged = test_client.post(
         "/api/v1/documents",
         headers=headers,
-        files={"file": (filename, b"scope key integration", mime)},
+        files={"file": (filename, content, mime)},
         data={"external_id": "ext-guide"},
     )
     assert unchanged.status_code == 202
