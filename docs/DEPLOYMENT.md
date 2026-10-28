@@ -464,6 +464,10 @@ ADR-039 补丁统一处理 MIME 大小写、参数与首尾空格，对 DOCX/XLS
 ZIP 容器声明。缺省类型及 `application/octet-stream` 原本已支持。普通 ZIP 改名并不
 证明内容有效，后台专用解析仍会拒绝无效文档并保留已上传原件。
 
+后续补丁针对现场确认的 `application/wps-office.docx` 声明，仅在 `.docx` 下
+规范化为标准 DOCX MIME；v1.4.9尚不包含此别名修复，需要更新包含该补丁的API。
+不接受任意WPS类型前缀，也不改变实际文件内容或后台格式校验。
+
 同版本的最小更新是重新构建并替换 **API 镜像**；本补丁无迁移、无新增依赖，不要求
 重建 Web 或 Worker。离线 ARM 环境须使用与目标 CPU 匹配的 API 镜像，不能导入
 amd64 镜像冒充 ARM 修复；本地测试结果不代替目标主机验收。
@@ -473,6 +477,14 @@ amd64 镜像冒充 ARM 修复；本地测试结果不代替目标主机验收。
 在收件箱显示失败，则检查Worker解析错误、文件是否损坏/加密及转换组件。DOCX正文
 由python-docx解析，PDF预览和图片型Word的OCR另依赖LibreOffice；两种阶段分别排查。
 不要在排障记录中复制Cookie、Authorization或模型密钥。
+
+上传类型拒绝诊断：API（WebDAV 路径可能在 Worker）输出 WARNING 事件
+`upload_type_rejected`。用 `docker compose logs --since 10m api worker`
+查找该事件，结合时间及既有访问日志定位请求；`unsupported_extension` 表示扩展名
+不支持，`mime_mismatch` 表示文件部分类型声明与扩展名冲突。
+只记录白名单扩展名和已知 MIME；未知值显示 `other`，不输出文件名、路径、正文、
+类型参数、认证头或 Scope Key。日志不是内容检测结果，也不能证明文件已经损坏。
+未知类型仍需在客户端核对文件部分 Content-Type；不要导出包含认证信息的完整 HAR。
 
 ### 登录后反复返回登录页
 

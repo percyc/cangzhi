@@ -1,3 +1,4 @@
+import logging
 from io import BytesIO
 
 import pytest
@@ -173,3 +174,131 @@ def test_docx_limit_counts_file_not_multipart_overhead(client, monkeypatch, extr
     assert response.status_code == expected_status
     if expected_status == 413:
         assert list(storage._blob_path.iterdir()) == []
+
+
+def test_upload_rejection_logs_unsupported_extension_without_input(client, caplog):
+    test_client, _ = client
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        response = test_client.post(
+            "/api/files/upload",
+            files={"file": ("malware.exe", BytesIO(b"x"), "application/octet-stream")},
+        )
+
+    assert response.status_code == 415
+    rejections = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "upload_type_rejected" in record.getMessage()
+    ]
+    assert len(rejections) == 1
+    message = rejections[0].getMessage()
+    assert "reason=unsupported_extension" in message
+    assert "extension=other" in message
+    assert "malware" not in message
+    assert ".exe" not in message
+
+
+def test_upload_rejection_logs_mime_mismatch_with_known_extension(client, caplog):
+    test_client, _ = client
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        response = test_client.post(
+            "/api/files/upload",
+            files={"file": ("report.pdf", BytesIO(b"x"), "text/plain")},
+        )
+
+    assert response.status_code == 415
+    rejections = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "upload_type_rejected" in record.getMessage()
+    ]
+    assert len(rejections) == 1
+    message = rejections[0].getMessage()
+    assert "reason=mime_mismatch" in message
+    assert "extension=.pdf" in message
+    assert "mime=text/plain" in message
+    assert "report" not in message
+
+
+def test_upload_rejection_redacts_hostile_header_and_filename(client, caplog):
+    test_client, _ = client
+    secret_mime = "application/x-secret-token-abcdef123456"
+    secret_name = "quarterly-secret-plans.pdf"
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        response = test_client.post(
+            "/api/files/upload",
+            files={
+                "file": (
+                    secret_name,
+                    BytesIO(b"x"),
+                    f"{secret_mime}; charset=utf-8",
+                )
+            },
+        )
+
+    assert response.status_code == 415
+    rejections = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "upload_type_rejected" in record.getMessage()
+    ]
+    assert len(rejections) == 1
+    message = rejections[0].getMessage()
+    assert "reason=mime_mismatch" in message
+    assert "mime=other" in message
+    assert "charset" not in message
+    assert "secret" not in message.lower()
+    assert "abcdef123456" not in message
+    assert "pdftoken" not in message
+
+
+def test_rejection_known_mime_parameters_are_not_logged(caplog):
+    from fastapi import HTTPException
+    from apps.api.api.files import validate_file_type
+
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        with pytest.raises(HTTPException):
+            validate_file_type("private.docx", "Application/MSWord; private=hidden-value")
+    assert "mime=application/msword" in caplog.text
+    assert "hidden-value" not in caplog.text
+    assert "private" not in caplog.text
+
+
+def test_upload_rejection_redacts_hostile_extension(client, caplog):
+    test_client, _ = client
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        response = test_client.post(
+            "/api/files/upload",
+            files={
+                "file": (
+                    "api-key-sk-live-9999.sh",
+                    BytesIO(b"x"),
+                    "application/octet-stream",
+                )
+            },
+        )
+
+    assert response.status_code == 415
+    rejections = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "upload_type_rejected" in record.getMessage()
+    ]
+    assert len(rejections) == 1
+    message = rejections[0].getMessage()
+    assert "reason=unsupported_extension" in message
+    assert "extension=other" in message
+    assert "sk-live" not in message
+    assert ".sh" not in message
+
+
+def test_accepted_upload_does_not_warn(client, caplog):
+    test_client, _ = client
+    with caplog.at_level(logging.WARNING, logger="apps.api.api.files"):
+        response = test_client.post(
+            "/api/files/upload",
+            files={"file": ("note.txt", BytesIO(b"hello"), "text/plain")},
+        )
+
+    assert response.status_code == 201
+    assert "upload_type_rejected" not in caplog.text

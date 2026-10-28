@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from urllib.parse import quote
 
@@ -19,6 +20,8 @@ from .schemas import BlobResponse, DocumentResponse
 
 router = APIRouter(prefix="/files", tags=["files"])
 
+logger = logging.getLogger(__name__)
+
 _MIME_BY_EXTENSION = {
     ".wps": set(WPS_MIMES) | {
         "application/msword",
@@ -33,7 +36,8 @@ _MIME_BY_EXTENSION = {
         "application/winword",
     },
     ".docx": {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/wps-office.docx",
     },
     ".xlsx": {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -61,6 +65,32 @@ _OFFICE_CONTAINER_MIMES = {
     ".wps": "application/kswps",
 }
 
+# Diagnostic allowlists. Rejection logs may only name a value that the module
+# already knows: an accepted extension, or a media type that appears in the
+# tables above. Anything else is reported as "other" so a hostile or secret
+# bearing header, filename or parameter never reaches the log.
+_KNOWN_EXTENSIONS = frozenset(_MIME_BY_EXTENSION)
+_KNOWN_MIMES = frozenset(
+    mime
+    for mimes in _MIME_BY_EXTENSION.values()
+    for mime in mimes
+) | frozenset(_ZIP_MIMES) | frozenset(_OFFICE_CONTAINER_MIMES.values()) | {
+    "application/msword",
+    "text/plain",
+    "application/pdf",
+    "application/octet-stream",
+}
+
+
+def _safe_extension(extension: str) -> str:
+    """Return the extension only when it is on the accepted whitelist."""
+    return extension if extension in _KNOWN_EXTENSIONS else "other"
+
+
+def _safe_mime(mime: str) -> str:
+    """Return the media type only when the module already knows it."""
+    return mime if mime in _KNOWN_MIMES else "other"
+
 
 def normalized_filename(filename: str | None) -> str:
     safe_name = (filename or "未命名文件").replace("\\", "/").split("/")[-1]
@@ -71,18 +101,29 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
     extension = Path(filename).suffix.lower()
     allowed_mimes = _MIME_BY_EXTENSION.get(extension)
     if allowed_mimes is None:
+        logger.warning(
+            "upload_type_rejected reason=unsupported_extension extension=%s",
+            _safe_extension(extension),
+        )
         raise HTTPException(
             status_code=415,
             detail="仅支持 PDF、Word、WPS 文字、Excel、Markdown 和 TXT 文件",
         )
     normalized_mime = (content_type or "").split(";", 1)[0].strip().lower()
     normalized_mime = normalized_mime or "application/octet-stream"
+    if extension == ".docx" and normalized_mime == "application/wps-office.docx":
+        return _OFFICE_CONTAINER_MIMES[".docx"]
     if normalized_mime in _ZIP_MIMES and extension in _OFFICE_CONTAINER_MIMES:
         return _OFFICE_CONTAINER_MIMES[extension]
     if (
         normalized_mime != "application/octet-stream"
         and normalized_mime not in allowed_mimes
     ):
+        logger.warning(
+            "upload_type_rejected reason=mime_mismatch extension=%s mime=%s",
+            _safe_extension(extension),
+            _safe_mime(normalized_mime),
+        )
         raise HTTPException(
             status_code=415,
             detail="文件扩展名与内容类型不匹配",

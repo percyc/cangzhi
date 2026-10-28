@@ -25,6 +25,8 @@ def docx_bytes():
 
 
 @pytest.mark.parametrize("mime", [DOCX_MIME, *ZIP_MIMES, "application/octet-stream",
+                                  "application/wps-office.docx",
+                                  " Application/WPS-Office.Docx ; charset=binary",
                                   None, "", " Application/ZIP ; charset=binary",
                                   DOCX_MIME.upper() + "; charset=utf-8"])
 def test_docx_upload_download_and_parse(client, mime):
@@ -34,6 +36,8 @@ def test_docx_upload_download_and_parse(client, mime):
     assert response.status_code == 201, response.text
     body = response.json()
     blob = body["current_version"]["blob"]
+    if mime and "wps-office.docx" in mime.lower():
+        assert blob["content_type"] == DOCX_MIME
     downloaded = api.get(f"/api/documents/{body['id']}/original")
     assert downloaded.status_code == 200
     assert downloaded.content == source
@@ -66,6 +70,10 @@ def test_generic_mime_compatibility(mime):
     ("sample.txt", "application/zip"), ("sample.xls", "application/zip"),
     ("sample.docx", "application/pdf"), ("sample.docx", "text/plain"),
     ("sample.docx", "application/zip-invalid"),
+    ("sample.xlsx", "application/wps-office.docx"),
+    ("sample.doc", "application/wps-office.docx"),
+    ("sample.pdf", "application/wps-office.docx"),
+    ("sample.docx", "application/wps-office.unknown"),
 ])
 def test_mismatches_still_rejected_without_storage(client, filename, mime):
     api, storage = client
@@ -103,7 +111,9 @@ def test_zip_alias_does_not_bypass_empty_or_size_limits(client, monkeypatch):
         assert list(storage._blob_path.iterdir()) == []
 
 
-def test_webdav_docx_container_mime(client, monkeypatch):
+@pytest.mark.parametrize("mime", [" Application/X-Zip-Compressed ; charset=binary",
+                                  "application/wps-office.docx"])
+def test_webdav_docx_container_mime(client, monkeypatch, mime):
     api, _ = client
     source_bytes = docx_bytes()
     source = api.post("/api/webdav", json={
@@ -116,7 +126,7 @@ def test_webdav_docx_container_mime(client, monkeypatch):
                             last_modified="today", size=len(source_bytes), content_type="application/zip")]
 
     async def download(**kwargs):
-        return source_bytes, " Application/X-Zip-Compressed ; charset=binary"
+        return source_bytes, mime
 
     monkeypatch.setattr("apps.api.api.webdav.propfind", propfind)
     monkeypatch.setattr("apps.api.api.webdav.download_file", download)

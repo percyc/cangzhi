@@ -2,6 +2,11 @@
 
 状态：按维护者 2026-10-28 的 DOCX 上传兼容修复要求实施。
 
+2026-10-28 现场补充：已取得上传文件部分的 `application/wps-office.docx`
+声明。仅在扩展名为 `.docx` 时将这个精确别名规范化为标准 DOCX MIME；不接受
+任意 `application/wps-office.*`，其他扩展名使用该声明仍拒绝。沿用既有大小写、
+空格和参数规范化。原件字节、后台解析及所有权限/限额不变。
+
 现有上传入口按扩展名与客户端声明的 MIME 校验，不使用 libmagic。
 DOCX 声明为 application/zip 时会返回 415；application/octet-stream 和缺省
 类型原本已支持。这个条件可独立于 CPU 架构复现，不能仅凭 ARM 环境推断实际根因。
