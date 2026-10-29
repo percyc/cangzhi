@@ -256,9 +256,9 @@ OpenAI 兼容的多模态模型，由模型返回归一化坐标中的行级文�
 - 入口在 `/settings?section=ocr`，面板名为「图片文字识别」，与对话
   面板并列；可勾选「复用对话渠道的地址和密钥」一键填充地址与密钥，
   模型名仍独立指定。
-- 触发条件按以下顺序短路：本地结果 `local_chars ≥ ocr_min_chars` 且
+- 无局部质量/版式风险时才按以下条件短路：本地结果 `local_chars ≥ ocr_min_chars` 且
   `local_confidence ≥ ocr_confidence_threshold/1000` 时不调用；
-  `no_text` / `low_chars` / `low_confidence` 三类原因记入
+  `no_text` / `low_chars` / `low_confidence` / `local_quality_risk` 原因记入
   `metadata.pdf_extraction.external_trigger_reasons`。
 - 每次外部调用对应一份 0..1000 顶左坐标的 bbox 响应；Parser 按页面
   真实宽高还原为 PDF 点坐标并翻转 Y 轴后写入 `Block.extra.bbox`，与本地
