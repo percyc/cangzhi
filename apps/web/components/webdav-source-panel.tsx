@@ -87,7 +87,7 @@ type SourceForm = {
   remote_delete_policy: 'trash' | 'keep';
 };
 
-const DEFAULT_EXTENSIONS = '.pdf, .doc, .docx, .wps, .xlsx, .xls, .md, .markdown, .txt';
+const DEFAULT_EXTENSIONS = '.pdf, .doc, .docx, .wps, .xlsx, .xls, .md, .markdown, .txt, .png, .jpg, .jpeg, .webp';
 const DEFAULT_IGNORE_PATTERNS = String.raw`.*
 ~$*
 *.tmp

@@ -172,6 +172,9 @@ MCP 当前提供 19 个工具，图中按用途归为六类：范围目录、文
 
 - 创建和编辑 Markdown 随手记，实质修改保留版本。
 - 上传 PDF、DOC、DOCX、WPS 文字（`.wps`）、XLSX、XLS、Markdown 和 TXT，并下载保存的原文件。
+- 独立上传 PNG、JPEG、静态 WebP 图片，通过既有 OCR 提取文字后进入摘要、分类、
+  切片和检索；原图与解析版可对照。支持 EXIF 方向纠正和有界旋转识别，
+  不自动生成图片语义描述；尺寸限制与使用说明见 [图片 OCR](docs/IMAGE_OCR.md)。
   WPS 兼容范围、预览/OCR 和旧版格式局限见 [WPS 文字兼容](docs/WPS_COMPATIBILITY.md)。
 - 收藏公开网页，保存 HTML 快照并提取标题、作者、时间和正文。
 - 连接 WebDAV 目录，只读扫描并沿用统一解析、分类和索引流程。

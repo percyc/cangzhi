@@ -26,6 +26,7 @@ DocumentType = Literal[
     "xlsx",
     "xls",
     "html",
+    "image",
 ]
 
 
@@ -96,6 +97,7 @@ def get_parser_for_content(
     from .docx import DocxParser
     from .wps import WpsParser, WPS_MIMES
     from .html import HtmlParser
+    from .image import ImageParser, IMAGE_FORMATS
     from .markdown import MarkdownParser
     from .note import NoteParser
     from .pdf import PdfOcrOptions, PdfParser
@@ -111,9 +113,18 @@ def get_parser_for_content(
             return PdfParser(options=pdf_ocr_options)
         return PdfParser(options=PdfOcrOptions(**dict(pdf_ocr_options)))
 
+    def _image(expected_format: str) -> ImageParser:
+        options = pdf_ocr_options
+        if options is not None and not isinstance(options, PdfOcrOptions):
+            options = PdfOcrOptions(**dict(options))
+        return ImageParser(options=options, expected_format=expected_format)
+
     # Check specific extensions first
     if file_name:
         lower_name = file_name.lower()
+        for suffix, image_format in IMAGE_FORMATS.items():
+            if lower_name.endswith(suffix):
+                return _image(image_format)
         if lower_name.endswith(".wps"):
             return WpsParser()
         if lower_name.endswith((".md", ".markdown")):
@@ -135,6 +146,8 @@ def get_parser_for_content(
 
     if content_type == "application/x-note":
         return NoteParser()
+    if content_type in {"image/png", "image/jpeg", "image/webp"}:
+        return _image(content_type.split("/")[1].upper())
     if content_type in WPS_MIMES:
         return WpsParser()
     if "text/markdown" in content_type or "markdown" in content_type:

@@ -44,6 +44,20 @@ def test_budget_exhaustion_leaves_original():
     assert result is original and angle == 0
 
 
+def test_slow_first_direction_cannot_starve_other_trials(monkeypatch):
+    from apps.api.parsers import ocr_orientation
+    now = [0.0]
+    monkeypatch.setattr(ocr_orientation.time, "monotonic", lambda: now[0])
+    calls = []
+    def recognize(render, timeout):
+        calls.append(timeout)
+        now[0] += timeout
+        return _PageOcrResult(1, [{"text": "correct opposite direction", "confidence": .95 if len(calls) == 2 else .1}])
+    _, _, angle = correct_orientation(sample_render(), _PageOcrResult(1, []), recognize, budget_seconds=30)
+    assert calls == [10, 10, 10]
+    assert angle == 270
+
+
 def test_real_mixed_direction_scanned_pdf():
     import os
     if os.environ.get("CANGZHI_TEST_OCR_ORIENTATION") != "1":

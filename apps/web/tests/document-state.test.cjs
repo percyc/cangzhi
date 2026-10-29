@@ -92,6 +92,19 @@ const documentFixture = (overrides = {}) => ({ id: 1, title: '服务器标题', 
   created_at: '2026-10-01', current_version: { id: 10, version_number: 1, processing_status: 'ready', meta: {}, raw_content: '正文', structured_content: {}, blob: null, preview_blob: null },
   primary_category: { id: 1, name: '分类一' }, categories: [], tags: [{ id: 1, name: '标签一' }], summary: { summary: '服务器摘要' }, ...overrides,
 });
+
+test('uploaded image uses pinned original image preview, never a PDF iframe', async () => {
+  const fixture = documentFixture();
+  fixture.current_version.blob = { id: 7, original_filename: 'scan.PNG', content_type: 'image/png' };
+  fixture.current_version.structured_content = { document_type: 'image' };
+  const page = await mountDocument(documentApi(() => fixture));
+  const image = find(page.tree, 'img');
+  assert.ok(image);
+  assert.equal(image.props.src, '/api/documents/1/original?inline=true&version_id=10&revision=7');
+  assert.equal(find(page.tree, 'iframe'), undefined);
+  assert.match(text(page.tree), /解析版显示 OCR/);
+  page.unmount();
+});
 function documentApi(getDocument, calls = [], state = pipeline()) {
   return async (url, init = {}) => {
     calls.push({ url, init });

@@ -46,7 +46,7 @@ def correct_orientation(render, initial, recognize, *, budget_seconds):
         return initial, render, 0
     deadline = time.monotonic() + budget_seconds
     best, best_render, best_angle = initial, render, 0
-    for angle in (90, 270, 180):
+    for index, angle in enumerate((90, 270, 180)):
         remaining = deadline - time.monotonic()
         if remaining < 1:
             break
@@ -57,7 +57,9 @@ def correct_orientation(render, initial, recognize, *, budget_seconds):
                                    height_px=rotated.height,
                                    page_width_pt=render.page_height_pt if angle != 180 else render.page_width_pt,
                                    page_height_pt=render.page_width_pt if angle != 180 else render.page_height_pt)
-        candidate = recognize(candidate_render, remaining)
+        # One slow direction must not consume the entire trial budget. Leave a
+        # fair share for the opposite direction and upside-down text as well.
+        candidate = recognize(candidate_render, remaining / (3 - index))
         chars = sum(len(line.get("text", "").strip()) for line in candidate.lines)
         if (not candidate.error and chars >= 12 and confidence(candidate.lines) >= 0.55
                 and confidence(candidate.lines) >= confidence(best.lines) + 0.12):

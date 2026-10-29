@@ -171,6 +171,12 @@ curl -H "Authorization: Bearer $TOKEN" \
 后台解析。兼容容器、失败行为及旧版格式局限见 [WPS 文字兼容](WPS_COMPATIBILITY.md)。
 上传成功表示原件已保存并排队，不代表解析已完成；读取处理状态确认实际结果。
 
+PNG、JPG/JPEG、静态 WebP 也可通过相同入口上传，规范类型分别为 `image/png`、
+`image/jpeg`、`image/webp`，允许空/通用二进制声明并按扩展名规范化，后台核验解码格式。
+图片 OCR 成功后 `structured_content.document_type=image`，文字使用既有检索/读取契约；
+`metadata.image_extraction` 说明 EXIF 校正图的像素尺寸和坐标系。无可用文字不标记成功。
+限制、失败行为与 OCR 配置见 [图片 OCR](IMAGE_OCR.md)，契约见 ADR-040。
+
 - `POST /api/v1/documents`（`documents:write`）：multipart 上传，支持 `title`、
   `external_id`、`scope_keys`，返回 `202`。
 - `GET /api/v1/documents/{id}/processing-status`（`documents:write`）：按上传响应的

@@ -21,6 +21,10 @@ const MAX_FILES = 50;
 const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
 const SUPPORTED_TYPES = [
+  { ext: '.png', name: 'PNG 图片' },
+  { ext: '.jpg', name: 'JPG 图片' },
+  { ext: '.jpeg', name: 'JPEG 图片' },
+  { ext: '.webp', name: 'WebP 静态图片' },
   { ext: '.pdf', name: 'PDF' },
   { ext: '.doc', name: 'Word DOC' },
   { ext: '.docx', name: 'Word DOCX' },
@@ -298,6 +302,7 @@ export default function FileUploadPage() {
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">文件导入</p>
         <h1 className="mt-1 text-3xl font-semibold text-slate-950">上传本地资料</h1>
         <p className="mt-2 text-sm text-slate-500">先保存原文件，再在后台解析和整理。上传成功后，可到收件箱查看处理结果；模型是可选能力。</p>
+        <p className="mt-2 text-sm text-slate-500">图片通过 OCR 提取文字，不自动描述画面。支持静态 PNG/JPEG/WebP，最多 2500 万像素、单边 12000 像素；清晰原图效果更好。</p>
       </div>
 
       <form onSubmit={handleSubmit} className="mt-7 space-y-5 rounded-2xl border bg-white p-5 sm:p-7">

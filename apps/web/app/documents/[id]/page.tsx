@@ -605,14 +605,15 @@ function DocumentDetail({ documentId }: { documentId: string }) {
   const extraction = pipeline?.stages.parsing.extraction;
   const quarantinedPages = extraction?.quarantined_pages ?? [];
   const hasPartialExtraction = extraction?.ocr_status === 'partial' || quarantinedPages.length > 0;
-  const hasPaginatedPreview = isPdf || hasConvertedPreview;
-  const previewBlobId = isPdf ? version?.blob?.id : version?.preview_blob?.id;
+  const isImage = /\.(png|jpe?g|webp)$/.test(originalFilename);
+  const hasPaginatedPreview = isPdf || isImage || hasConvertedPreview;
+  const previewBlobId = isPdf || isImage ? version?.blob?.id : version?.preview_blob?.id;
   const previewIdentity = `${document.id}:${version?.id}:${previewBlobId}`;
   const contentIdentity = `${document.id}:${version?.id}:${parsedRevision}:${pipeline?.chunk_revision ?? 0}`;
   // Pin the version and blob revision; only a real preview replacement changes
   // the iframe URL. Progress polling and tab switching must not reload it.
   const previewQuery = `version_id=${version?.id}&revision=${previewBlobId}`;
-  const previewUrl = isPdf
+  const previewUrl = isPdf || isImage
     ? withApiBasePath(`/api/documents/${document.id}/original?inline=true&${previewQuery}`)
     : withApiBasePath(`/api/documents/${document.id}/preview?${previewQuery}`);
   const knowledgeStatus = spreadsheetOnlyNeedsGovernance
@@ -958,11 +959,18 @@ function DocumentDetail({ documentId }: { documentId: string }) {
           </div>
           {hasPaginatedPreview && (
             <RetainedPanel key={previewIdentity} active={previewMode === 'original'} label="版式预览">
-            <iframe
+            {isImage ? (
+              <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                {/* Original authenticated image, no optimizer or third-party fetch. */}
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={previewUrl} alt={`${document.title} 原图`} className="mx-auto max-h-[72vh] max-w-full object-contain" />
+                <p className="mt-3 text-xs text-slate-500">原图保持不变；解析版显示 OCR 识别的文字，请结合原图核对。</p>
+              </div>
+            ) : <iframe
               title={`${document.title} 原文预览`}
               src={`${previewUrl}${citationTarget?.page ? `#page=${citationTarget.page}` : ''}`}
               className="h-[72vh] min-h-[560px] w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
-            />
+            />}
             </RetainedPanel>
           )}
           {pipeline && !spreadsheetProcessing && (

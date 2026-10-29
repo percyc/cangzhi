@@ -323,10 +323,17 @@ def test_openapi_exposes_bearer_authorization_for_external_api_debugging(client)
     ("guide.wps", "application/wps-office.wps"),
     ("guide.xls", "application/wps-office.xls"),
     ("guide.xlsx", "application/wps-office.xlsx"),
+    ("guide.png", "image/png"), ("guide.jpeg", "application/octet-stream"),
 ])
 def test_bound_token_uploads_and_manages_scope_keys(client, filename, mime):
     test_client, _ = client
     content = b"scope key integration"
+    if filename.endswith((".png", ".jpeg")):
+        from io import BytesIO
+        from PIL import Image
+        buffer = BytesIO()
+        Image.new("RGB", (20, 20), "white").save(buffer, "PNG" if filename.endswith(".png") else "JPEG")
+        content = buffer.getvalue()
     if filename.lower().endswith(".docx"):
         from io import BytesIO
         from docx import Document as WordDocument

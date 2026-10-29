@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from io import BytesIO
@@ -12,11 +13,11 @@ from typing import Any
 
 from ..ocr.base import ExternalOcrError, ExternalOcrProvider
 from .base import BaseParser, Block, ParserResult, StructuredContent
-from .ocr_orientation import correct_orientation, restore_boxes
+from .ocr_orientation import confidence, correct_orientation, restore_boxes
 
 logger = logging.getLogger(__name__)
 
-PDF_OCR_VERSION = "pdf-hybrid-v4-page-quarantine"
+PDF_OCR_VERSION = "pdf-hybrid-v5-layout-direction"
 PDF_OCR_ENGINE = "tesseract"
 PDF_OCR_EXTERNAL_ENGINE = "external-vision"
 
@@ -492,6 +493,7 @@ class PdfParser(BaseParser):
         renderer: Callable[[int], _PageRender],
         *,
         correct_direction: bool = True,
+        page_segmentation: int = 3,
     ) -> _PageOcrResult:
         tesseract = (
             self._tesseract_lookup()
@@ -516,7 +518,7 @@ class PdfParser(BaseParser):
         else:
             try:
                 completed = subprocess.run(
-                    [tesseract, "stdin", "stdout", "-l", options.language, "--psm", "6", "tsv"],
+                    [tesseract, "stdin", "stdout", "-l", options.language, "--psm", str(page_segmentation), "tsv"],
                     input=render.png,
                     capture_output=True,
                     timeout=options.timeout_seconds,
@@ -543,13 +545,24 @@ class PdfParser(BaseParser):
         )
         result = _PageOcrResult(page=page_number, lines=lines)
         if correct_direction:
+            # Automatic page layout avoids merging columns in wide documents.
+            # Sparse single blocks still get a conservative fallback. All extra
+            # layout/direction work shares one bounded budget; no model calls.
+            deadline = time.monotonic() + min(options.timeout_seconds, 30.0)
+            if confidence(result.lines) < 0.65 and self._tesseract_runner is None:
+                fallback = self._ocr_page(
+                    page_number, replace(options, timeout_seconds=max(1.0, (deadline - time.monotonic()) / 4)),
+                    lambda _: render, correct_direction=False, page_segmentation=6,
+                )
+                if not fallback.error and confidence(fallback.lines) > confidence(result.lines) + 0.12:
+                    result = fallback
             result, selected, angle = correct_orientation(
                 render, result,
                 lambda candidate, remaining: self._ocr_page(
                     page_number, replace(options, timeout_seconds=remaining),
                     lambda _: candidate, correct_direction=False,
                 ),
-                budget_seconds=min(options.timeout_seconds, 30.0),
+                budget_seconds=max(0.0, deadline - time.monotonic()),
             )
             self._selected_render = (page_number, selected, angle, render)
         return result

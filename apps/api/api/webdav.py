@@ -74,6 +74,7 @@ async def stop_scan(source_id: int, db: AsyncSession = Depends(get_db)):
 
 
 DEFAULT_EXTENSIONS = [
+    ".png", ".jpg", ".jpeg", ".webp",
     ".pdf",
     ".doc",
     ".docx",

@@ -1,5 +1,6 @@
 # 藏知关键技术决策
 
+- [ADR-040：独立图片上传与有界 OCR 方向纠正](ADR-040-image-upload-ocr.md)
 - [ADR-039：Office 容器的上传 MIME 兼容](ADR-039-office-upload-mime.md)
 
 - [ADR-038：快速问答的计算上下文与有界纠错](ADR-038-quick-answer-measure-context.md)

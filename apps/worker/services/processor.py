@@ -153,6 +153,8 @@ TERMINAL_PARSE_FAILURE_REASONS = frozenset({
     "wps_conversion_timeout", "wps_conversion_error",
     "spreadsheet_limit_exceeded", "word_empty_text", "word_ocr_disabled",
     "word_ocr_empty", "word_ocr_failed", "word_preview_unavailable",
+    "image_format_mismatch", "image_limit_exceeded", "image_multiframe",
+    "image_invalid", "image_ocr_disabled", "image_ocr_empty",
 })
 
 def _sanitize_structured_content(

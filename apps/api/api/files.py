@@ -23,6 +23,10 @@ router = APIRouter(prefix="/files", tags=["files"])
 logger = logging.getLogger(__name__)
 
 _MIME_BY_EXTENSION = {
+    ".png": {"image/png"},
+    ".jpg": {"image/jpeg"},
+    ".jpeg": {"image/jpeg"},
+    ".webp": {"image/webp"},
     ".wps": set(WPS_MIMES) | {
         "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -125,7 +129,7 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
         )
         raise HTTPException(
             status_code=415,
-            detail="仅支持 PDF、Word、WPS 文字、Excel、Markdown 和 TXT 文件",
+            detail="仅支持 PDF、Word、WPS 文字、Excel、Markdown、TXT 和 PNG/JPEG/WebP 图片",
         )
     normalized_mime = (content_type or "").split(";", 1)[0].strip().lower()
     normalized_mime = normalized_mime or "application/octet-stream"
@@ -147,6 +151,8 @@ def validate_file_type(filename: str, content_type: str | None) -> str:
             status_code=415,
             detail="文件扩展名与内容类型不匹配",
         )
+    if extension in {".png", ".jpg", ".jpeg", ".webp"}:
+        return next(iter(allowed_mimes))
     return normalized_mime
 
 

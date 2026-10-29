@@ -17,7 +17,7 @@ from .chunking_candidate import (
 
 POLICY_VERSION = "ai-boundaries:adaptive-v2"
 DATASETS = {"xls", "xlsx", "database_table"}
-TEXT_FORMATS = {"pdf", "doc", "docx", "wps", "markdown", "md", "txt", "html", "note"}
+TEXT_FORMATS = {"pdf", "doc", "docx", "wps", "image", "markdown", "md", "txt", "html", "note"}
 
 
 def evaluate_windows(blocks: list[Block], *, hard_max_chars=CHILD_HARD_MAX_CHARS) -> list[dict]:

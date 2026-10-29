@@ -27,7 +27,7 @@ def model(calls):
     return SimpleNamespace(generate_json=generate)
 
 
-@pytest.mark.parametrize("kind", ["pdf", "doc", "docx", "wps", "markdown", "txt", "html", "note"])
+@pytest.mark.parametrize("kind", ["pdf", "doc", "docx", "wps", "image", "markdown", "txt", "html", "note"])
 def test_all_text_formats_evaluate_without_mutating_source(kind):
     source = fragmented(kind)
     before = copy.deepcopy(source)

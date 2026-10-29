@@ -178,6 +178,11 @@ DOC 转换为 DOCX 后复用相同逻辑。此位置不是 PDF 页码或 Word �
 
 ### 5.1.1 扫描 PDF 的文字兜底
 
+独立 PNG/JPEG/静态 WebP 也复用此 OCR 调度：解码/EXIF 校正后以无损像素提供
+单页渲染，内存 PDF 仅作页面描述，不保存为事实源。结构类型 `image`，坐标为校正后
+图像左下角像素坐标。自动版面分区及有界方向探索沿用同一质量隔离/外部预算；
+文字为空或低质时失败并保留旧结果。详见 [图片 OCR](IMAGE_OCR.md) 与 ADR-040。
+
 图片型 Word 入库也复用这一通道：DOC/DOCX 原生解析无正文、且正文关系中包含内嵌
 图片时，Worker 先生成或复用当前版本的 PDF 预览，再对这份预览运行 PDF 解析器。
 原 Word 保留，`word_ocr.coordinate_source=preview_pdf` 与 `preview_blob_id` 说明
@@ -196,7 +201,8 @@ PDF 解析默认走 `pypdf` 的可复制文本通道；只有当一页去除空�
 数低于 `PDF_OCR_MIN_NATIVE_CHARS`、且该页资源里至少有一个 `/XObject` 图像
 时，才被视作扫描候选页。Worker 容器安装 `pypdfium2` 与 `tesseract-ocr`
 （含 `chi_sim`、`eng` 训练数据），按 `PDF_OCR_DPI` 渲染候选页为 PNG，
-通过 `tesseract stdin stdout -l <lang> --psm 6 tsv` 拿到词级结果，再按
+通过 `tesseract stdin stdout -l <lang> --psm 3 tsv` 自动分区拿到词级结果，
+低置信度时在额外预算内尝试 `--psm 6` 单文本块，再按
 `block_num/par_num/line_num` 聚合成行级段落。词级坐标转换为 PDF 点坐标
 （Y 轴向上），作为 `extra.bbox` 保留在切片元数据里。
 

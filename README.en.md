@@ -190,6 +190,10 @@ draft, not an answer-quality evaluation.
 - Upload PDF, DOC, DOCX, compatible WPS Writer (`.wps`), XLSX, XLS, Markdown, and TXT files, and download the
   preserved originals.
   See [WPS compatibility and limitations](docs/WPS_COMPATIBILITY.md); legacy proprietary WPS, `.et`, and `.dps` are not guaranteed.
+- Upload PNG, JPEG and static WebP images for text OCR using the existing quality checks,
+  summaries, classification and indexing pipeline. Original image previews are preserved.
+  EXIF correction and bounded rotation trials are supported; this is not visual scene
+  understanding. See [image OCR limits and usage](docs/IMAGE_OCR.md).
 - Save public web pages as HTML snapshots with extracted title, author, date,
   and main content.
 - Connect read-only WebDAV directories through the same parsing,

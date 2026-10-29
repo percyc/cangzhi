@@ -36,7 +36,7 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   { id: 'documents', title: '知识库与文档预览', description: '浏览资料；打开详情核对原文、解析版与在线切片', href: '/documents', group: '使用知识', keywords: ['知识库', '文件预览', '原文', '文档', '解析版', '切片预览', '在线切片', '候选对比', '重新解析', '重新处理', '字段画像', '数据集', '查看文件'] },
   { id: 'search', title: '搜资料', description: '用关键词和范围查找资料，核对命中原文', href: '/search', group: '使用知识', keywords: ['搜资料', '搜索资料', '查找资料', '全文搜索', '关键词', '检索', '搜索文档'] },
   { id: 'ask', title: '问知识', description: '快速问答或深度分析，查看引用和数据集计算', href: '/ask', group: '使用知识', keywords: ['问知识', '提问', '问答', '对话', '聊天', '深度分析', '快速问答', '数据集统计', '历史问答', '引用'] },
-  { id: 'upload-file', title: '上传文件', description: '添加 PDF、Word、WPS、Excel、Markdown 或文本文件', href: '/files/upload', group: '添加资料', keywords: ['上传', '上传文件', '添加文件', '导入文件', 'pdf', 'docx', 'wps', 'excel', 'xlsx'] },
+  { id: 'upload-file', title: '上传文件', description: '添加 PDF、Word、WPS、Excel、Markdown、文本或 PNG/JPEG/WebP 图片', href: '/files/upload', group: '添加资料', keywords: ['上传', '上传文件', '添加文件', '导入文件', 'pdf', 'docx', 'wps', 'excel', 'xlsx', '图片', 'ocr', 'png', 'jpeg', 'webp'] },
   { id: 'new-note', title: '新建随手记', description: '记录 Markdown 笔记，保存原文后再整理', href: '/notes/new', group: '添加资料', keywords: ['笔记', '随手记', '记笔记', '新建笔记', 'markdown', '记录'] },
   { id: 'new-link', title: '收藏网页', description: '保存公开网页的正文和快照', href: '/links/new', group: '添加资料', keywords: ['网页', '链接', '收藏', '网址', '抓取', '文章'] },
   { id: 'inbox', title: '收件箱', description: '查看失败、待整理与需要关注的资料', href: '/inbox', group: '维护资料', keywords: ['收件箱', '待整理', '待治理', '解析失败', '处理失败', '重试失败', '入库状态'] },
