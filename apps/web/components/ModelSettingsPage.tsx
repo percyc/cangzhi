@@ -1252,7 +1252,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
             </h2>
             <p className="mt-1 text-sm text-slate-500">
               保留 tesseract 本地识别作为第一通道；只有本地识别失败、字符数过少
-              或平均置信度低于阈值时，才把页面渲染成 PNG 发送给外部视觉模型。
+              或平均置信度低于阈值，以及检测到局部低质量、密集小字或表格结构风险时，才按外发页数预算发送给外部视觉模型。普通清晰页面不增加调用；模型返回成功也不保证全文完整。
             </p>
           </header>
 
@@ -1419,7 +1419,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
                 <Field
                   id="ocr-confidence-threshold"
                   label="本地置信度触发阈值（0–1000）"
-                  help="tesseract 平均置信度低于此值时再调用外部模型。设为 0 即关闭该触发条件。"
+                  help="整页平均置信度触发阈值。设为 0 仅关闭此条件；局部质量与版式风险仍可触发，外发总量始终受页数上限控制。"
                   value={String(ocrConfidenceThreshold)}
                   onChange={(value) => { setOcrConfidenceThreshold(Math.max(0, Math.min(1000, Number(value) || 0))); invalidateOcrTest(); }}
                   type="number"

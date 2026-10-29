@@ -137,6 +137,11 @@ def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
     }
     if "rotation_corrected_pages" in extraction:
         summary["rotation_corrected_pages"] = _as_list(extraction["rotation_corrected_pages"])
+    for key in ("review_pages", "refined_pages", "regional_pages"):
+        if key in extraction:
+            summary[key] = _as_list(extraction[key])
+    if isinstance(extraction.get("review_reasons"), dict):
+        summary["review_reasons"] = {str(key): _as_list(value) for key, value in extraction["review_reasons"].items()}
     if "low_quality_pages" in extraction:
         summary["low_quality_pages"] = _as_list(extraction["low_quality_pages"])
     if "quarantined_pages" in extraction:

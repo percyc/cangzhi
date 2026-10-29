@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -14,10 +15,11 @@ from typing import Any
 from ..ocr.base import ExternalOcrError, ExternalOcrProvider
 from .base import BaseParser, Block, ParserResult, StructuredContent
 from .ocr_orientation import confidence, correct_orientation, restore_boxes
+from .ocr_quality import direction_probe, line_risks, prefer_candidate, regions, restore_region, rotate_render, ruled_grid
 
 logger = logging.getLogger(__name__)
 
-PDF_OCR_VERSION = "pdf-hybrid-v5-layout-direction"
+PDF_OCR_VERSION = "pdf-hybrid-v6-local-quality"
 PDF_OCR_ENGINE = "tesseract"
 PDF_OCR_EXTERNAL_ENGINE = "external-vision"
 
@@ -177,6 +179,9 @@ class PdfParser(BaseParser):
         external_skipped_pages: list[int] = []
         external_trigger_reasons: dict[str, list[int]] = {}
         external_provider_summary: dict[str, Any] = {}
+        review_reasons: dict[str, list[int]] = {}
+        refined_pages: list[int] = []
+        regional_pages: list[int] = []
 
         def _record_skip(reason: str, page_number: int) -> None:
             bucket = ocr_skipped_reasons.setdefault(reason, [])
@@ -264,6 +269,15 @@ class PdfParser(BaseParser):
                 options,
                 ocr_renderer,
             )
+            local_result, risks, refined, regional = self._refine_local(
+                content, page_number, options, ocr_renderer, local_result,
+            )
+            if refined:
+                refined_pages.append(page_number)
+            if regional:
+                regional_pages.append(page_number)
+            for risk in risks:
+                review_reasons.setdefault(risk, []).append(page_number)
             ocr_processed += 1
             local_lines: list[dict[str, Any]] = list(local_result.lines)
             local_chars = _sum_line_chars(local_lines)
@@ -271,6 +285,7 @@ class PdfParser(BaseParser):
             local_failed = bool(local_result.error) or not local_lines
             local_sufficient = (
                 not local_failed
+                and not risks
                 and local_chars >= options.external_min_chars
                 and (
                     local_avg_confidence is None
@@ -338,6 +353,8 @@ class PdfParser(BaseParser):
                 min_chars=options.external_min_chars,
                 confidence_threshold=options.external_confidence_threshold,
             )
+            if risks and not local_failed:
+                trigger = "local_quality_risk"
             _record_trigger(trigger, page_number)
             external_attempted_total += 1
             external_attempted_pages.append(page_number)
@@ -418,6 +435,10 @@ class PdfParser(BaseParser):
         blocks = [b for b in blocks if not (b.page in quarantined and b.extra.get("source") == "ocr")]
         ocr_completed_pages = [page for page in ocr_completed_pages if page not in quarantined]
         pdf_extraction: dict[str, Any] = {
+            "review_pages": sorted({page for pages in review_reasons.values() for page in pages}),
+            "review_reasons": review_reasons,
+            "refined_pages": refined_pages,
+            "regional_pages": regional_pages,
             "quality_policy": "page-quarantine-v1",
             "low_quality_pages": low_quality_pages,
             "quarantined_pages": low_quality_pages,
@@ -457,6 +478,9 @@ class PdfParser(BaseParser):
             pdf_extraction["ocr_status"] = "completed"
         if low_quality_pages:
             pdf_extraction["ocr_status"] = "partial" if any(b.text.strip() for b in blocks) else "needs_review"
+        elif review_reasons and ocr_completed_pages:
+            # Model self-confidence cannot certify completeness or table order.
+            pdf_extraction["ocr_status"] = "partial"
 
         metadata: dict[str, Any] = {
             "page_count": page_count,
@@ -560,12 +584,87 @@ class PdfParser(BaseParser):
                 render, result,
                 lambda candidate, remaining: self._ocr_page(
                     page_number, replace(options, timeout_seconds=remaining),
-                    lambda _: candidate, correct_direction=False,
+                    lambda _: direction_probe(candidate), correct_direction=False,
                 ),
                 budget_seconds=max(0.0, deadline - time.monotonic()),
             )
+            if angle and max(selected.width_px, selected.height_px) > 1600:
+                remaining = deadline - time.monotonic()
+                if remaining >= 1:
+                    full = self._ocr_page(page_number, replace(options, timeout_seconds=remaining),
+                        lambda _: selected, correct_direction=False)
+                    full = replace(full, lines=restore_boxes(full.lines, angle, render.page_width_pt, render.page_height_pt))
+                    if not full.error and prefer_candidate(result.lines, full.lines):
+                        result = full
             self._selected_render = (page_number, selected, angle, render)
         return result
+
+    def _refine_local(self, content, page_number, options, renderer, result):
+        """Selective high-resolution/region retry with a single extra deadline.
+
+        Clean text pages take no extra OCR. Original coordinates and one-call
+        external page budget remain unchanged. Failed trials never replace text.
+        """
+        try:
+            selected = getattr(self, "_selected_render", None)
+            original = selected[3] if selected and selected[0] == page_number else renderer(page_number)
+            angle = selected[2] if selected and selected[0] == page_number else 0
+            oriented = selected[1] if selected and selected[0] == page_number else original
+            risks = line_risks(result.lines)
+            grid = ruled_grid(oriented.png)
+            if grid:
+                risks.append("table_layout")
+            if not risks:
+                return result, [], False, False
+            deadline = time.monotonic() + min(options.timeout_seconds * 2, 60.0)
+            refined = regional = False
+            # Never enlarge a standalone image or discard a higher configured DPI.
+            if options.dpi < 300 and self._renderer_factory is None:
+                high_renderer = self._build_ocr_renderer(content, replace(options, dpi=300))
+                if high_renderer is not None:
+                    high = high_renderer(page_number)
+                    if high.width_px > original.width_px:
+                        original = high
+                        oriented = rotate_render(high, angle)
+                        remaining = deadline - time.monotonic()
+                        if remaining >= 1:
+                            retry = self._ocr_page(page_number, replace(options, timeout_seconds=remaining/2),
+                                lambda _: oriented, correct_direction=False, page_segmentation=6)
+                            if angle:
+                                retry = replace(retry, lines=restore_boxes(retry.lines, angle, original.page_width_pt, original.page_height_pt))
+                            if not retry.error and prefer_candidate(result.lines, retry.lines):
+                                result, refined = retry, True
+            self._selected_render = (page_number, oriented, angle, original)
+            if grid or line_risks(result.lines):
+                candidates = []
+                complete = True
+                for index, (crop, offset, core) in enumerate(regions(oriented)):
+                    remaining = deadline - time.monotonic()
+                    if remaining < 1:
+                        complete = False
+                        break
+                    trial = self._ocr_page(page_number, replace(options, timeout_seconds=remaining/(4-index)),
+                        lambda _: crop, correct_direction=False, page_segmentation=6 if grid else 3)
+                    if trial.error:
+                        complete = False
+                        break
+                    bottom_offset = oriented.height_px - offset[1] - crop.height_px
+                    candidates.extend(restore_region(trial.lines, oriented, (offset[0], bottom_offset), core))
+                candidates.sort(key=lambda line: (-line["bbox"][3], line["bbox"][0]))
+                if angle:
+                    candidates = restore_boxes(candidates, angle, original.page_width_pt, original.page_height_pt)
+                for index, line in enumerate(candidates):
+                    line["paragraph_index"] = index
+                if complete and prefer_candidate(result.lines, candidates):
+                    result, regional = replace(result, lines=candidates, error=None), True
+            risks = line_risks(result.lines)
+            if grid:
+                risks.append("table_layout")
+            return result, sorted(set(risks)), refined, regional
+        except Exception:
+            # Bounded image analysis is optional; its failure is visible, never
+            # converts unknown quality into a claim of complete recognition.
+            return result, ["quality_check_unavailable"], False, False
 
     def _run_external_ocr(
         self,
@@ -782,7 +881,6 @@ def _default_ocr_renderer(
         return None
 
     def _render(page_number: int) -> _PageRender:
-        scale = options.dpi / 72.0
         pdf_page = document[page_number - 1]
         try:
             page_width_pt = float(pdf_page.get_width())
@@ -790,6 +888,10 @@ def _default_ocr_renderer(
         except Exception:
             page_width_pt = 0.0
             page_height_pt = 0.0
+        scale = options.dpi / 72.0
+        if page_width_pt > 0 and page_height_pt > 0:
+            scale = min(scale, math.sqrt(12_000_000/(page_width_pt*page_height_pt)),
+                        6000/max(page_width_pt, page_height_pt))
         bitmap = pdf_page.render(scale=scale)
         try:
             pil_image = bitmap.to_pil()
@@ -871,6 +973,7 @@ def _aggregate_tsv_lines(
                 "bottom": top + height,
                 "words": [],
                 "confidences": [],
+                "word_heights": [],
             },
         )
         entry["left"] = min(entry["left"], left)
@@ -880,6 +983,8 @@ def _aggregate_tsv_lines(
         entry["words"].append(word)
         if conf >= 0:
             entry["confidences"].append(conf / 100.0)
+        if height > 0:
+            entry["word_heights"].append(height)
 
     ordered = sorted(
         grouped.items(),
@@ -904,6 +1009,8 @@ def _aggregate_tsv_lines(
             {
                 "text": text_line,
                 "paragraph_index": index,
+                "word_height_px": sorted(entry["word_heights"])[len(entry["word_heights"])//2] if entry["word_heights"] else 0,
+                "low_word_ratio": sum(value < .5 for value in entry["confidences"]) / max(1, len(entry["confidences"])),
                 "bbox": bbox,
                 "confidence": (
                     sum(entry["confidences"]) / len(entry["confidences"])
@@ -1231,6 +1338,7 @@ def _record_ocr_outcome(
             "bbox": bbox,
             "confidence": confidence,
             "rotation_correction": line.get("rotation_correction", 0),
+            "region_ocr": bool(line.get("region_ocr")),
         }
         if provider:
             extra["provider"] = provider

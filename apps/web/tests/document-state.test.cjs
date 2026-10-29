@@ -55,7 +55,7 @@ function harness(name, props, fetcher) {
     confirm: () => true,
   };
   const filename = path.join(__dirname, '../app/documents/[id]/page.tsx');
-  const source = fs.readFileSync(filename, 'utf8') + '\nexport { DocumentDetail, DatasetRows, DatasetWorkspace, RetainedPanel };';
+  const source = fs.readFileSync(filename, 'utf8') + '\nexport { DocumentDetail, DatasetRows, DatasetWorkspace, RetainedPanel, PdfExtractionSummary };';
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText;
   const evaluatedModule = { exports: {} };
   const mocks = {
@@ -344,6 +344,17 @@ test('partial OCR clearly distinguishes indexed content from quarantined and fai
   assert.match(text(page.tree), /识别失败的 PDF 物理页：81/);
   assert.equal(find(page.tree, 'button', '重新处理文档').props.disabled, false);
   page.unmount();
+});
+
+test('OCR quality warnings distinguish table risks and processing success from completeness', () => {
+  const page = harness('PdfExtractionSummary', {extraction:{ocr_status:'partial', page_count:1,
+    native_text_pages:0,ocr_completed_pages:1,ocr_candidate_pages:1,ocr_failed_pages:[],ocr_skipped_pages:[],
+    review_pages:[1],review_reasons:{table_layout:[1],local_low_quality:[1]},refined_pages:[1],regional_pages:[],
+    external_trigger_reasons:{local_quality_risk:[1]}}}, () => { throw new Error('must not fetch'); });
+  assert.match(text(page.tree), /处理完成不代表所有文字均已识别/);
+  assert.match(text(page.tree), /行列与合并关系未经验证/);
+  assert.match(text(page.tree), /部分文字置信度偏低/);
+  assert.match(text(page.tree), /高清补识别 1 页/);
 });
 
 test('failed next-page load hides old rows and offers same-page retry', async () => {

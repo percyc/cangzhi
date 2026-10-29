@@ -107,6 +107,10 @@ type PipelineStage = {
     ocr_failed_pages: number[];
     ocr_skipped_pages: number[];
     rotation_corrected_pages?: number[];
+    review_pages?: number[];
+    review_reasons?: Record<string, number[]>;
+    refined_pages?: number[];
+    regional_pages?: number[];
     low_quality_pages?: number[];
     quarantined_pages?: number[];
     external_provider?: { provider: string; model: string; version?: string } | null;
@@ -695,6 +699,9 @@ function DocumentDetail({ documentId }: { documentId: string }) {
           )}
           {Boolean(extraction?.ocr_skipped_pages.length) && (
             <p className="mt-1">跳过识别的 PDF 物理页：{extraction!.ocr_skipped_pages.slice(0, 30).join('、')}{extraction!.ocr_skipped_pages.length > 30 ? '等' : ''}。</p>
+          )}
+          {Boolean(extraction?.review_pages?.length) && (
+            <p className="mt-1">待核验页：{extraction!.review_pages!.slice(0, 30).join('、')}。局部小字、识别噪声或表格关系仍可能遗漏；展开处理状态查看具体原因。</p>
           )}
         </section>
       )}
@@ -1465,7 +1472,7 @@ function PdfExtractionSummary({
   const native = extraction.native_text_pages;
   const candidates = extraction.ocr_candidate_pages;
   const statusLabel: Record<string, string> = {
-    completed: 'OCR 已完成',
+    completed: 'OCR 流程完成（建议核对原文）',
     partial: 'OCR 部分完成',
     failed: 'OCR 全部失败',
     skipped: '已跳过 OCR',
@@ -1487,7 +1494,7 @@ function PdfExtractionSummary({
   return (
     <div className="mt-4 rounded-lg border border-slate-200 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-sm font-medium text-slate-800">文字提取与 OCR（PDF / Word 预览）</h4>
+        <h4 className="text-sm font-medium text-slate-800">文字提取与 OCR（PDF / Word / 图片）</h4>
         <span className="text-xs text-slate-500">
           {statusText}
           {extraction.engine ? ` · ${extraction.engine}` : ''}
@@ -1519,6 +1526,17 @@ function PdfExtractionSummary({
       )}
       {Boolean(extraction.rotation_corrected_pages?.length) && (
         <p className="mt-3 text-xs text-slate-600">已自动纠正 {extraction.rotation_corrected_pages!.length} 页文字方向；原文件未修改，引用坐标仍对应原页面。</p>
+      )}
+      {Boolean(extraction.review_pages?.length) && (
+        <div className="mt-3 rounded-lg bg-amber-50 p-3 text-xs leading-6 text-amber-900">
+          <p>识别完整性待核验：第 {extraction.review_pages!.slice(0, 30).join('、')} 页。处理完成不代表所有文字均已识别，请对照原图检查。</p>
+          {extraction.review_reasons?.table_layout?.length ? <p>检测到表格线：当前是带位置的文字提取，行列与合并关系未经验证，不能直接作为精确统计的数据集。</p> : null}
+          {extraction.review_reasons?.local_low_quality?.length ? <p>部分文字置信度偏低；整页平均值不能代表局部准确率。</p> : null}
+          {extraction.review_reasons?.small_text?.length ? <p>存在密集小字，可能遗漏内容，建议使用更清晰原件或检查外部 OCR。</p> : null}
+        </div>
+      )}
+      {Boolean(extraction.refined_pages?.length || extraction.regional_pages?.length) && (
+        <p className="mt-3 text-xs text-slate-600">已按需采用高清补识别 {extraction.refined_pages?.length ?? 0} 页、区域补识别 {extraction.regional_pages?.length ?? 0} 页；未修改原件。</p>
       )}
       {Boolean(extraction.low_quality_pages?.length) && (
         <p className="mt-3 text-xs text-amber-800">识别质量不足，请核验 PDF 物理页 {extraction.low_quality_pages!.slice(0, 30).join('、')}{extraction.low_quality_pages!.length > 30 ? '等' : ''}。{extraction.quarantined_pages?.length ? '这些页的低质量 OCR 文字已隔离，不进入摘要或检索。' : '请勿将处理完成视为全文识别准确。'}</p>
@@ -1561,6 +1579,7 @@ function triggerLabel(reason: string): string {
     no_text: '本地未识别到文字',
     low_chars: '本地识别字符过少',
     low_confidence: '本地置信度不足',
+    local_quality_risk: '局部文字或表格版式需补识别',
     max_external_pages_reached: '已达单文档外发页数上限',
     manual: '手动触发',
   };
