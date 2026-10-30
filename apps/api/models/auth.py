@@ -136,7 +136,7 @@ class AIRuntimeConfig(BaseModel):
         Boolean, nullable=False, server_default=text("false")
     )
     ocr_timeout_seconds = Column(
-        Integer, nullable=False, server_default=text("30")
+        Integer, nullable=False, server_default=text("120")
     )
     ocr_confidence_threshold = Column(
         Integer, nullable=False, server_default=text("600")

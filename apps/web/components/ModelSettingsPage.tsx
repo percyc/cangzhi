@@ -85,7 +85,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
   const [ocrModel, setOcrModel] = useState('');
   const [ocrApiKey, setOcrApiKey] = useState('');
   const [clearOcrApiKey, setClearOcrApiKey] = useState(false);
-  const [ocrTimeoutSeconds, setOcrTimeoutSeconds] = useState(30);
+  const [ocrTimeoutSeconds, setOcrTimeoutSeconds] = useState(120);
   const [ocrConfidenceThreshold, setOcrConfidenceThreshold] = useState(600);
   const [ocrMinChars, setOcrMinChars] = useState(8);
   const [ocrMaxExternalPages, setOcrMaxExternalPages] = useState(20);
@@ -120,7 +120,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
           data.ocr_base_url ?? (data.ocr_provider === 'disabled' ? data.openai_base_url ?? 'https://api.openai.com/v1' : ''),
         );
         setOcrModel(data.ocr_model ?? '');
-        setOcrTimeoutSeconds(data.ocr_timeout_seconds || 30);
+        setOcrTimeoutSeconds(data.ocr_timeout_seconds || 120);
         setOcrConfidenceThreshold(data.ocr_confidence_threshold ?? 600);
         setOcrMinChars(data.ocr_min_chars ?? 8);
         setOcrMaxExternalPages(data.ocr_max_external_pages ?? 20);
@@ -271,7 +271,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
     ocrProvider === 'openai' &&
     ocrModel.trim() !== (config?.ocr_model ?? '');
   const ocrParamsChanged =
-    ocrTimeoutSeconds !== (config?.ocr_timeout_seconds || 30) ||
+    ocrTimeoutSeconds !== (config?.ocr_timeout_seconds || 120) ||
     ocrConfidenceThreshold !== (config?.ocr_confidence_threshold ?? 600) ||
     ocrMinChars !== (config?.ocr_min_chars ?? 8) ||
     ocrMaxExternalPages !== (config?.ocr_max_external_pages ?? 20) ||
@@ -602,7 +602,7 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
       setOcrProvider(next.ocr_provider);
       setOcrBaseUrl(next.ocr_base_url ?? (next.ocr_provider === 'disabled' ? next.openai_base_url ?? 'https://api.openai.com/v1' : ''));
       setOcrModel(next.ocr_model ?? '');
-      setOcrTimeoutSeconds(next.ocr_timeout_seconds || 30);
+      setOcrTimeoutSeconds(next.ocr_timeout_seconds || 120);
       setOcrConfidenceThreshold(next.ocr_confidence_threshold ?? 600);
       setOcrMinChars(next.ocr_min_chars ?? 8);
       setOcrMaxExternalPages(next.ocr_max_external_pages ?? 20);
@@ -1412,8 +1412,9 @@ export default function ModelSettingsPage({ guided = false }: { guided?: boolean
                 <Field
                   id="ocr-timeout"
                   label="外部 OCR 请求超时（秒）"
+                  help="新配置默认 120 秒，是最长等待时间，并非固定耗时。复杂扫描页通常比连接测试耗时更长；已有设置不会自动覆盖。"
                   value={String(ocrTimeoutSeconds)}
-                  onChange={(value) => { setOcrTimeoutSeconds(Number(value) || 30); invalidateOcrTest(); }}
+                  onChange={(value) => { setOcrTimeoutSeconds(Number(value) || 120); invalidateOcrTest(); }}
                   type="number"
                 />
                 <Field

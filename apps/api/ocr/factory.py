@@ -59,7 +59,7 @@ def _build_openai_provider(
         return None
     if not api_key:
         return None
-    timeout = float(row.ocr_timeout_seconds or 30)
+    timeout = float(row.ocr_timeout_seconds or 120)
     return OpenAICompatibleOcrProvider(
         base_url=row.ocr_base_url,
         api_key=api_key,

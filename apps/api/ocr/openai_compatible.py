@@ -129,7 +129,7 @@ class OpenAICompatibleOcrProvider(ExternalOcrProvider):
         try:
             self._timeout = max(1.0, min(600.0, float(timeout)))
         except (TypeError, ValueError):
-            self._timeout = 30.0
+            self._timeout = 120.0
 
     def is_configured(self) -> bool:
         return bool(self._base_url) and bool(self._api_key) and bool(self._model)

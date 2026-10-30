@@ -1724,7 +1724,7 @@ async def test_ocr_settings(
         return {"ok": False, "message": "主密钥不匹配或密文已损坏，请联系管理员"}
     if not api_key:
         return {"ok": False, "message": "尚未保存外部 OCR 密钥"}
-    timeout = float(row.ocr_timeout_seconds or 30)
+    timeout = float(row.ocr_timeout_seconds or 120)
     return await asyncio.to_thread(
         probe_ocr,
         base_url=row.ocr_base_url,
@@ -1772,7 +1772,7 @@ async def list_ocr_models(
         )
     model_ids = await _request_model_ids(
         url=f"{row.ocr_base_url.rstrip('/')}/models",
-        timeout=float(row.ocr_timeout_seconds or 30),
+        timeout=float(row.ocr_timeout_seconds or 120),
         list_key="data",
         headers={
             "Authorization": f"Bearer {api_key}",

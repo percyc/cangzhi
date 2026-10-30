@@ -145,6 +145,16 @@ test('optional steps do not save, test, disable or build any existing channel', 
   assert.deepEqual(page.calls, []);
 });
 
+test('OCR defaults to 120 seconds but preserves explicitly saved timeouts', async () => {
+  for (const [saved, expected] of [[undefined, '120'], [30, '30'], [120, '120'], [240, '240']]) {
+    const page = await renderSettings({ ocr_provider: 'openai', ocr_timeout_seconds: saved });
+    await page.next(); await page.next();
+    assert.equal(page.field('ocr-timeout').props.value, expected);
+    assert.match(page.field('ocr-timeout').props.help, /最长等待/);
+    assert.deepEqual(page.calls, []);
+  }
+});
+
 test('unsaved step offers explicit continue and retains draft without writing', async () => {
   const page = await renderSettings();
   await page.change('openai-model', 'draft-chat');

@@ -330,6 +330,23 @@ def test_factory_returns_none_when_cipher_missing():
     assert build_external_ocr_provider(row) is None
 
 
+@pytest.mark.parametrize("saved,expected", [(None, 120), (30, 30), (120, 120), (240, 240)])
+def test_external_ocr_default_preserves_saved_timeout(saved, expected):
+    from types import SimpleNamespace
+    row = SimpleNamespace(
+        ocr_provider="openai", ocr_base_url="https://ocr.example.com/v1",
+        ocr_model="vision-test", has_ocr_api_key=True,
+        ocr_api_key_cipher=encrypt_secret("synthetic-test-key"),
+        ocr_timeout_seconds=saved,
+    )
+    assert build_external_ocr_provider(row)._timeout == expected
+
+
+def test_invalid_external_ocr_timeout_falls_back_to_new_default():
+    provider = OpenAICompatibleOcrProvider("https://ocr.example.com/v1", "test", "test", None)
+    assert provider._timeout == 120
+
+
 def test_factory_skips_unknown_provider():
     from types import SimpleNamespace
 

@@ -1632,7 +1632,7 @@ def test_ocr_config_defaults_are_disabled_and_visible(client):
     assert config["ocr_base_url"] is None
     assert config["ocr_model"] is None
     assert config["has_ocr_api_key"] is False
-    assert config["ocr_timeout_seconds"] == 30
+    assert config["ocr_timeout_seconds"] == 120
     assert config["ocr_confidence_threshold"] == 600
     assert config["ocr_min_chars"] == 8
     assert config["ocr_max_external_pages"] == 20
