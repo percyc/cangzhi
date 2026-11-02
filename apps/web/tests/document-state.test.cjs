@@ -357,6 +357,20 @@ test('OCR quality warnings distinguish table risks and processing success from c
   assert.match(text(page.tree), /高清补识别 1 页/);
 });
 
+test('OCR provenance distinguishes adoption, successful rejection and failed fallback', () => {
+  const page = harness('PdfExtractionSummary', {extraction:{ocr_status:'partial', page_count:3,
+    native_text_pages:0,ocr_completed_pages:3,ocr_candidate_pages:3,ocr_failed_pages:[],ocr_skipped_pages:[],
+    local_source_pages:[1,2],external_source_pages:[3],external_errors:{timeout:[1]},
+    external_completed_pages:2,external_selected_pages:1,external_provider:{model:'historical-model'},
+    selection_decisions:[{page:2,source:'local',reason:'external_coverage_uncertain'}]}},
+    () => { throw new Error('must not fetch'); });
+  assert.match(text(page.tree), /本地 Tesseract：第 1、2 页/);
+  assert.match(text(page.tree), /外部 historical-model：第 3 页/);
+  assert.match(text(page.tree), /请求超时/);
+  assert.match(text(page.tree), /有候选未被采用/);
+  assert.match(text(page.tree), /外部内容明显缩减/);
+});
+
 test('failed next-page load hides old rows and offers same-page retry', async () => {
   let fail = true;
   const page = harness('DatasetRows', { datasetId: 1, identity: '1:10:1:duckdb' }, async (url) => url.includes('offset=50') && fail ? response({}, false) : response(rowPage(1, url.includes('offset=50') ? 50 : 0, url.includes('offset=50') ? '第二页' : '第一页')));

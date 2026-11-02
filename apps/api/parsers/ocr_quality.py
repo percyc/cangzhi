@@ -12,6 +12,8 @@ from PIL import Image
 
 def line_risks(lines):
     reasons = []
+    if any(line.get("orientation_uncertain") for line in lines):
+        reasons.append("orientation_uncertain")
     known = [line["confidence"] for line in lines if line.get("confidence") is not None]
     if known and sum(value < .5 for value in known) >= max(2, len(known) * .1):
         reasons.append("local_low_quality")
@@ -120,3 +122,42 @@ def direction_probe(render, max_side=1600):
     output = BytesIO()
     image.save(output, "PNG")
     return replace(render, width_px=image.width, height_px=image.height, png=output.getvalue())
+
+
+def candidate_defect(lines):
+    """Conservative rejection signals, never a claim of factual accuracy."""
+    texts = [str(line.get("text", "")).strip() for line in lines]
+    text = "".join(texts)
+    if not text:
+        return "empty"
+    if sum(char == "\ufffd" or (ord(char) < 32 and not char.isspace()) for char in text) / len(text) > .02:
+        return "invalid_characters"
+    meaningful = [value for value in texts if len(value) >= 12]
+    if len(meaningful) >= 4 and len(set(meaningful)) / len(meaningful) < .5:
+        return "repetition"
+    return None
+
+
+def select_ocr_candidate(local, external, *, local_risk=False):
+    """Engine scores are not calibrated: use them only as individual vetoes.
+
+    Risk-triggered external recognition is preferred after basic guards. This
+    does not certify coverage, reading order or cell relationships.
+    """
+    external_conf = [line["confidence"] for line in external if line.get("confidence") is not None]
+    defect = candidate_defect(external)
+    if defect:
+        return local, "external_" + defect
+    if external_conf and sum(external_conf)/len(external_conf) < .5:
+        return local, "external_low_quality"
+    local_conf = [line["confidence"] for line in local if line.get("confidence") is not None]
+    local_bad = bool(candidate_defect(local)) or (local_conf and sum(local_conf)/len(local_conf) < .5)
+    if local_bad:
+        return external, "local_unusable"
+    old_chars = sum(len(line.get("text", "").strip()) for line in local)
+    new_chars = sum(len(line.get("text", "").strip()) for line in external)
+    if old_chars >= 80 and new_chars < max(12, old_chars * .15):
+        return local, "external_coverage_uncertain"
+    if local_risk:
+        return external, "risk_external_preferred"
+    return local, "local_retained"

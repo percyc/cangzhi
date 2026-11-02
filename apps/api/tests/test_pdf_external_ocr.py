@@ -123,7 +123,7 @@ def test_low_confidence_fallback_is_review_not_success():
 @pytest.mark.parametrize("local_conf,external_conf,expected", [
     (0.2, 0.9, "external"), (0.2, None, "external"),
     (0.9, 0.2, "local"), (None, 0.2, "local"),
-    (0.6, 0.9, "external"), (0.9, 0.6, "local"),
+    (0.6, 0.9, "local"), (0.9, 0.6, "local"),
 ])
 def test_result_selection_uses_quality_before_length(local_conf, external_conf, expected):
     local = [{"text": "long local noise " * 20, "confidence": local_conf}]

@@ -148,6 +148,29 @@ def _pdf_extraction_summary(version: DocumentVersion) -> dict | None:
         summary["quarantined_pages"] = _as_list(extraction["quarantined_pages"])
     if "external_selected_pages" in extraction:
         summary["external_selected_pages"] = len(_as_list(extraction["external_selected_pages"]))
+    # Historical results also retain actual per-block provenance. Never infer
+    # adoption from a configured model name or a successful external request.
+    blocks = _as_list(structured.get("blocks"))
+    for source in ("local", "external"):
+        summary[source + "_source_pages"] = sorted({block.get("page") for block in blocks
+            if isinstance(block, dict) and isinstance(block.get("page"), int)
+            and isinstance(block.get("extra"), dict) and block["extra"].get("ocr_source") == source})
+    errors = {}
+    known_errors = {"auth", "timeout", "network", "invalid", "config", "upstream", "upstream_error", "render_failed", "empty_response"}
+    for block in blocks:
+        extra = block.get("extra", {}) if isinstance(block, dict) else {}
+        if not isinstance(extra, dict):
+            continue
+        error = extra.get("external_status")
+        if isinstance(error, str) and error in known_errors and isinstance(block.get("page"), int):
+            errors.setdefault(error, set()).add(block["page"])
+    recorded_errors = extraction.get("external_errors")
+    for error, pages in (recorded_errors if isinstance(recorded_errors, dict) else {}).items():
+        if error in known_errors:
+            errors.setdefault(error, set()).update(page for page in _as_list(pages) if isinstance(page, int))
+    summary["external_errors"] = {key: sorted(pages) for key, pages in errors.items()}
+    summary["selection_decisions"] = [{key: decision.get(key) for key in ("page", "reason", "source")}
+        for decision in _as_list(extraction.get("selection_decisions"))[:1000] if isinstance(decision, dict)]
 
     # External OCR stage 2 fields. The keys are only attached
     # when the document was parsed after the new code shipped,

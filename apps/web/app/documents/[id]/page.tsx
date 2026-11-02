@@ -120,6 +120,10 @@ type PipelineStage = {
     external_failed_pages?: number[];
     external_skipped_pages?: number[];
     external_trigger_reasons?: Record<string, number[]>;
+    local_source_pages?: number[];
+    external_source_pages?: number[];
+    external_errors?: Record<string, number[]>;
+    selection_decisions?: {page: number; source: string; reason: string}[];
   };
 };
 
@@ -1518,6 +1522,17 @@ function PdfExtractionSummary({
           <dd className="mt-1 text-slate-700">{candidates}</dd>
         </div>
       </dl>
+      <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3 text-xs leading-6 text-slate-700">
+        <p className="font-medium">当前正文实际采用的 OCR</p>
+        {extraction.local_source_pages?.length ? <p>本地 Tesseract：第 {extraction.local_source_pages.slice(0, 30).join('、')} 页</p> : null}
+        {extraction.external_source_pages?.length ? <p>外部 {externalProvider?.model || 'OCR'}：第 {extraction.external_source_pages.slice(0, 30).join('、')} 页</p> : null}
+        {!extraction.local_source_pages?.length && !extraction.external_source_pages?.length ? <p>暂无可确认的 OCR 正文来源（可能无需 OCR、结果已隔离或旧记录缺少来源信息）。</p> : null}
+        {Object.entries(extraction.external_errors ?? {}).map(([reason, pages]) => <p key={reason} className="text-amber-800">外部 OCR {({timeout:'请求超时',auth:'鉴权失败',network:'网络失败',invalid:'返回格式异常',config:'配置不完整',upstream:'上游服务失败',upstream_error:'上游服务失败',render_failed:'页面渲染失败',empty_response:'返回为空'} as Record<string,string>)[reason] || '失败'}：第 {pages.slice(0, 30).join('、')} 页。请按上方实际来源核对正文；失败不代表已采用外部结果。</p>)}
+        {externalCompleted > (extraction.external_selected_pages ?? externalCompleted) ? <p className="text-amber-800">外部识别成功返回，但有候选未被采用；成功返回不代表正文已使用该模型。</p> : null}
+        {extraction.selection_decisions?.slice(0, 30).map(item => <p key={item.page}>第 {item.page} 页选择依据：{({risk_external_preferred:'本地存在风险，外部候选通过基础检查后优先采用',local_unusable:'本地无可用或可靠结果',external_empty:'外部结果为空',external_invalid_characters:'外部含异常字符',external_repetition:'外部结果明显重复',external_low_quality:'外部自报质量过低',external_coverage_uncertain:'外部内容明显缩减，覆盖待核验',local_retained:'保留本地结果'} as Record<string,string>)[item.reason] || '候选需核验'}。</p>)}
+        <p className="text-slate-500">页码及选择依据各最多展示前 30 项。</p>
+        <p className="text-slate-500">来源和模型来自本次解析记录，不随当前设置改变；通过基础检查不等于全文准确。</p>
+      </div>
       {(failedPages > 0 || skippedPages > 0) && (
         <p className="mt-3 text-xs text-slate-500">
           OCR 失败 {failedPages} 页 · 跳过 {skippedPages} 页。这些页的图片文字尚未入库，
@@ -1533,6 +1548,8 @@ function PdfExtractionSummary({
           {extraction.review_reasons?.table_layout?.length ? <p>检测到表格线：当前是带位置的文字提取，行列与合并关系未经验证，不能直接作为精确统计的数据集。</p> : null}
           {extraction.review_reasons?.local_low_quality?.length ? <p>部分文字置信度偏低；整页平均值不能代表局部准确率。</p> : null}
           {extraction.review_reasons?.small_text?.length ? <p>存在密集小字，可能遗漏内容，建议使用更清晰原件或检查外部 OCR。</p> : null}
+          {extraction.review_reasons?.direction_corrected?.length || extraction.review_reasons?.orientation_uncertain?.length ? <p>曾进行方向纠正或方向候选不确定，请核对阅读顺序；补识别均分提高不会清除该风险。</p> : null}
+          {extraction.review_reasons?.candidate_disagreement?.length ? <p>本地与外部候选未能确认一致，当前保留本地结果，需对照原件核验。</p> : null}
         </div>
       )}
       {Boolean(extraction.refined_pages?.length || extraction.regional_pages?.length) && (

@@ -2,6 +2,7 @@
 from dataclasses import replace
 from io import BytesIO
 import time
+import math
 
 from PIL import Image
 
@@ -46,9 +47,12 @@ def correct_orientation(render, initial, recognize, *, budget_seconds):
         return initial, render, 0
     deadline = time.monotonic() + budget_seconds
     best, best_render, best_angle = initial, render, 0
+    candidates = []
+    incomplete = False
     for index, angle in enumerate((90, 270, 180)):
         remaining = deadline - time.monotonic()
         if remaining < 1:
+            incomplete = True
             break
         rotated = image.rotate(angle, expand=True)
         output = BytesIO()
@@ -60,10 +64,24 @@ def correct_orientation(render, initial, recognize, *, budget_seconds):
         # One slow direction must not consume the entire trial budget. Leave a
         # fair share for the opposite direction and upside-down text as well.
         candidate = recognize(candidate_render, remaining / (3 - index))
+        incomplete = incomplete or bool(candidate.error)
         chars = sum(len(line.get("text", "").strip()) for line in candidate.lines)
         if (not candidate.error and chars >= 12 and confidence(candidate.lines) >= 0.55
-                and confidence(candidate.lines) >= confidence(best.lines) + 0.12):
-            best, best_render, best_angle = candidate, candidate_render, angle
+                and confidence(candidate.lines) >= confidence(initial.lines) + 0.12):
+            candidates.append((candidate, candidate_render, angle, chars))
+    # Rank all trials against the same baseline, not against the last winner.
+    # A short confidently recognised fragment must not defeat a fuller page.
+    if candidates:
+        most_chars = max(item[3] for item in candidates)
+        ranked = sorted(candidates, key=lambda item:
+            confidence(item[0].lines) * math.sqrt(item[3] / most_chars), reverse=True)
+        best, best_render, best_angle, _ = ranked[0]
+        score = lambda item: confidence(item[0].lines) * math.sqrt(item[3] / most_chars)
+        uncertain = incomplete or (len(ranked) > 1 and score(ranked[0])-score(ranked[1]) < .10)
+        if uncertain:
+            best = replace(best, lines=[{**line, "orientation_uncertain": True} for line in best.lines])
+    elif incomplete and best.lines:
+        best = replace(best, lines=[{**line, "orientation_uncertain": True} for line in best.lines])
     if best_angle:
         best = replace(best, lines=restore_boxes(best.lines, best_angle,
                                                render.page_width_pt, render.page_height_pt))

@@ -11,6 +11,56 @@ from apps.api.parsers.ocr_quality import line_risks, ruled_grid, regions, restor
 from apps.api.parsers.pdf import PdfParser, PdfOcrOptions, _PageRender, _PageOcrResult
 from apps.api.services.processing_status import _pdf_extraction_summary
 from test_parsers import _make_pdf_with_image
+from apps.api.parsers.ocr_quality import select_ocr_candidate
+
+
+def test_risky_local_high_score_does_not_override_valid_external():
+    local = [{"text": "local evidence " * 12, "confidence": .95}]
+    external = [{"text": "external evidence " * 6, "confidence": .6}]
+    chosen, reason = select_ocr_candidate(local, external, local_risk=True)
+    assert chosen is external and reason == "risk_external_preferred"
+    assert select_ocr_candidate(local, external)[0] is local
+
+
+@pytest.mark.parametrize("external,reason", [
+    ([], "external_empty"),
+    ([{"text": "unreliable", "confidence": .1}], "external_low_quality"),
+    ([{"text": "\ufffd\ufffd\ufffd broken"}], "external_invalid_characters"),
+    ([{"text": "identical long repeated line"}] * 5, "external_repetition"),
+    ([{"text": "short"}], "external_coverage_uncertain"),
+])
+def test_external_preference_has_rejection_guards(external, reason):
+    local = [{"text": "original evidence " * 20, "confidence": .9}]
+    chosen, actual = select_ocr_candidate(local, external, local_risk=True)
+    assert chosen is local and actual == reason
+
+
+def test_provenance_uses_actual_blocks_and_tolerates_malformed_metadata():
+    structured = {"metadata": {"pdf_extraction": {"external_errors": []}}, "blocks": [
+        {"page": 1, "extra": {"ocr_source": "local", "external_status": "timeout"}},
+        {"page": 2, "extra": {"ocr_source": "external", "external_status": []}},
+    ]}
+    summary = _pdf_extraction_summary(SimpleNamespace(structured_content=structured))
+    assert summary["local_source_pages"] == [1]
+    assert summary["external_source_pages"] == [2]
+    assert summary["external_errors"] == {"timeout": [1]}
+
+
+def test_uncertain_rotation_does_not_bias_external_image_or_coordinates():
+    original = render_grid(False)
+    rotated = render_grid(True)
+    received = []
+    def recognize(png, *args):
+        received.append(png)
+        return [{"text": "synthetic evidence", "bbox": [0, 0, 1000, 1000]}]
+    options = PdfOcrOptions(external_provider=SimpleNamespace())
+    parser = PdfParser(options, external_ocr_runner=recognize)
+    parser._selected_render = (1, rotated, 180, original)
+    parser._uncertain_direction_page = 1
+    outcome = parser._run_external_ocr(page_number=1, options=options, ocr_renderer=lambda _: original)
+    assert received == [original.png]
+    assert outcome.lines[0]["bbox"] == [0, 0, 400, 300]
+    assert "rotation_correction" not in outcome.lines[0]
 
 
 def render_grid(grid=True):
@@ -76,6 +126,20 @@ def test_clean_page_no_extra_work(monkeypatch):
     assert result is original and not risks and not refined and not regional
 
 
+def test_refinement_keeps_original_risks_after_quality_improves(monkeypatch):
+    render = render_grid(False)
+    high = replace(render, width_px=1600)
+    parser = PdfParser(PdfOcrOptions())
+    parser._selected_render = (1, render, 0, render)
+    original = _PageOcrResult(1, [{"text": "uncertain", "confidence": .2}] * 2)
+    improved = _PageOcrResult(1, [{"text": "clear longer synthetic evidence", "confidence": .95}])
+    monkeypatch.setattr(parser, "_build_ocr_renderer", lambda *a: lambda _: high)
+    monkeypatch.setattr(parser, "_ocr_page", lambda *a, **k: improved)
+    result, risks, refined, _ = parser._refine_local(b"", 1, PdfOcrOptions(), lambda _: render, original)
+    assert result is improved and refined
+    assert "local_low_quality" in risks and not line_risks(result.lines)
+
+
 def test_refinement_timeout_never_publishes_partial_regions(monkeypatch):
     render = render_grid()
     parser = PdfParser(PdfOcrOptions(), renderer_factory=lambda *_: lambda _: render)
@@ -110,6 +174,9 @@ def test_grid_risk_triggers_external_even_with_high_average(budget):
     assert extraction["review_pages"]==[1] and extraction["ocr_status"]=="partial"
     if budget:
         assert extraction["external_trigger_reasons"]["local_quality_risk"]==[1]
+        assert extraction["external_selected_pages"] == [1]
+        assert extraction["selection_decisions"][0]["reason"] in {"risk_external_preferred", "local_unusable"}
+        assert extraction["selection_decisions"][0]["source"] == "external"
     summary=_pdf_extraction_summary(SimpleNamespace(structured_content=result.structured_content.to_dict()))
     assert summary["review_reasons"]["table_layout"]==[1]
 

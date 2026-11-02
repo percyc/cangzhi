@@ -15,11 +15,11 @@ from typing import Any
 from ..ocr.base import ExternalOcrError, ExternalOcrProvider
 from .base import BaseParser, Block, ParserResult, StructuredContent
 from .ocr_orientation import confidence, correct_orientation, restore_boxes
-from .ocr_quality import direction_probe, line_risks, prefer_candidate, regions, restore_region, rotate_render, ruled_grid
+from .ocr_quality import direction_probe, line_risks, prefer_candidate, regions, restore_region, rotate_render, ruled_grid, select_ocr_candidate
 
 logger = logging.getLogger(__name__)
 
-PDF_OCR_VERSION = "pdf-hybrid-v6-local-quality"
+PDF_OCR_VERSION = "pdf-hybrid-v7-risk-selection"
 PDF_OCR_ENGINE = "tesseract"
 PDF_OCR_EXTERNAL_ENGINE = "external-vision"
 
@@ -182,6 +182,8 @@ class PdfParser(BaseParser):
         review_reasons: dict[str, list[int]] = {}
         refined_pages: list[int] = []
         regional_pages: list[int] = []
+        selection_decisions: list[dict[str, Any]] = []
+        external_errors: dict[str, list[int]] = {}
 
         def _record_skip(reason: str, page_number: int) -> None:
             bucket = ocr_skipped_reasons.setdefault(reason, [])
@@ -364,6 +366,7 @@ class PdfParser(BaseParser):
                 ocr_renderer=ocr_renderer,
             )
             if external_result.lines is None:
+                external_errors.setdefault(external_result.error or "upstream_error", []).append(page_number)
                 external_failed_pages.append(page_number)
                 _record_ocr_outcome(
                     blocks=blocks,
@@ -394,10 +397,14 @@ class PdfParser(BaseParser):
                 continue
 
             external_completed_pages.append(page_number)
-            chosen_lines = _pick_better_result(
-                local_lines=local_lines,
-                external_lines=external_result.lines,
+            chosen_lines, selection_reason = select_ocr_candidate(
+                local_lines, external_result.lines, local_risk=bool(risks) or not local_sufficient,
             )
+            selection_decisions.append({"page": page_number, "reason": selection_reason,
+                "source": "external" if chosen_lines is external_result.lines else "local",
+                "local_chars": local_chars, "external_chars": _sum_line_chars(external_result.lines)})
+            if chosen_lines is local_lines:
+                review_reasons.setdefault("candidate_disagreement", []).append(page_number)
             chosen_source = (
                 "external" if chosen_lines is external_result.lines else "local"
             )
@@ -442,7 +449,10 @@ class PdfParser(BaseParser):
             "quality_policy": "page-quarantine-v1",
             "low_quality_pages": low_quality_pages,
             "quarantined_pages": low_quality_pages,
-            "selection_policy": "confidence-first-v1",
+            "selection_policy": "risk-first-v2",
+            "selection_decisions": selection_decisions,
+            "external_errors": external_errors,
+            "local_selected_pages": sorted({b.page for b in blocks if b.extra.get("ocr_source") == "local"}),
             "external_selected_pages": sorted({b.page for b in blocks if b.extra.get("ocr_source") == "external"}),
             "rotation_corrected_pages": corrected_pages,
             "version": PDF_OCR_VERSION,
@@ -595,8 +605,12 @@ class PdfParser(BaseParser):
                         lambda _: selected, correct_direction=False)
                     full = replace(full, lines=restore_boxes(full.lines, angle, render.page_width_pt, render.page_height_pt))
                     if not full.error and prefer_candidate(result.lines, full.lines):
+                        if any(line.get("orientation_uncertain") for line in result.lines):
+                            full = replace(full, lines=[{**line, "orientation_uncertain": True} for line in full.lines])
                         result = full
             self._selected_render = (page_number, selected, angle, render)
+            self._uncertain_direction_page = page_number if any(
+                line.get("orientation_uncertain") for line in result.lines) else None
         return result
 
     def _refine_local(self, content, page_number, options, renderer, result):
@@ -611,6 +625,8 @@ class PdfParser(BaseParser):
             angle = selected[2] if selected and selected[0] == page_number else 0
             oriented = selected[1] if selected and selected[0] == page_number else original
             risks = line_risks(result.lines)
+            if angle:
+                risks.append("direction_corrected")
             grid = ruled_grid(oriented.png)
             if grid:
                 risks.append("table_layout")
@@ -657,7 +673,7 @@ class PdfParser(BaseParser):
                     line["paragraph_index"] = index
                 if complete and prefer_candidate(result.lines, candidates):
                     result, regional = replace(result, lines=candidates, error=None), True
-            risks = line_risks(result.lines)
+            risks = risks + line_risks(result.lines)
             if grid:
                 risks.append("table_layout")
             return result, sorted(set(risks)), refined, regional
@@ -687,7 +703,8 @@ class PdfParser(BaseParser):
             return _ExternalOcrPageOutcome(error="disabled")
         try:
             selected = getattr(self, "_selected_render", None)
-            render = selected[1] if selected and selected[0] == page_number else ocr_renderer(page_number)
+            uncertain = getattr(self, "_uncertain_direction_page", None) == page_number
+            render = (selected[3] if uncertain else selected[1]) if selected and selected[0] == page_number else ocr_renderer(page_number)
         except Exception:
             logger.exception(
                 "external_ocr_render_failed", extra={"page": page_number}
@@ -729,7 +746,7 @@ class PdfParser(BaseParser):
             page_width_pt=render.page_width_pt,
             page_height_pt=render.page_height_pt,
         )
-        if selected and selected[0] == page_number and selected[2]:
+        if selected and selected[0] == page_number and selected[2] and not uncertain:
             internal = restore_boxes(internal, selected[2], selected[3].page_width_pt, selected[3].page_height_pt)
         if not internal:
             return _ExternalOcrPageOutcome(error="empty_response")
@@ -1258,30 +1275,8 @@ def _pick_better_result(
     local_lines: list[dict[str, Any]],
     external_lines: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Choose the best of the two per-page OCR results.
-
-    Reject known low confidence before comparing length. Confidence values are
-    heuristic, not calibrated accuracy; an unknown value is not proof of quality.
-    A valid external response may replace known-bad local noise even if shorter.
-    """
-
-    local_chars = _sum_line_chars(local_lines)
-    external_chars = _sum_line_chars(external_lines)
-    if external_chars <= 0:
-        return local_lines
-    if local_chars <= 0:
-        return external_lines
-    local_conf = _average_confidence(local_lines)
-    external_conf = _average_confidence(external_lines)
-    local_bad = local_conf is not None and local_conf < 0.5
-    external_bad = external_conf is not None and external_conf < 0.5
-    if local_bad != external_bad:
-        return external_lines if local_bad else local_lines
-    if local_conf is not None and external_conf is not None and abs(local_conf - external_conf) >= 0.15:
-        return external_lines if external_conf > local_conf else local_lines
-    if external_chars > int(local_chars * 1.1):
-        return external_lines
-    return local_lines
+    """Compatibility helper; clean local text is not replaced on score alone."""
+    return select_ocr_candidate(local_lines, external_lines)[0]
 
 
 def _record_ocr_outcome(

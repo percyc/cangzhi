@@ -78,3 +78,31 @@ def test_real_mixed_direction_scanned_pdf():
         blocks=[b for b in parsed.structured_content.blocks if b.page==page]
         assert "CANGZHI" in " ".join(b.text for b in blocks)
         assert all(b.extra["bbox"][0]>=0 and b.extra["bbox"][1]>=0 for b in blocks)
+
+
+@pytest.mark.parametrize("trials", [((.70, 100), (.78, 100), (.60, 100)),
+                                    ((.90, 15), (.78, 100), (.60, 50))])
+def test_direction_ranking_has_no_greedy_margin_or_short_fragment_bias(trials):
+    values = iter(trials)
+    def recognize(*args):
+        conf, chars = next(values)
+        return _PageOcrResult(1, [{"text": "a" * chars, "confidence": conf}])
+    _, _, angle = correct_orientation(sample_render(), _PageOcrResult(1, []),
+        recognize, budget_seconds=30)
+    assert angle == 270
+
+
+def test_close_direction_candidates_keep_uncertainty():
+    values = iter((.80, .86, .1))
+    result, _, _ = correct_orientation(sample_render(), _PageOcrResult(1, []),
+        lambda *args: _PageOcrResult(1, [{"text": "synthetic evidence", "confidence": next(values)}]),
+        budget_seconds=30)
+    assert result.lines[0]["orientation_uncertain"]
+
+
+def test_no_completed_direction_keeps_original_text_and_marks_uncertainty():
+    original = _PageOcrResult(1, [{"text": "original evidence", "confidence": .3}])
+    result, _, angle = correct_orientation(sample_render(), original,
+        lambda *args: pytest.fail("budget exhausted"), budget_seconds=0)
+    assert result.lines[0]["text"] == original.lines[0]["text"]
+    assert result.lines[0]["orientation_uncertain"] and angle == 0

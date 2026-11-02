@@ -266,6 +266,10 @@ OpenAI 兼容的多模态模型，由模型返回归一化坐标中的行级文�
 - 单文档外发页数受 `ocr_max_external_pages` 限制（0 表示关闭外部
   渠道），超过后剩余候选页继续走本地识别并标记
   `external_skipped_pages` 与触发原因 `max_external_pages_reached`。
+- OCR 候选采用 `risk-first-v2`：局部补识别不能清除初始风险，不跨引擎比较
+  自报置信度。风险触发的外部结果通过空值、异常字符、重复、低分、明显覆盖缩减
+  检查后优先采用；保留复核状态，不承诺结构/事实正确。选择依据与外部失败类别写入
+  派生元数据；详情依据实际正文块 `ocr_source` 显示采用来源，而非根据调用成功推断。
 - 外部调用失败（`auth` / `network` / `timeout` / `upstream` / `invalid`
   类别）一律保留本地非空结果，整份文档解析不会因此失败；
   `Block.extra` 同时记录 `external_used: false` 与
