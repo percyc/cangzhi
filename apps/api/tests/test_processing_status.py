@@ -812,3 +812,26 @@ def test_pdf_extraction_summary_is_propagated_to_pipeline(client, document_type)
     assert extraction["ocr_skipped_pages"] == [11, 12]
     assert extraction["ocr_status"] == "partial"
     assert body["overall_status"] != "failed"
+
+
+def test_mixed_word_image_diagnostics_survive_lightweight_status_projection(client):
+    test_client, _ = client
+    created = test_client.post("/api/notes", json={"title":"Mixed Word", "content":"Native body"}).json()
+    db_dependency = app.dependency_overrides[get_db]
+    async def run():
+        dependency = db_dependency()
+        session = await _session(dependency)
+        try:
+            version = await session.get(DocumentVersion, created["current_version"]["id"])
+            version.processing_status = "ready"
+            version.structured_content = {"document_type":"docx", "blocks":[], "metadata":{
+                "word_embedded_ocr":{"status":"partial", "external_calls":0,
+                    "items":[{"image_index":1,"body_index":2,"status":"failed"}]}}}
+            await session.execute(delete(ProcessingJob).where(ProcessingJob.document_version_id == version.id))
+            await session.commit()
+            return await compute_processing_status(session, created["id"])
+        finally:
+            await dependency.aclose()
+    body = asyncio.run(run())
+    assert body["stages"]["parsing"]["embedded_images"]["items"][0]["status"] == "failed"
+    assert body["stages"]["parsing"]["message"] == "正文已保留，部分内嵌图片需核验"

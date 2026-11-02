@@ -55,7 +55,7 @@ function harness(name, props, fetcher) {
     confirm: () => true,
   };
   const filename = path.join(__dirname, '../app/documents/[id]/page.tsx');
-  const source = fs.readFileSync(filename, 'utf8') + '\nexport { DocumentDetail, DatasetRows, DatasetWorkspace, RetainedPanel, PdfExtractionSummary };';
+  const source = fs.readFileSync(filename, 'utf8') + '\nexport { DocumentDetail, DatasetRows, DatasetWorkspace, RetainedPanel, PdfExtractionSummary, WordImageSummary };';
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText;
   const evaluatedModule = { exports: {} };
   const mocks = {
@@ -355,6 +355,21 @@ test('OCR quality warnings distinguish table risks and processing success from c
   assert.match(text(page.tree), /行列与合并关系未经验证/);
   assert.match(text(page.tree), /部分文字置信度偏低/);
   assert.match(text(page.tree), /高清补识别 1 页/);
+});
+
+test('mixed Word image summary explains partial results and actual sources', () => {
+  const page = harness('WordImageSummary', {summary:{status:'partial',external_calls:1,items:[
+    {image_index:1,body_index:2,status:'review',sources:['external']},
+    {image_index:2,body_index:4,status:'failed',sources:[],reused:true},
+    {image_index:3,body_index:5,status:'disabled'},
+  ]}}, () => { throw new Error('must not fetch'); });
+  assert.match(text(page.tree), /部分完成/);
+  assert.match(text(page.tree), /外部 OCR 调用 1 次/);
+  assert.match(text(page.tree), /实际来源：外部 OCR/);
+  assert.match(text(page.tree), /未取得可用文字/);
+  assert.match(text(page.tree), /OCR 已关闭/);
+  assert.match(text(page.tree), /已复用/);
+  assert.match(text(page.tree), /不是文档页码/);
 });
 
 test('OCR provenance distinguishes adoption, successful rejection and failed fallback', () => {

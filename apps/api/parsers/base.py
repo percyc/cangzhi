@@ -126,15 +126,15 @@ def get_parser_for_content(
             if lower_name.endswith(suffix):
                 return _image(image_format)
         if lower_name.endswith(".wps"):
-            return WpsParser()
+            return WpsParser(options=pdf_ocr_options)
         if lower_name.endswith((".md", ".markdown")):
             return MarkdownParser()
         if lower_name.endswith(".pdf"):
             return _pdf()
         if lower_name.endswith(".doc"):
-            return DocParser()
+            return DocParser(options=pdf_ocr_options)
         if lower_name.endswith(".docx"):
-            return DocxParser()
+            return DocxParser(options=pdf_ocr_options)
         if lower_name.endswith(".xlsx"):
             return XlsxParser()
         if lower_name.endswith(".xls"):
@@ -149,7 +149,7 @@ def get_parser_for_content(
     if content_type in {"image/png", "image/jpeg", "image/webp"}:
         return _image(content_type.split("/")[1].upper())
     if content_type in WPS_MIMES:
-        return WpsParser()
+        return WpsParser(options=pdf_ocr_options)
     if "text/markdown" in content_type or "markdown" in content_type:
         return MarkdownParser()
     if "application/pdf" in content_type:
@@ -161,12 +161,12 @@ def get_parser_for_content(
         "application/vnd.msword",
         "application/winword",
     }:
-        return DocParser()
+        return DocParser(options=pdf_ocr_options)
     if (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         in content_type
     ):
-        return DocxParser()
+        return DocxParser(options=pdf_ocr_options)
     if (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         in content_type

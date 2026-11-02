@@ -57,6 +57,9 @@ class DocxParser(BaseParser):
     table metadata is deferred to a later CZ-N step.
     """
 
+    def __init__(self, options=None):
+        self.ocr_options = options
+
     def parse(self, content: bytes, content_type: str | None = None) -> ParserResult:
         try:
             from docx import Document
@@ -155,6 +158,17 @@ class DocxParser(BaseParser):
                     },
                 },
             )
+
+            if self.ocr_options is not None:
+                from .word_images import add_embedded_image_text
+                try:
+                    add_embedded_image_text(doc, structured_content, self.ocr_options)
+                except Exception:
+                    # Optional image enrichment cannot discard parsed native text.
+                    structured_content.metadata["word_embedded_ocr"] = {
+                        "version": "word-images-v1", "status": "partial", "items": [],
+                        "external_calls": None, "scan_failed": True,
+                    }
 
             return ParserResult(
                 success=True,

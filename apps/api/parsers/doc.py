@@ -15,6 +15,9 @@ class DocParser(BaseParser):
     conversion_timeout_seconds = 60
     source_format = "doc"
 
+    def __init__(self, options=None):
+        self.ocr_options = options
+
     def conversion_arguments(self, content: bytes) -> list[str]:
         return []
 
@@ -69,7 +72,7 @@ class DocParser(BaseParser):
                         },
                     )
 
-                result = DocxParser().parse(
+                result = DocxParser(options=self.ocr_options).parse(
                     output_path.read_bytes(),
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )

@@ -253,6 +253,9 @@ async def _load_pipeline_inputs(
     ]
     if include_extraction:
         version_columns.append(
+            DocumentVersion.structured_content["metadata"]["word_embedded_ocr"].label("word_images")
+        )
+        version_columns.append(
             DocumentVersion.structured_content["metadata"]["pdf_extraction"].label(
                 "extraction"
             )
@@ -271,7 +274,8 @@ async def _load_pipeline_inputs(
             processing_status=row.processing_status,
             meta=row.meta,
             raw_content=bool(row.has_raw),
-            structured_content={"metadata": {"pdf_extraction": extraction}}
+            structured_content={"metadata": {"pdf_extraction": extraction,
+                "word_embedded_ocr": row.word_images if include_extraction else None}}
             if row.has_structured
             else None,
         )
@@ -424,6 +428,12 @@ async def load_pipeline_statuses(
             }
 
         pdf_extraction = _pdf_extraction_summary(version)
+        metadata = (version.structured_content or {}).get("metadata", {})
+        word_images = metadata.get("word_embedded_ocr") if isinstance(metadata, dict) else None
+        if isinstance(word_images, dict):
+            parsing = {**parsing, "embedded_images": word_images}
+            if parsing["status"] == "completed" and word_images.get("status") == "partial":
+                parsing["message"] = "正文已保留，部分内嵌图片需核验"
         if pdf_extraction is not None:
             parsing = {**parsing, "extraction": pdf_extraction}
             if parsing["status"] == "completed" and pdf_extraction.get("ocr_status") == "partial":

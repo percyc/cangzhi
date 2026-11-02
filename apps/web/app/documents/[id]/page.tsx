@@ -95,6 +95,13 @@ type PipelineStage = {
   status: string;
   message: string;
   last_error?: string | null;
+  embedded_images?: {
+    status: string;
+    external_calls: number | null;
+    occurrence_limit_reached?: boolean;
+    scan_failed?: boolean;
+    items: {image_index: number; body_index: number; status: string; reused?: boolean; sources?: string[]}[];
+  };
   extraction?: {
     version: string | null;
     engine: string | null;
@@ -1461,8 +1468,29 @@ function PipelineStatus({ pipeline }: { pipeline: ProcessingPipeline }) {
       {pipeline.stages.parsing.extraction && (
         <PdfExtractionSummary extraction={pipeline.stages.parsing.extraction} />
       )}
+      {pipeline.stages.parsing.embedded_images && (
+        <WordImageSummary summary={pipeline.stages.parsing.embedded_images} />
+      )}
     </div>
   );
+}
+
+function WordImageSummary({summary}: {summary: NonNullable<PipelineStage['embedded_images']>}) {
+  const labels: Record<string, string> = {completed:'已提取文字',review:'已提取，需核验',failed:'未取得可用文字',
+    unsupported:'图片格式不支持',disabled:'OCR 已关闭',budget_exhausted:'达到本次处理上限',
+    image_limit:'图片大小超限',linked_or_missing:'外链或图片缺失，未下载',cropped_image:'裁剪信息无法安全处理',
+    low_quality:'识别质量过低，未加入正文',unsupported_structure:'隐藏内容或复杂包装，未识别'};
+  return <div className="mt-4 rounded-lg border border-slate-200 p-3 text-xs leading-6 text-slate-600">
+    <h3 className="font-medium text-slate-800">正文内嵌图片识别{summary.status === 'partial' ? ' · 部分完成，需核验' : ''}</h3>
+    <p>保留原生正文，图片文字补在所属段落或表格之后。浮动图片、同段落内顺序及表格行列关系请核对原件；坐标属于图片，不是文档页码。</p>
+    <p>本次外部 OCR 调用 {summary.external_calls ?? '未知'} 次；重复图片复用识别结果。</p>
+    {summary.scan_failed && <p>图片扫描异常，原生正文已保留；请核对原件并重新处理。</p>}
+    {summary.items.slice(0, 30).map(item => <p key={item.image_index}>图片 {item.image_index}（正文块 {item.body_index + 1}）：{labels[item.status] || '需核验'}
+      {item.sources?.length ? ` · 实际来源：${item.sources.map(source => source === 'external' ? '外部 OCR' : source === 'local' ? '本地 OCR' : '未知').join('、')}` : ''}
+      {item.reused ? ' · 已复用' : ''}</p>)}
+    {summary.items.length > 30 && <p>仅展示前 30 项。</p>}
+    {summary.occurrence_limit_reached && <p>图片数量超过本次处理上限，后续图片未处理。</p>}
+  </div>;
 }
 
 function PdfExtractionSummary({

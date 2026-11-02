@@ -194,6 +194,8 @@ draft, not an answer-quality evaluation.
   summaries, classification and indexing pipeline. Original image previews are preserved.
   EXIF correction and bounded rotation trials are supported; this is not visual scene
   understanding. See [image OCR limits and usage](docs/IMAGE_OCR.md).
+  Mixed Word/WPS documents also support bounded embedded-image OCR while preserving native text,
+  with source, failure and coverage diagnostics; this is not full layout reconstruction.
 - Save public web pages as HTML snapshots with extracted title, author, date,
   and main content.
 - Connect read-only WebDAV directories through the same parsing,
