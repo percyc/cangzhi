@@ -206,7 +206,7 @@ details > summary::-webkit-details-marker {
     position: relative;
     max-width: var(--workspace-width);
     padding-left: 280px;
-    min-height: 860px;
+    min-height: calc(100dvh - 64px);
   }
   .settings-rail {
     position: absolute;
@@ -245,4 +245,26 @@ details > summary::-webkit-details-marker {
 :is(a, button, summary):focus-visible {
   outline: 2px solid #64748b;
   outline-offset: 3px;
+}
+
+.list-viewport { min-width: 0; scroll-margin-top: 136px; }
+.list-pagination {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.75rem; padding: 0.75rem 0; margin-top: 0.75rem;
+  border-top: 1px solid var(--line); background: var(--canvas);
+}
+.list-toolbar { min-width: 0; }
+main.list-workspace { animation: none; }
+.token-list-card { min-width: 0; align-self: start; }
+@media (min-width: 1024px) and (min-height: 700px) {
+  main.list-workspace[data-fit="true"] {
+    height: calc(100dvh - var(--list-top, 120px)); display: flex; flex-direction: column;
+    padding-top: 1rem !important; padding-bottom: 0.5rem !important; animation: none;
+  }
+  .list-workspace[data-fit="true"] > .list-toolbar { flex: 0 0 auto; max-height: 42%; overflow-y: auto; }
+  .list-workspace[data-fit="true"] > .list-viewport { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0.25rem; scrollbar-gutter: stable; }
+  .list-workspace[data-fit="true"] > .list-pagination { flex: 0 0 auto; }
+  .token-list-card { display: flex; flex-direction: column; max-height: max(320px, calc(100dvh - var(--panel-top, 250px) - 12px)); }
+  .token-list-card > .list-viewport { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+  .token-list-card > .list-pagination { flex: 0 0 auto; background: white; }
 }

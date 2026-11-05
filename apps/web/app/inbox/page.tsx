@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { retryFailedDocuments } from '@/lib/processing-recovery';
+import ListPagination from '@/components/ListPagination';
+import { ListViewport, ListWorkspace } from '@/components/ListViewport';
 
 type DocumentItem = {
   id: number;
@@ -335,7 +337,8 @@ export default function InboxPage() {
   const effectivePage = Math.min(page, totalPages);
 
   return (
-    <main className="workspace-shell">
+    <ListWorkspace>
+      <div className="list-toolbar">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">收件箱</h1>
@@ -397,8 +400,10 @@ export default function InboxPage() {
         ))}
       </div>
 
+      </div>
+      <ListViewport label="收件箱列表" resetKey={`${page}:${filter}`}>
       {loading && items.length === 0 && (
-        <p className="mt-6 text-sm text-slate-500">正在读取收件箱…</p>
+        <p role="status" className="min-h-48 mt-6 text-sm text-slate-500">正在读取收件箱…</p>
       )}
       {error && (
         <p className="mt-4 text-sm text-red-700" role="alert">
@@ -614,32 +619,10 @@ export default function InboxPage() {
           </ul>
         </>
       )}
-      {!error && total > 0 && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
-          <span>
-            当前筛选共 {total} 条 · 第 {effectivePage}/{totalPages} 页
-          </span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              disabled={loading || effectivePage <= 1}
-              onClick={() => { setItems([]); setLoading(true); setPage((current) => Math.max(1, current - 1)); }}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
-            >
-              上一页
-            </button>
-            <button
-              type="button"
-              disabled={loading || effectivePage >= totalPages}
-              onClick={() => { setItems([]); setLoading(true); setPage((current) => Math.min(totalPages, current + 1)); }}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
-            >
-              下一页
-            </button>
-          </div>
-        </div>
-      )}
-    </main>
+      </ListViewport>
+      <ListPagination page={effectivePage} pageSize={PAGE_SIZE} total={total} loading={loading || !!error || retrying || repairing}
+        onPageChange={next => { setItems([]); setLoading(true); setPage(next); }} />
+    </ListWorkspace>
   );
 }
 

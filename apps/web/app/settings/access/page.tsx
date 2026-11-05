@@ -1,6 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import ListPagination from '@/components/ListPagination';
+import { ListViewport, ListPanel } from '@/components/ListViewport';
+import { tokenStatus } from '@/lib/token-list';
 
 
 type AccessToken = {
@@ -39,6 +42,14 @@ const scopeLabels: Record<string, string> = {
 
 export default function AccessSettingsPage() {
   const [items, setItems] = useState<AccessToken[]>([]);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [page, setPage] = useState(1);
+  const filtered = items.filter(item =>
+    (!query.trim() || `${item.name} ${item.token_prefix}`.toLowerCase().includes(query.trim().toLowerCase())) &&
+    (statusFilter === 'all' || tokenStatus(item) === statusFilter));
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(filtered.length / 5)));
+  const visibleTokens = filtered.slice((currentPage - 1) * 5, currentPage * 5);
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState([
     'knowledge:read',
@@ -128,6 +139,7 @@ export default function AccessSettingsPage() {
           currentWorkspaceSlug,
       });
       setItems((current) => [body.item, ...current]);
+      setPage(1); setQuery(''); setStatusFilter('all');
       setName('');
       setCopiedKey(null);
       setCopyError(null);
@@ -213,7 +225,7 @@ export default function AccessSettingsPage() {
         </p>
       )}
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+      <div className="mt-6 grid items-start gap-6 lg:grid-cols-[0.9fr_1.1fr]">
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-base font-semibold text-slate-900">创建访问令牌</h2>
           <p className="mt-1 text-xs leading-5 text-slate-500">
@@ -290,7 +302,7 @@ export default function AccessSettingsPage() {
           </form>
         </section>
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <ListPanel>
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-semibold text-slate-900">已有令牌</h2>
@@ -299,24 +311,36 @@ export default function AccessSettingsPage() {
               </p>
             </div>
             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-500">
-              {items.filter((item) => !item.revoked_at).length} 个有效
+              {items.filter((item) => tokenStatus(item) === 'active').length} 个有效
             </span>
           </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <input aria-label="搜索令牌名称或前缀" placeholder="搜索名称或安全前缀" value={query}
+              onChange={event => { setQuery(event.target.value); setPage(1); }}
+              className="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm" />
+            <select aria-label="令牌状态" value={statusFilter} onChange={event => { setStatusFilter(event.target.value); setPage(1); }}
+              className="rounded-lg border px-2 py-2 text-sm">
+              <option value="all">全部状态</option><option value="active">有效</option>
+              <option value="expired">已过期</option><option value="revoked">已撤销</option>
+            </select>
+          </div>
+          <ListViewport label="已有令牌列表" resetKey={`${currentPage}:${query}:${statusFilter}`}>
           {loading ? (
             <p className="mt-6 text-sm text-slate-500">加载中…</p>
-          ) : items.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <div className="mt-6 rounded-xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">
-              还没有外部客户端令牌
+              {items.length ? '没有符合筛选条件的令牌，请调整名称或状态。' : '还没有外部客户端令牌'}
             </div>
           ) : (
             <ul className="mt-4 divide-y divide-slate-100">
-              {items.map((item) => (
+              {visibleTokens.map((item) => (
                 <li key={item.id} className="py-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-slate-800">
                         {item.name}
                       </p>
+                      {tokenStatus(item) === 'expired' && <span className="text-xs text-amber-700">已过期</span>}
                       <p className="mt-1 font-mono text-xs text-slate-400">
                         {item.token_prefix}…
                       </p>
@@ -365,19 +389,20 @@ export default function AccessSettingsPage() {
                       ? `绑定空间：${workspaces.find((workspace) => workspace.id === item.workspace_id)?.name ?? `#${item.workspace_id}`}`
                       : '未绑定空间（兼容模式）'}
                   </p>
-                  {!item.revoked_at &&
-                    !item.scopes.includes('knowledge:ask') && (
-                      <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+                  {tokenStatus(item) === 'active' && !item.scopes.includes('knowledge:ask') && (
+                      <details className="mt-2 text-[11px] leading-5 text-slate-500"><summary className="cursor-pointer">权限说明：仅读取与检索</summary><p>
                         这枚令牌只能读取和检索，不能调用 MCP 的
                         knowledge_ask。若需要完整问答或表格精确计算，请新建令牌并勾选
                         “问知识库与表格精确计算”。
-                      </p>
+                      </p></details>
                     )}
                 </li>
               ))}
             </ul>
           )}
-        </section>
+          </ListViewport>
+          <ListPagination page={currentPage} pageSize={5} total={filtered.length} loading={loading} onPageChange={setPage} />
+        </ListPanel>
       </div>
 
       <section className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-5">

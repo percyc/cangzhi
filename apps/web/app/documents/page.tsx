@@ -1,7 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import ListPagination from '@/components/ListPagination';
+import { ListViewport, ListWorkspace } from '@/components/ListViewport';
 import { libraryEmptyState } from '@/lib/usability';
 
 type DocumentSummary = {
@@ -21,8 +23,6 @@ type DocumentTag = {
   name: string;
 };
 type OrganizeOption = { id: number; name: string };
-
-const PAGE_SIZE = 24;
 
 type DocumentVersion = {
   id: number;
@@ -96,6 +96,8 @@ export default function DocumentsListPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(24);
+  const requestId = useRef({ sequence: 0 });
   const [view, setView] = useState<'active' | 'trash'>('active');
   const [manageMode, setManageMode] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
@@ -109,10 +111,11 @@ export default function DocumentsListPage() {
   const [acting, setActing] = useState(false);
 
   const load = useCallback(() => {
+    const request = ++requestId.current.sequence;
     setLoading(true);
     const params = new URLSearchParams({
-      limit: String(PAGE_SIZE),
-      offset: String((page - 1) * PAGE_SIZE),
+      limit: String(pageSize),
+      offset: String((page - 1) * pageSize),
       deleted: String(view === 'trash'),
       include_processing: String(view === 'active'),
     });
@@ -127,8 +130,9 @@ export default function DocumentsListPage() {
         return res.json().then(data => ({ data, resultTotal }));
       })
       .then(({ data, resultTotal }) => {
-        if (resultTotal > 0 && (page - 1) * PAGE_SIZE >= resultTotal) {
-          setPage(Math.max(1, Math.ceil(resultTotal / PAGE_SIZE)));
+        if (request !== requestId.current.sequence) return;
+        if (page > Math.max(1, Math.ceil(resultTotal / pageSize))) {
+          setPage(Math.max(1, Math.ceil(resultTotal / pageSize)));
           return;
         }
         setDocuments(data);
@@ -138,14 +142,16 @@ export default function DocumentsListPage() {
         setLoading(false);
       })
       .catch(err => {
+        if (request !== requestId.current.sequence) return;
         setError(err.message);
         setLoading(false);
       });
-  }, [categoryId, page, view]);
+  }, [categoryId, page, pageSize, view]);
 
   useEffect(() => {
+    const requests = requestId.current;
     const timer = window.setTimeout(() => void load(), 0);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); requests.sequence++; };
   }, [load]);
 
   useEffect(() => {
@@ -304,11 +310,11 @@ export default function DocumentsListPage() {
   };
 
   const visibleDocuments = documents;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const empty = libraryEmptyState(view === 'trash', categoryId !== null);
 
   return (
-    <main className="workspace-shell">
+    <ListWorkspace>
+      <div className="list-toolbar">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Personal Library</p>
@@ -356,7 +362,7 @@ export default function DocumentsListPage() {
       )}
 
       {visibleDocuments.length > 0 && (
-        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3 text-sm">
+        <fieldset disabled={loading || acting} aria-label="本页批量操作" className="mb-4 flex min-w-0 flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3 text-sm disabled:opacity-50">
           {!manageMode ? (
             <button type="button" onClick={() => setManageMode(true)} className="rounded border border-slate-300 px-3 py-1.5 text-slate-700 hover:bg-slate-50">
               批量管理
@@ -394,10 +400,12 @@ export default function DocumentsListPage() {
               <button type="button" onClick={() => { setManageMode(false); setSelected([]); }} className="rounded px-3 py-1.5 text-slate-600 hover:bg-slate-100">完成</button>
             </>
           )}
-        </div>
+        </fieldset>
       )}
 
-      {loading && <p className="text-slate-500">加载中…</p>}
+      </div>
+      <ListViewport label="知识库列表" resetKey={`${page}:${pageSize}:${view}:${categoryId}`}>
+      {loading && <p role="status" className="min-h-48 p-4 text-slate-500">正在读取资料…</p>}
       {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error} <button type="button" onClick={() => void load()} disabled={loading} className="ml-2 underline">重新加载</button></p>}
 
       {!loading && !error && (
@@ -535,31 +543,10 @@ export default function DocumentsListPage() {
           </div>
         )
       )}
-      {!loading && !error && total > 0 && (
-        <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 py-5 text-sm text-slate-600">
-          <span>
-            共 {total} 条 · 第 {page}/{totalPages} 页
-          </span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              disabled={page <= 1}
-              onClick={() => setPage((current) => Math.max(1, current - 1))}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
-            >
-              上一页
-            </button>
-            <button
-              type="button"
-              disabled={page >= totalPages}
-              onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 disabled:opacity-40"
-            >
-              下一页
-            </button>
-          </div>
-        </div>
-      )}
-    </main>
+      </ListViewport>
+      <ListPagination page={page} pageSize={pageSize} total={total} loading={loading || !!error || acting}
+        onPageChange={next => { setSelected([]); setLoading(true); setPage(next); }}
+        onPageSizeChange={size => { setSelected([]); setLoading(true); setPageSize(size); setPage(1); }} />
+    </ListWorkspace>
   );
 }

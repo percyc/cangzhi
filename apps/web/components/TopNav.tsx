@@ -151,7 +151,7 @@ export function TopNav() {
           title="藏知 Cangzhi｜藏有所知，问有所据"
         >
           <BrandMark className="transition-transform motion-safe:group-hover:-rotate-3" />
-          <span className="text-lg font-semibold tracking-tight text-slate-950">藏知</span>
+          <span className="hidden text-lg font-semibold tracking-tight text-slate-950 min-[380px]:inline">藏知</span>
         </Link>
 
         {isAuthenticated && (
