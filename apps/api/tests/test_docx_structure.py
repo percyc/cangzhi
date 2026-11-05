@@ -298,7 +298,7 @@ class TestDocxExtractionMetadata:
 
         extraction = result.structured_content.metadata.get("docx_extraction")
         assert isinstance(extraction, dict)
-        assert extraction["parser_version"] == "1"
+        assert extraction["parser_version"] == "2"
         assert isinstance(extraction["index_semantics"], str)
         assert "docx_body_index" in extraction["index_semantics"]
         # Capability surface: full table metadata is intentionally

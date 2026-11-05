@@ -253,6 +253,9 @@ async def _load_pipeline_inputs(
     ]
     if include_extraction:
         version_columns.append(
+            DocumentVersion.structured_content["metadata"]["docx_extraction"]["revision_view"].label("word_revisions")
+        )
+        version_columns.append(
             DocumentVersion.structured_content["metadata"]["word_embedded_ocr"].label("word_images")
         )
         version_columns.append(
@@ -275,6 +278,7 @@ async def _load_pipeline_inputs(
             meta=row.meta,
             raw_content=bool(row.has_raw),
             structured_content={"metadata": {"pdf_extraction": extraction,
+                "docx_extraction": {"revision_view": row.word_revisions if include_extraction else None},
                 "word_embedded_ocr": row.word_images if include_extraction else None}}
             if row.has_structured
             else None,
@@ -438,6 +442,10 @@ async def load_pipeline_statuses(
             parsing = {**parsing, "extraction": pdf_extraction}
             if parsing["status"] == "completed" and pdf_extraction.get("ocr_status") == "partial":
                 parsing["message"] = "文字提取部分完成，请核验未识别或已隔离的页面"
+
+        revision_view = (metadata.get("docx_extraction") or {}).get("revision_view")
+        if isinstance(revision_view, dict) and (revision_view.get("included") or revision_view.get("excluded")):
+            parsing["message"] += "；修订按最终文本读取：保留新增/移入，排除删除/移出，原件未修改"
 
         chunking = _stage_payload(jobs.get("chunking"))
         if governance_only and getattr(jobs.get("chunking"), "status", None) == "completed":

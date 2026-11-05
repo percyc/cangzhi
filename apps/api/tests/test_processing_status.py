@@ -825,6 +825,7 @@ def test_mixed_word_image_diagnostics_survive_lightweight_status_projection(clie
             version = await session.get(DocumentVersion, created["current_version"]["id"])
             version.processing_status = "ready"
             version.structured_content = {"document_type":"docx", "blocks":[], "metadata":{
+                "docx_extraction":{"revision_view":{"included":1,"excluded":1}},
                 "word_embedded_ocr":{"status":"partial", "external_calls":0,
                     "items":[{"image_index":1,"body_index":2,"status":"failed"}]}}}
             await session.execute(delete(ProcessingJob).where(ProcessingJob.document_version_id == version.id))
@@ -834,4 +835,5 @@ def test_mixed_word_image_diagnostics_survive_lightweight_status_projection(clie
             await dependency.aclose()
     body = asyncio.run(run())
     assert body["stages"]["parsing"]["embedded_images"]["items"][0]["status"] == "failed"
-    assert body["stages"]["parsing"]["message"] == "正文已保留，部分内嵌图片需核验"
+    assert body["stages"]["parsing"]["message"].startswith("正文已保留，部分内嵌图片需核验")
+    assert "修订按最终文本读取" in body["stages"]["parsing"]["message"]

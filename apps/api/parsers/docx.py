@@ -7,12 +7,12 @@ _HEADING_STYLE_PATTERN = re.compile(
     r"(?:heading|titlelevel|标题)[\s_-]*(\d+)$", re.IGNORECASE
 )
 
-_DOCX_PARSER_VERSION = "1"
+_DOCX_PARSER_VERSION = "2"
 _DOCX_INDEX_SEMANTICS = (
     "paragraph_index 与 Block.extra.docx_body_index 相同，记录块在 DOCX 正文 "
     "(w:body) 直接子节点中按出现顺序的零基位置；仅统计 w:p 与 w:tbl 节点，"
-    "w:sectPr 不计数。空白段落计入索引但不输出块。嵌套表格与修订包装元素 "
-    "(w:sdt / w:ins / w:del / w:customXml 等) 当前不展开，复杂结构请回到原文核对。"
+    "w:sectPr 不计数。空白段落计入索引但不输出块。位置对应最终文本视图："
+    "新增/移入保留，删除/移出排除。嵌套表格与 w:sdt / w:customXml 当前不展开。"
 )
 
 
@@ -49,9 +49,9 @@ class DocxParser(BaseParser):
     ``Block.extra.docx_body_index``; the trailing ``w:sectPr`` is not
     counted and blank paragraphs are counted but never emitted.
 
-    The parser walks only direct body children. Nested tables and
-    revision wrappers (``w:sdt``, ``w:ins``, ``w:del``,
-    ``w:customXml`` ...) are intentionally not expanded; complex
+    The parser walks direct body children after resolving text revisions in
+    memory to the final view. Nested tables and content wrappers
+    (``w:sdt``, ``w:customXml`` ...) are intentionally not expanded; complex
     structures remain readable in the original file but their inner
     blocks are not turned into separate ``Block`` records. Full
     table metadata is deferred to a later CZ-N step.
@@ -77,6 +77,8 @@ class DocxParser(BaseParser):
             blocks: list[Block] = []
             heading_stack: list[tuple[int, str]] = []
             doc = Document(BytesIO(content))
+            from .word_revisions import final_text_view
+            revision_view = final_text_view(doc.element.body)
             w_p = qn("w:p")
             w_tbl = qn("w:tbl")
             body_index = 0
@@ -137,7 +139,7 @@ class DocxParser(BaseParser):
                         paragraph_index=current_index,
                         extra={"docx_body_index": current_index},
                     ))
-                # w:sectPr, w:sdt, w:ins, w:del, w:customXml and other
+                # w:sectPr, w:sdt, w:customXml and other
                 # body wrappers are intentionally skipped without
                 # contributing to body_index. See the class docstring.
 
@@ -150,6 +152,7 @@ class DocxParser(BaseParser):
                         "index_semantics": _DOCX_INDEX_SEMANTICS,
                         "nested_tables_supported": False,
                         "revision_tracking_supported": False,
+                        "revision_view": revision_view,
                         "body_indexed_children": body_index,
                         "embedded_image_count": sum(
                             1 for part in doc.part.related_parts.values()

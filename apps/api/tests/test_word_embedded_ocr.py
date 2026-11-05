@@ -181,7 +181,11 @@ def test_deleted_or_hidden_pictures_are_not_read(monkeypatch, hidden):
     output = BytesIO(); doc.save(output)
     result = DocxParser(PdfOcrOptions()).parse(output.getvalue())
     assert result.success and not calls
-    assert result.structured_content.metadata["word_embedded_ocr"]["items"][0]["status"] == "unsupported_structure"
+    if hidden:
+        assert result.structured_content.metadata["word_embedded_ocr"]["items"][0]["status"] == "unsupported_structure"
+    else:
+        assert result.structured_content.metadata["docx_extraction"]["revision_view"]["excluded"] == 1
+        assert not result.structured_content.metadata.get("word_embedded_ocr", {}).get("items")
 
 
 def test_unexpected_image_scan_failure_does_not_discard_body(monkeypatch):
